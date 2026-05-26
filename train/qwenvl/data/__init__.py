@@ -1,18 +1,36 @@
 import re
 
-EXAMPLE_GRM_FINETUNE = {
-    "annotation_path": "./dataset/train_data/train_jsons/finetune_data_final.json",
-    "data_path": "./dataset",
+MY_CARROT_DATASET = {
+    "annotation_path": "/home/dais/workspace/Robo-Dopamine/dataset/my_train_data/train_jsons/finetune_data_final.json",
+    "data_path": "/home/dais/workspace/Robo-Dopamine/dataset",
 }
 
-YOUR_OWN_DATASET = {
-    "annotation_path": "XXX",
-    "data_path": "XXX",
+SUB1_APPROACH_GRASP = {
+    "annotation_path": "/home/dais/workspace/Robo-Dopamine/dataset/sub1_train_data/train_jsons/finetune_data_final.json",
+    "data_path": "/home/dais/workspace/Robo-Dopamine/dataset",
+}
+
+SUC_1_CARROT = {
+    "annotation_path": "/home/dais/workspace/Robo-Dopamine/dataset/suc_1_train_data/train_jsons/finetune_data_final.json",
+    "data_path": "/home/dais/workspace/Robo-Dopamine/dataset",
+}
+
+SUC_3_BOTTLE = {
+    "annotation_path": "/home/dais/workspace/Robo-Dopamine/dataset/suc_3_train_data/train_jsons/finetune_data_final.json",
+    "data_path": "/home/dais/workspace/Robo-Dopamine/dataset",
+}
+
+SUC_4_CUBE = {
+    "annotation_path": "/home/dais/workspace/Robo-Dopamine/dataset/suc_4_train_data/train_jsons/finetune_data_final.json",
+    "data_path": "/home/dais/workspace/Robo-Dopamine/dataset",
 }
 
 data_dict = {
-    "example_grm_finetune": EXAMPLE_GRM_FINETUNE,
-    "your_own_dataset": YOUR_OWN_DATASET,
+    "my_carrot_dataset": MY_CARROT_DATASET,
+    "sub1_approach_grasp": SUB1_APPROACH_GRASP,
+    "suc_1_carrot": SUC_1_CARROT,
+    "suc_3_bottle": SUC_3_BOTTLE,
+    "suc_4_cube": SUC_4_CUBE,
 }
 
 

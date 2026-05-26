@@ -113,18 +113,18 @@ def load_task_instructions(ep_dir: Path) -> List[str]:
         print(f"[WARN] Error loading instructions for {ep_dir.name}: {e}")
         return default_instruction
 
-def build_images_rel(ep_name: str, first_id: str, last_id: str, before_id: str, after_id: str) -> List[str]:
+def build_images_rel(data_dir_name: str, ep_name: str, first_id: str, last_id: str, before_id: str, after_id: str) -> List[str]:
     rel = []
     # Reference Start
-    rel.append(f"train_data/{ep_name}/cam_high/frame_{first_id}.jpg")
+    rel.append(f"{data_dir_name}/{ep_name}/cam_high/frame_{first_id}.jpg")
     # Reference End
-    rel.append(f"train_data/{ep_name}/cam_high/frame_{last_id}.jpg")
+    rel.append(f"{data_dir_name}/{ep_name}/cam_high/frame_{last_id}.jpg")
     # Before images
     for cam in CAMERAS:
-        rel.append(f"train_data/{ep_name}/{cam}/frame_{before_id}.jpg")
+        rel.append(f"{data_dir_name}/{ep_name}/{cam}/frame_{before_id}.jpg")
     # After images
     for cam in CAMERAS:
-        rel.append(f"train_data/{ep_name}/{cam}/frame_{after_id}.jpg")
+        rel.append(f"{data_dir_name}/{ep_name}/{cam}/frame_{after_id}.jpg")
     return rel
 
 def format_score_tag(first_idx: int, before_idx: int, after_idx: int, last_idx: int):
@@ -353,7 +353,7 @@ def write_info_txt(ep_dir: Path, ep_name: str, ids: List[str], chosen_pairs: Lis
 
 # -------------------- Sub-process for single episode --------------------
 
-def process_episode(ep_dir: Path, m: int, seed: int, score_bins: int, gap_bins: int, oversample_factor: int, zero_ratio: float) -> Tuple[str, int]:
+def process_episode(ep_dir: Path, data_dir_name: str, m: int, seed: int, score_bins: int, gap_bins: int, oversample_factor: int, zero_ratio: float) -> Tuple[str, int]:
     """
     Returns (episode_name, item_count). Writes train.json and info.txt inside the subprocess.
     Note: train_id for each episode starts from 0000000.
@@ -406,10 +406,10 @@ def process_episode(ep_dir: Path, m: int, seed: int, score_bins: int, gap_bins: 
         after_idx = i_after + 1
         last_idx = n_ids
         score_tag, perc_score = format_score_tag(first_idx, before_idx, after_idx, last_idx)
-        images = build_images_rel(ep_name, first_id, last_id, before_id, after_id)
+        images = build_images_rel(data_dir_name, ep_name, first_id, last_id, before_id, after_id)
         perc_tag = "plus" if perc_score > 0 else ("minus" if perc_score < 0 else "zero") 
-
-        item_id = f"train_data_{ep_name}-train-bf_{before_id}-af_{after_id}-{perc_tag}-{str(train_counter).zfill(7)}"
+        
+        item_id = f"{data_dir_name}_{ep_name}-train-bf_{before_id}-af_{after_id}-{perc_tag}-{str(train_counter).zfill(7)}"
         
         # Randomly select a task instruction
         selected_instruction = rng.choice(instructions)
@@ -427,9 +427,9 @@ def process_episode(ep_dir: Path, m: int, seed: int, score_bins: int, gap_bins: 
 
     # Process zero samples
     for _i_before, _i_after_dummy, before_id_str, after_id_str in zero_pairs_detail:
-        images = build_images_rel(ep_name, first_id, last_id, before_id_str, after_id_str)
+        images = build_images_rel(data_dir_name, ep_name, first_id, last_id, before_id_str, after_id_str)
         perc_tag = "zero_extra"
-        item_id = f"train_data_{ep_name}-train-bf_{before_id_str}-af_{after_id_str}-{perc_tag}-{str(train_counter).zfill(7)}"
+        item_id = f"{data_dir_name}_{ep_name}-train-bf_{before_id_str}-af_{after_id_str}-{perc_tag}-{str(train_counter).zfill(7)}"
         
         # Randomly select a task instruction
         selected_instruction = rng.choice(instructions)
@@ -471,12 +471,14 @@ def main():
     args = parser.parse_args()
 
     base_dir = Path(args.base_dir).expanduser().resolve()
+    data_dir_name = base_dir.name  # e.g. "suc_3_train_data"
     episodes = list_episodes(base_dir)
     if not episodes:
         print(f"[ERROR] No episode_* dirs in {base_dir}")
         return
 
     print(f"Found {len(episodes)} episodes. Spawning {args.workers} worker(s).")
+    print(f"Data directory name (used as image path prefix): {data_dir_name}")
 
     results = []
     # Parallel processing
@@ -485,6 +487,7 @@ def main():
             ex.submit(
                 process_episode,
                 ep_dir,
+                data_dir_name,
                 args.max_sample_num,
                 args.seed,
                 args.score_bins,

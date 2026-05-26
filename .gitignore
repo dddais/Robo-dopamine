@@ -212,3 +212,6 @@ checkpoints/
 myrun.py
 
 dataset/train_data
+pretrained_models/
+aligned_data/
+dataset/

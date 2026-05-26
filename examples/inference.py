@@ -611,6 +611,8 @@ class GRMInference:
                 # raw_score is likely negative (Current is worse than Goal)
                 # Formula: Progress = 1 + ModelOutput
                 curr_progress = 1.0 + raw_score
+                #Clamp progress to reasonable bounds [0, 1] for safety;especially when goal image is blank.
+                curr_progress = max(0.0, min(1.0, curr_progress))
                 # Hop is the change in progress
                 hop = curr_progress - prev_prog
             
