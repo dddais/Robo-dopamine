@@ -26,7 +26,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+#default settings
 DEFAULT_MODEL_PATH = "/home/dais/workspace/Robo-Dopamine/train/checkpoints/my_carrot_finetune_big"
+DEFAULT_FRONT_TOPIC = "/camera/color/image_raw"
+DEFAULT_LEFT_TOPIC = "/camera/color/image_raw"
+DEFAULT_RIGHT_TOPIC = "/camera/color/image_raw"
+DEFAULT_TASK = "pick the carrot and put it on yellow plate"
+DEFAULT_GOAL_IMAGE = "./blank_goal.png"
+DEFAULT_OUT_ROOT = "./results/online"
+DEFAULT_SAMPLE_PERIOD = 1.0
+
 CAMERA_KEYS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 VALID_MODES = ("forward", "incremental", "backward")
 
@@ -104,13 +113,13 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model-path", default=DEFAULT_MODEL_PATH, help="GRM checkpoint or HF model path.")
-    parser.add_argument("--front-topic", required=True, help="ROS1 sensor_msgs/Image topic for the front camera.")
-    parser.add_argument("--left-topic", required=True, help="ROS1 sensor_msgs/Image topic for the left wrist camera.")
-    parser.add_argument("--right-topic", required=True, help="ROS1 sensor_msgs/Image topic for the right wrist camera.")
-    parser.add_argument("--task", required=True, help="Task instruction used in the GRM prompt.")
-    parser.add_argument("--goal-image", required=True, help="Real goal/reference image path for ref_end and backward mode.")
-    parser.add_argument("--out-root", default="./results/online", help="Root directory for online inference outputs.")
-    parser.add_argument("--sample-period", type=float, default=1.0, help="Minimum seconds between inference samples.")
+    parser.add_argument("--front-topic", default=DEFAULT_FRONT_TOPIC, help="ROS1 sensor_msgs/Image topic for the front camera.")
+    parser.add_argument("--left-topic", default=DEFAULT_LEFT_TOPIC, help="ROS1 sensor_msgs/Image topic for the left wrist camera.")
+    parser.add_argument("--right-topic", default=DEFAULT_RIGHT_TOPIC, help="ROS1 sensor_msgs/Image topic for the right wrist camera.")
+    parser.add_argument("--task", default=DEFAULT_TASK, help="Task instruction used in the GRM prompt.")
+    parser.add_argument("--goal-image", default=DEFAULT_GOAL_IMAGE, help="Real goal/reference image path for ref_end and backward mode.")
+    parser.add_argument("--out-root", default=DEFAULT_OUT_ROOT, help="Root directory for online inference outputs.")
+    parser.add_argument("--sample-period", type=float, default=DEFAULT_SAMPLE_PERIOD, help="Minimum seconds between inference samples.")
     parser.add_argument("--sync-slop", type=float, default=0.05, help="Approximate time sync tolerance in seconds.")
     parser.add_argument("--sync-queue-size", type=int, default=10, help="Approximate time sync queue size.")
     parser.add_argument("--wait-timeout", type=float, default=30.0, help="Seconds to wait for the first/new synchronized frame.")
