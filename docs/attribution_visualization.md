@@ -4,7 +4,7 @@
 
 > GRM 基于视频给出进度分数时，图像中哪些区域对分数起到了关键作用？
 
-脚本会输出带热力图叠加的视频，显示 attention 和 gradient attribution 两类可视化结果。
+脚本会输出带热力图叠加的视频，显示 attention rollout/raw attention 和 gradient attribution 两类可视化结果。
 
 ## 1. 本次新增内容
 
@@ -37,7 +37,7 @@ visualize_my_data_attribution.py
   - `cam_left_wrist`
   - `cam_right_wrist`
 - 每帧视频上下两排：
-  - 上排：attention heatmap
+  - 上排：attention heatmap，默认使用 Qwen3-VL 适配版 attention rollout
   - 下排：gradient attribution heatmap
 
 默认输出路径形如：
@@ -51,6 +51,7 @@ results/pick_3_fail/exp_suc1_inter20_ckpt_attribution/<timestamp>/<mode>_mode_<t
 ```text
 sample.json
 pred_attribution.json
+attention_diagnostics.json
 heatmaps/sample_XXXX.npz
 ```
 
@@ -104,7 +105,51 @@ Qwen3VLForConditionalGeneration.from_pretrained(...)
 
 ### 3.2 Attention heatmap
 
-attention heatmap 表示：
+脚本支持两种 attention 可视化方式：
+
+```text
+--attention-method rollout
+--attention-method raw
+```
+
+默认使用：
+
+```text
+--attention-method rollout
+--head-fusion max
+--discard-ratio 0.9
+```
+
+#### Attention rollout
+
+attention rollout 借鉴 `vit-explain` 中的 ViT Attention Rollout 思路，但针对 Qwen3-VL 做了适配。它表示：
+
+> score token 经过多层 Transformer attention 传播后，与哪些 image tokens 的信息流更强。
+
+实现方式：
+
+1. 注册 hook，抓取 Qwen3-VL text attention 模块的 attention weights。
+2. 默认只使用最后 `ATTENTION_LAST_N_LAYERS = 4` 层，降低内存成本。
+3. 每层先融合 attention heads：
+   - `mean`
+   - `max`
+   - `min`
+4. 默认使用 `max` fusion，更容易保留局部强响应。
+5. 可丢弃最低 attention 项：
+   - 默认 `discard_ratio = 0.9`
+   - 作用是抑制低权重噪声。
+6. 每层 attention 加 identity residual。
+7. 对每行重新归一化。
+8. 逐层矩阵相乘，得到跨层 attention rollout。
+9. 取 score answer token 到 image tokens 的 rollout 权重。
+10. 将 image token 权重映射回每张图的 patch grid。
+11. resize 到原图大小并叠加显示。
+
+这比旧版 raw attention 平均更接近 ViT 领域常用的 attention 可视化方式，也更适合缓解“最后层只关注输出格式”的问题。
+
+#### Raw attention
+
+raw attention 表示：
 
 > 模型生成 score token 时，最后若干层 text attention 看向哪些 image tokens。
 
@@ -118,7 +163,13 @@ attention heatmap 表示：
 6. 将 image token 的 attention 分数映射回每张图的 patch grid。
 7. resize 到原图大小并叠加显示。
 
-attention 更像是“模型生成分数时关注哪里”，不是严格因果解释。
+可以通过下面的参数切回旧版 raw attention：
+
+```bash
+python visualize_my_data_attribution.py --attention-method raw
+```
+
+attention heatmap 更像是“模型生成分数时关注哪里 / 信息流更偏向哪里”，不是严格因果解释。
 
 ### 3.3 Gradient attribution heatmap
 
@@ -161,7 +212,8 @@ gradient attribution 更接近 Grad-CAM / saliency 的思路，但不是传统 C
 
 ```text
 +----------------------+----------------------+----------------------+
-| attention cam_high   | attention left wrist | attention right wrist|
+| rollout attention    | rollout attention    | rollout attention    |
+| cam_high             | left wrist           | right wrist          |
 +----------------------+----------------------+----------------------+
 | gradient cam_high    | gradient left wrist  | gradient right wrist |
 +----------------------+----------------------+----------------------+
@@ -275,9 +327,28 @@ python visualize_my_data_attribution.py \
 --max-samples             每个模式最多处理多少个 sample，用于调试
 --min-pixels              图像最小像素限制
 --max-pixels              图像最大像素限制
+--attention-method        上排 attention 方法，可选 rollout 或 raw
+--head-fusion             rollout 的 head 融合方式，可选 mean max min
+--discard-ratio           rollout 中丢弃最低 attention 项的比例
 --pred-json-forward       forward 模式已有 pred_vllm.json
 --pred-json-incremental   incremental 模式已有 pred_vllm.json
 --pred-json-backward      backward 模式已有 pred_vllm.json
+```
+
+attention 相关参数示例：
+
+```bash
+# 默认：attention rollout + max head fusion + discard 90% low attention entries
+python visualize_my_data_attribution.py --attention-method rollout
+
+# 回到旧版 raw attention 平均
+python visualize_my_data_attribution.py --attention-method raw
+
+# 更保守的 rollout，不丢弃低权重
+python visualize_my_data_attribution.py --attention-method rollout --discard-ratio 0
+
+# 使用 mean head fusion
+python visualize_my_data_attribution.py --attention-method rollout --head-fusion mean
 ```
 
 ## 7. 性能和显存注意事项
@@ -309,6 +380,8 @@ python visualize_my_data_attribution.py \
    ```python
    ATTENTION_LAST_N_LAYERS = 1
    ```
+
+注意：attention rollout 会维护 `seq_len x seq_len` 的 rollout 矩阵。当前脚本只对最后几层做 rollout，以控制内存。若 prompt 或图像 token 数显著增加，仍可能比 raw attention 更占内存。
 
 ## 8. 已验证结果
 
@@ -343,11 +416,101 @@ results/attribution_smoke_3modes/26-05-26-22-39-53/backward_mode_pick_the_carrot
 576 x 1152 x 3
 ```
 
-## 9. 解释时的注意边界
+升级 attention rollout 后，额外完成单样本 forward smoke test：
 
-- attention heatmap 表示模型生成分数时的注意力分布，不等价于严格因果贡献。
+```bash
+python visualize_my_data_attribution.py \
+  --modes forward \
+  --max-samples 1 \
+  --out-root ./results/attribution_rollout_smoke
+```
+
+验证输出：
+
+```text
+results/attribution_rollout_smoke/26-05-27-14-01-53/forward_mode_pick_the_cube_and_put_it_on_yellow_plate_/attribution_vis.mp4
+```
+
+该视频可被 OpenCV 读取，`.npz` 中记录：
+
+```text
+attention_method = rollout
+head_fusion = max
+discard_ratio = 0.9
+```
+
+## 9. Attention 诊断输出
+
+脚本会额外保存：
+
+```text
+attention_diagnostics.json
+```
+
+该文件用于回答：
+
+> score token 的 attention/rollout 总量到底分给了哪里？
+
+每个 sample 会统计：
+
+```text
+non_image        文本 token、特殊 token、vision boundary token 等非图像位置
+image_total      所有 8 张图的 image tokens 总量
+reference_total  reference start + reference end / goal
+before_total     before high / left / right
+after_total      after high / left / right
+per_image        8 张图各自的 mass 和比例
+```
+
+控制台也会打印摘要，例如：
+
+```text
+[forward sample 0000] attention mass: image=2.31%, non_image=97.69%, reference=1.14%, before=0.82%, after=0.36% (after_cam_high=0.12%, after_cam_left_wrist=0.11%, after_cam_right_wrist=0.14%)
+```
+
+这个例子说明：当前 sample 的 rollout 总量只有 2.31% 分到 image tokens，after 三视角只有 0.36%。因此视频上排 attention heatmap 不明显是合理现象，不一定是可视化代码错误。
+
+查看诊断 JSON：
+
+```bash
+python - <<'PY'
+import json
+
+path = "results/attention_diag_smoke/26-05-27-15-11-53/forward_mode_pick_the_cube_and_put_it_on_yellow_plate_/attention_diagnostics.json"
+with open(path) as f:
+    data = json.load(f)
+
+d = data[0]
+print("method:", d["attention_method"])
+print("image_total:", d["image_total"]["pct_total"])
+print("non_image:", d["non_image"]["pct_total"])
+print("reference:", d["reference_total"]["pct_total"])
+print("before:", d["before_total"]["pct_total"])
+print("after:", d["after_total"]["pct_total"])
+for item in d["per_image"]:
+    print(item["index"], item["label"], item["pct_total"], item["pct_image_total"])
+PY
+```
+
+`.npz` 中也保存了同一份 sample 级诊断：
+
+```bash
+python - <<'PY'
+import json
+import numpy as np
+
+path = "results/attention_diag_smoke/26-05-27-15-11-53/forward_mode_pick_the_cube_and_put_it_on_yellow_plate_/heatmaps/sample_0000.npz"
+data = np.load(path, allow_pickle=True)
+diagnostic = json.loads(str(data["attention_diagnostic"]))
+print(json.dumps(diagnostic["after_total"], indent=2))
+PY
+```
+
+## 10. 解释时的注意边界
+
+- attention rollout/raw attention 表示模型生成分数时的注意力分布或跨层信息流，不等价于严格因果贡献。
 - gradient attribution 更接近“哪些 image tokens 会影响 score token 的概率”，但它仍是局部梯度解释。
 - 热力图颜色是单帧内归一化结果，主要用于观察一帧内哪些区域相对重要。
 - 多视角任务中，腕部视角可能对抓取、接触、滑移等细节更关键；主视角通常对全局位置和目标关系更关键。
 - 如果使用 blank goal image，`backward` 模式的解释意义需要谨慎理解，因为 goal anchor 本身不包含真实目标视觉信息。
-
+- 如果 `attention_diagnostics.json` 显示 `non_image` 占比很高、`after_total` 很低，那么上排 attention/rollout 图偏冷、偏不明显是预期现象。此时应优先参考 gradient attribution 或进一步做遮挡实验。

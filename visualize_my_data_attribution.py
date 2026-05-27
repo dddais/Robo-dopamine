@@ -43,7 +43,7 @@ from transformers import AutoConfig, AutoProcessor, Qwen3VLForConditionalGenerat
 # MODEL_PATH = "/home/dais/workspace/Robo-Dopamine/train/checkpoints/my_carrot_finetune_big"
 MODEL_PATH = './pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview'
 DATA_DIR = "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_1"
-OUTPUT_ROOT = "./results/eval_visual/exp_suc1_inter20_cube_ref_attribution"
+OUTPUT_ROOT = "./results/eval_visual/exp_suc1_inter20_cube_ref_attribution_new"
 
 TASK_INSTRUCTION = "pick the cube and put it on yellow plate "
 # GOAL_IMAGE = "./examples/blank_goal.png"
@@ -63,12 +63,25 @@ MAX_SAMPLES: Optional[int] = None
 MIN_PIXELS = 12544
 MAX_PIXELS = 76800
 ATTENTION_LAST_N_LAYERS = 4
+ATTENTION_METHOD = "rollout"  # "rollout" or "raw"
+HEAD_FUSION = "max"  # "mean", "max", or "min"
+DISCARD_RATIO = 0.9
 VIDEO_FPS = 4.0
 OVERLAY_ALPHA = 0.45
 
 
 AFTER_IMAGE_INDICES = [5, 6, 7]
 VIEW_LABELS = ["cam_high", "cam_left_wrist", "cam_right_wrist"]
+INPUT_IMAGE_LABELS = [
+    "reference_start",
+    "reference_end_or_goal",
+    "before_cam_high",
+    "before_cam_left_wrist",
+    "before_cam_right_wrist",
+    "after_cam_high",
+    "after_cam_left_wrist",
+    "after_cam_right_wrist",
+]
 
 
 def sanitize_task(task: str) -> str:
@@ -284,7 +297,7 @@ class QwenAttributor:
             offset += size
         return maps
 
-    def attention_maps(self, inputs: dict, answer_start: int) -> List[np.ndarray]:
+    def collect_attentions(self, inputs: dict) -> List[torch.Tensor]:
         captured = []
         handles = []
 
@@ -307,6 +320,36 @@ class QwenAttributor:
         for handle in handles:
             handle.remove()
 
+        return captured
+
+    def fuse_attention_heads(self, attn: torch.Tensor) -> torch.Tensor:
+        # attn: [heads, query_len, key_len]
+        if HEAD_FUSION == "mean":
+            return attn.mean(dim=0)
+        if HEAD_FUSION == "max":
+            return attn.max(dim=0).values
+        if HEAD_FUSION == "min":
+            return attn.min(dim=0).values
+        raise ValueError(f"Unsupported HEAD_FUSION: {HEAD_FUSION}")
+
+    def discard_low_attention(self, attn: torch.Tensor) -> torch.Tensor:
+        if DISCARD_RATIO <= 0:
+            return attn
+        if not (0 <= DISCARD_RATIO < 1):
+            raise ValueError(f"DISCARD_RATIO must be in [0, 1), got {DISCARD_RATIO}")
+
+        flat = attn.reshape(-1)
+        drop_count = int(flat.numel() * DISCARD_RATIO)
+        if drop_count <= 0:
+            return attn
+
+        _, indices = torch.topk(flat, drop_count, largest=False)
+        flat = flat.clone()
+        flat[indices] = 0
+        return flat.reshape_as(attn)
+
+    def raw_attention_maps(self, inputs: dict, answer_start: int) -> List[np.ndarray]:
+        captured = self.collect_attentions(inputs)
         image_slices = self.image_token_slices(inputs["input_ids"], inputs["image_grid_thw"])
         image_positions = torch.cat(
             [torch.arange(s.start, s.stop, dtype=torch.long) for s in image_slices]
@@ -325,6 +368,205 @@ class QwenAttributor:
             token_scores = torch.stack(layer_scores).mean(dim=0)
 
         return self.token_scores_to_maps(token_scores, inputs["image_grid_thw"])
+
+    def rollout_attention_maps(self, inputs: dict, answer_start: int) -> List[np.ndarray]:
+        captured = self.collect_attentions(inputs)
+        image_slices = self.image_token_slices(inputs["input_ids"], inputs["image_grid_thw"])
+        image_positions = torch.cat(
+            [torch.arange(s.start, s.stop, dtype=torch.long) for s in image_slices]
+        )
+        answer_end = inputs["input_ids"].shape[1]
+        query_positions = torch.arange(max(answer_start - 1, 0), max(answer_end - 1, answer_start))
+
+        if not captured or len(query_positions) == 0:
+            token_scores = torch.zeros(len(image_positions), dtype=torch.float32)
+            return self.token_scores_to_maps(token_scores, inputs["image_grid_thw"])
+
+        seq_len = inputs["input_ids"].shape[1]
+        device = torch.device("cpu")
+        rollout = torch.eye(seq_len, dtype=torch.float32, device=device)
+
+        with torch.no_grad():
+            for attn in captured:
+                fused = self.fuse_attention_heads(attn[0].float().cpu())
+                fused = self.discard_low_attention(fused)
+                fused = fused + torch.eye(seq_len, dtype=fused.dtype, device=device)
+                fused = fused / fused.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+                rollout = torch.matmul(fused, rollout)
+
+        token_scores = rollout[query_positions][:, image_positions].mean(dim=0)
+        return self.token_scores_to_maps(token_scores, inputs["image_grid_thw"])
+
+    def query_positions(self, inputs: dict, answer_start: int) -> torch.Tensor:
+        answer_end = inputs["input_ids"].shape[1]
+        return torch.arange(max(answer_start - 1, 0), max(answer_end - 1, answer_start))
+
+    def raw_attention_scores_from_captured(
+        self,
+        captured: List[torch.Tensor],
+        inputs: dict,
+        answer_start: int,
+    ) -> torch.Tensor:
+        query_positions = self.query_positions(inputs, answer_start)
+        seq_len = inputs["input_ids"].shape[1]
+
+        if not captured or len(query_positions) == 0:
+            return torch.zeros(seq_len, dtype=torch.float32)
+
+        layer_scores = []
+        for attn in captured:
+            picked = attn[0][:, query_positions, :]
+            layer_scores.append(picked.mean(dim=(0, 1)))
+        return torch.stack(layer_scores).mean(dim=0)
+
+    def rollout_attention_scores_from_captured(
+        self,
+        captured: List[torch.Tensor],
+        inputs: dict,
+        answer_start: int,
+    ) -> torch.Tensor:
+        query_positions = self.query_positions(inputs, answer_start)
+        seq_len = inputs["input_ids"].shape[1]
+
+        if not captured or len(query_positions) == 0:
+            return torch.zeros(seq_len, dtype=torch.float32)
+
+        device = torch.device("cpu")
+        rollout = torch.eye(seq_len, dtype=torch.float32, device=device)
+        with torch.no_grad():
+            for attn in captured:
+                fused = self.fuse_attention_heads(attn[0].float().cpu())
+                fused = self.discard_low_attention(fused)
+                fused = fused + torch.eye(seq_len, dtype=fused.dtype, device=device)
+                fused = fused / fused.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+                rollout = torch.matmul(fused, rollout)
+        return rollout[query_positions][:, :].mean(dim=0)
+
+    def select_attention_scores(
+        self,
+        raw_scores: torch.Tensor,
+        rollout_scores: torch.Tensor,
+    ) -> torch.Tensor:
+        if ATTENTION_METHOD == "raw":
+            return raw_scores
+        if ATTENTION_METHOD == "rollout":
+            return rollout_scores
+        raise ValueError(f"Unsupported ATTENTION_METHOD: {ATTENTION_METHOD}")
+
+    def token_group_distribution(
+        self,
+        token_scores: torch.Tensor,
+        inputs: dict,
+    ) -> Dict:
+        token_scores = token_scores.detach().float().cpu()
+        image_slices = self.image_token_slices(inputs["input_ids"], inputs["image_grid_thw"])
+
+        total_mass = float(token_scores.sum().item())
+        denom = total_mass if abs(total_mass) > 1e-12 else 1.0
+
+        per_image = []
+        image_total = 0.0
+        for idx, image_slice in enumerate(image_slices):
+            mass = float(token_scores[image_slice].sum().item())
+            image_total += mass
+            per_image.append(
+                {
+                    "index": idx,
+                    "label": INPUT_IMAGE_LABELS[idx] if idx < len(INPUT_IMAGE_LABELS) else f"image_{idx}",
+                    "token_count": image_slice.stop - image_slice.start,
+                    "mass": mass,
+                    "pct_total": mass / denom,
+                }
+            )
+
+        image_denom = image_total if abs(image_total) > 1e-12 else 1.0
+        for entry in per_image:
+            entry["pct_image_total"] = entry["mass"] / image_denom
+
+        def group_mass(indices: List[int]) -> float:
+            return float(sum(per_image[i]["mass"] for i in indices if i < len(per_image)))
+
+        reference_mass = group_mass([0, 1])
+        before_mass = group_mass([2, 3, 4])
+        after_mass = group_mass([5, 6, 7])
+        non_image_mass = total_mass - image_total
+
+        return {
+            "total_mass": total_mass,
+            "non_image": {
+                "mass": non_image_mass,
+                "pct_total": non_image_mass / denom,
+                "note": "Includes text tokens, vision boundary tokens, special tokens, and previous answer tokens.",
+            },
+            "image_total": {
+                "mass": image_total,
+                "pct_total": image_total / denom,
+            },
+            "reference_total": {
+                "mass": reference_mass,
+                "pct_total": reference_mass / denom,
+                "pct_image_total": reference_mass / image_denom,
+            },
+            "before_total": {
+                "mass": before_mass,
+                "pct_total": before_mass / denom,
+                "pct_image_total": before_mass / image_denom,
+            },
+            "after_total": {
+                "mass": after_mass,
+                "pct_total": after_mass / denom,
+                "pct_image_total": after_mass / image_denom,
+            },
+            "per_image": per_image,
+        }
+
+    def attention_diagnostics(
+        self,
+        selected_scores: torch.Tensor,
+        raw_scores: torch.Tensor,
+        rollout_scores: torch.Tensor,
+        inputs: dict,
+        answer_start: int,
+    ) -> Dict:
+        selected_distribution = self.token_group_distribution(selected_scores, inputs)
+        raw_distribution = self.token_group_distribution(raw_scores, inputs)
+        rollout_distribution = self.token_group_distribution(rollout_scores, inputs)
+        answer_end = inputs["input_ids"].shape[1]
+
+        return {
+            "attention_method": ATTENTION_METHOD,
+            "head_fusion": HEAD_FUSION if ATTENTION_METHOD == "rollout" else None,
+            "discard_ratio": DISCARD_RATIO if ATTENTION_METHOD == "rollout" else None,
+            "attention_last_n_layers": ATTENTION_LAST_N_LAYERS,
+            "seq_len": int(inputs["input_ids"].shape[1]),
+            "answer_start": int(answer_start),
+            "answer_token_count": int(max(answer_end - answer_start, 0)),
+            **selected_distribution,
+            "selected_distribution_note": (
+                "Top-level distribution matches the attention method used for the video heatmap."
+            ),
+            "raw_distribution": raw_distribution,
+            "rollout_distribution": rollout_distribution,
+        }
+
+    def attention_maps(self, inputs: dict, answer_start: int) -> Tuple[List[np.ndarray], Dict]:
+        captured = self.collect_attentions(inputs)
+        raw_scores = self.raw_attention_scores_from_captured(captured, inputs, answer_start)
+        rollout_scores = self.rollout_attention_scores_from_captured(captured, inputs, answer_start)
+        token_scores = self.select_attention_scores(raw_scores, rollout_scores)
+        image_slices = self.image_token_slices(inputs["input_ids"], inputs["image_grid_thw"])
+        image_positions = torch.cat(
+            [torch.arange(s.start, s.stop, dtype=torch.long) for s in image_slices]
+        )
+        maps = self.token_scores_to_maps(token_scores[image_positions], inputs["image_grid_thw"])
+        diagnostics = self.attention_diagnostics(
+            token_scores,
+            raw_scores,
+            rollout_scores,
+            inputs,
+            answer_start,
+        )
+        return maps, diagnostics
 
     def gradient_maps(self, inputs: dict, answer_start: int) -> List[np.ndarray]:
         self.model.zero_grad(set_to_none=True)
@@ -442,7 +684,7 @@ def make_video_frame(
             overlay_heatmap(
                 item["image"][image_idx],
                 attention_maps[image_idx],
-                f"attention | {view_label}",
+                f"{ATTENTION_METHOD} attention | {view_label}",
             )
         )
         bottom.append(
@@ -505,6 +747,31 @@ def load_external_predictions(mode: str) -> Optional[List[dict]]:
     return data
 
 
+def format_pct(value: float) -> str:
+    return f"{100.0 * value:.2f}%"
+
+
+def print_attention_diagnostic(eval_mode: str, sample_idx: int, diagnostic: Dict) -> None:
+    after = diagnostic["after_total"]["pct_total"]
+    before = diagnostic["before_total"]["pct_total"]
+    reference = diagnostic["reference_total"]["pct_total"]
+    image = diagnostic["image_total"]["pct_total"]
+    non_image = diagnostic["non_image"]["pct_total"]
+    per_after = {
+        entry["label"]: entry["pct_total"]
+        for entry in diagnostic["per_image"]
+        if entry["label"].startswith("after_")
+    }
+    after_parts = ", ".join(f"{key}={format_pct(value)}" for key, value in per_after.items())
+    print(
+        f"[{eval_mode} sample {sample_idx:04d}] attention mass: "
+        f"image={format_pct(image)}, non_image={format_pct(non_image)}, "
+        f"reference={format_pct(reference)}, before={format_pct(before)}, "
+        f"after={format_pct(after)}"
+        + (f" ({after_parts})" if after_parts else "")
+    )
+
+
 def run_mode(attributor: QwenAttributor, eval_mode: str, out_root: Path) -> None:
     run_root = out_root / f"{eval_mode}_mode_{sanitize_task(TASK_INSTRUCTION)}"
     ensure_dir(run_root)
@@ -524,6 +791,7 @@ def run_mode(attributor: QwenAttributor, eval_mode: str, out_root: Path) -> None
         json.dump(samples, f, indent=2, ensure_ascii=False)
 
     frames = []
+    diagnostics = []
     heatmap_root = run_root / "heatmaps"
     ensure_dir(heatmap_root)
 
@@ -532,13 +800,24 @@ def run_mode(attributor: QwenAttributor, eval_mode: str, out_root: Path) -> None
         if not pred:
             pred = "<score>0%</score>"
         inputs, answer_start = attributor.make_inputs(item, suffix=pred)
-        attention = attributor.attention_maps(inputs, answer_start)
+        attention, attention_diagnostic = attributor.attention_maps(inputs, answer_start)
         gradient = attributor.gradient_maps(inputs, answer_start)
+        attention_diagnostic["sample_index"] = idx
+        attention_diagnostic["id"] = item.get("id")
+        attention_diagnostic["pred"] = pred
+        attention_diagnostic["hop"] = float(item.get("hop", 0.0))
+        attention_diagnostic["progress"] = float(item.get("progress", 0.0))
+        diagnostics.append(attention_diagnostic)
+        print_attention_diagnostic(eval_mode, idx, attention_diagnostic)
 
         np.savez_compressed(
             heatmap_root / f"sample_{idx:04d}.npz",
             attention=np.array(attention, dtype=object),
             gradient=np.array(gradient, dtype=object),
+            attention_method=ATTENTION_METHOD,
+            head_fusion=HEAD_FUSION,
+            discard_ratio=DISCARD_RATIO,
+            attention_diagnostic=json.dumps(attention_diagnostic, ensure_ascii=False),
         )
         frames.append(make_video_frame(item, attention, gradient))
 
@@ -548,6 +827,9 @@ def run_mode(attributor: QwenAttributor, eval_mode: str, out_root: Path) -> None
             torch.cuda.empty_cache()
 
     write_video(frames, run_root / "attribution_vis.mp4")
+    with open(run_root / "attention_diagnostics.json", "w", encoding="utf-8") as f:
+        json.dump(diagnostics, f, indent=2, ensure_ascii=False)
+    print(f"Saved: {run_root / 'attention_diagnostics.json'}")
 
 
 def main() -> None:
@@ -562,6 +844,9 @@ def main() -> None:
     global MIN_PIXELS
     global MAX_PIXELS
     global PRED_JSON_BY_MODE
+    global ATTENTION_METHOD
+    global HEAD_FUSION
+    global DISCARD_RATIO
 
     parser = argparse.ArgumentParser(
         description="Generate attention and gradient attribution videos for Robo-Dopamine GRM."
@@ -586,6 +871,24 @@ def main() -> None:
     )
     parser.add_argument("--min-pixels", type=int, default=MIN_PIXELS)
     parser.add_argument("--max-pixels", type=int, default=MAX_PIXELS)
+    parser.add_argument(
+        "--attention-method",
+        default=ATTENTION_METHOD,
+        choices=["rollout", "raw"],
+        help="How to compute the top-row attention heatmap.",
+    )
+    parser.add_argument(
+        "--head-fusion",
+        default=HEAD_FUSION,
+        choices=["mean", "max", "min"],
+        help="How to fuse attention heads for rollout.",
+    )
+    parser.add_argument(
+        "--discard-ratio",
+        type=float,
+        default=DISCARD_RATIO,
+        help="Fraction of lowest attention entries to discard in rollout.",
+    )
     parser.add_argument("--pred-json-forward", default=None)
     parser.add_argument("--pred-json-incremental", default=None)
     parser.add_argument("--pred-json-backward", default=None)
@@ -601,6 +904,9 @@ def main() -> None:
     MAX_SAMPLES = args.max_samples
     MIN_PIXELS = args.min_pixels
     MAX_PIXELS = args.max_pixels
+    ATTENTION_METHOD = args.attention_method
+    HEAD_FUSION = args.head_fusion
+    DISCARD_RATIO = args.discard_ratio
     PRED_JSON_BY_MODE = {
         mode: path
         for mode, path in {
