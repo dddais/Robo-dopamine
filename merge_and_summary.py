@@ -43,9 +43,19 @@ def load_results():
 
 def _make_table(fig_ax, title, row_labels, col_labels, cell_text, cell_colors,
                 col_header_color="#d0d0d0", row_label_color="#f0f0f0",
-                fontsize=8, save_path=None):
-    """通用表格绘制工具"""
+                fontsize=8, save_path=None, max_cols=None):
+    """通用表格绘制工具，支持列过多时自动换行分排"""
+    use_wrapped = max_cols is not None and len(col_labels) > max_cols
+
+    if use_wrapped:
+        if fig_ax is not None:
+            plt.close(fig_ax[0])
+        _make_wrapped_table(title, row_labels, col_labels, cell_text, cell_colors,
+                            col_header_color, row_label_color, fontsize, save_path, max_cols)
+        return
+
     fig, ax = fig_ax
+
     ax.axis("off")
     ax.set_title(title, fontsize=13, fontweight="bold", pad=20)
 
@@ -72,9 +82,65 @@ def _make_table(fig_ax, title, row_labels, col_labels, cell_text, cell_colors,
     plt.close(fig)
 
 
+def _make_wrapped_table(title, row_labels, col_labels, cell_text, cell_colors,
+                        col_header_color, row_label_color, fontsize, save_path, max_cols):
+    """将过多列拆成多排，每排最多 max_cols 列"""
+    n_cols = len(col_labels)
+    n_chunks = (n_cols + max_cols - 1) // max_cols
+    n_models = len(row_labels)
+
+    row_h = 0.5
+    header_h = 0.6
+    title_h = 0.6
+    gap_h = 0.3
+    total_h = title_h + n_chunks * (header_h + n_models * row_h + gap_h)
+    col_w = 1.6
+    total_w = max(max_cols + 1, 10) * col_w
+
+    fig, axes = plt.subplots(n_chunks, 1,
+                             figsize=(total_w, total_h),
+                             gridspec_kw={"hspace": 0.15})
+    if n_chunks == 1:
+        axes = [axes]
+
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=0.99)
+
+    for ci, ax in enumerate(axes):
+        start = ci * max_cols
+        end = min(start + max_cols, n_cols)
+        chunk_cols = col_labels[start:end]
+        chunk_text = [row[start:end] for row in cell_text]
+        chunk_colors = [row[start:end] for row in cell_colors]
+
+        ax.axis("off")
+
+        full_col_labels = ["Model \\ Data"] + chunk_cols if row_labels else chunk_cols
+        full_col_colors = [col_header_color] * len(full_col_labels)
+
+        all_cell_text = []
+        all_cell_colors = []
+        for i, rl in enumerate(row_labels):
+            all_cell_text.append([rl] + chunk_text[i])
+            all_cell_colors.append([row_label_color] + chunk_colors[i])
+
+        tbl = ax.table(
+            cellText=all_cell_text, colLabels=full_col_labels,
+            cellColours=all_cell_colors, colColours=full_col_colors,
+            loc="center", cellLoc="center",
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(fontsize)
+        tbl.scale(1.0, 2.0)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def generate_summary_tables(all_results):
     """生成所有汇总表格（所有表格都包含 data 维度）"""
-    output_dir = os.path.join(OUTPUT_ROOT, "summary_GRM8B")
+    output_dir = os.path.join(OUTPUT_ROOT, "summary_GRM8B_new")
     os.makedirs(output_dir, exist_ok=True)
 
     model_tags = sorted(set(r["model_tag"] for r in all_results))
@@ -122,10 +188,6 @@ def generate_summary_tables(all_results):
     # -------------------------------------------------------
     # 表1: 全量表格 (Model × Data_Goal_Inter_Task)
     # -------------------------------------------------------
-    fig1, ax1 = plt.subplots(figsize=(max(20, len(combo_keys) * 1.2), max(6, len(model_tags) * 1.5 + 2)))
-    ax1.axis("off")
-    ax1.set_title("Average Progress Summary (Full Table)", fontsize=14, fontweight="bold", pad=20)
-
     col_labels = [f"{ck[0]}\ngoal={ck[1]}\ninter={ck[2]}\ntask={ck[3]}" for ck in combo_keys]
     cell_text = []
     cell_colors = []
@@ -149,9 +211,10 @@ def generate_summary_tables(all_results):
         cell_text.append(row)
         cell_colors.append(row_colors)
 
-    _make_table((fig1, ax1), "Average Progress Summary (Full Table)",
+    _make_table(None, "Average Progress Summary (Full Table)",
                 model_tags, col_labels, cell_text, cell_colors, fontsize=6,
-                save_path=os.path.join(output_dir, "summary_full_table.png"))
+                save_path=os.path.join(output_dir, "summary_full_table.png"),
+                max_cols=15)
     print("Saved: summary_full_table.png")
 
     # -------------------------------------------------------
@@ -196,10 +259,10 @@ def generate_summary_tables(all_results):
         cell_colors3.append(row_colors)
 
     col_labels3 = [f"{dt}\n{tt}" for dt in data_tags for tt in task_tags]
-    fig3, ax3 = plt.subplots(figsize=(max(16, len(col_labels3) * 1.4), max(4, len(model_tags) * 1.5 + 2)))
-    _make_table((fig3, ax3), "Avg Progress by Model × Data × Task\n(mean over goal/interval)",
+    _make_table(None, "Avg Progress by Model × Data × Task\n(mean over goal/interval)",
                 model_tags, col_labels3, cell_text3, cell_colors3, fontsize=7,
-                save_path=os.path.join(output_dir, "summary_by_model_data_task.png"))
+                save_path=os.path.join(output_dir, "summary_by_model_data_task.png"),
+                max_cols=15)
     print("Saved: summary_by_model_data_task.png")
 
     # -------------------------------------------------------
@@ -246,10 +309,10 @@ def generate_summary_tables(all_results):
         cell_colors5.append(row_colors)
 
     col_labels5 = [f"{dt}\ninter={iv}" for dt in data_tags for iv in INTERVALS]
-    fig5, ax5 = plt.subplots(figsize=(max(12, len(col_labels5) * 1.5), max(4, len(model_tags) * 1.5 + 2)))
-    _make_table((fig5, ax5), "Avg Progress by Model × Data × Interval\n(mean over goal/task)",
+    _make_table(None, "Avg Progress by Model × Data × Interval\n(mean over goal/task)",
                 model_tags, col_labels5, cell_text5, cell_colors5, fontsize=8,
-                save_path=os.path.join(output_dir, "summary_by_model_data_interval.png"))
+                save_path=os.path.join(output_dir, "summary_by_model_data_interval.png"),
+                max_cols=15)
     print("Saved: summary_by_model_data_interval.png")
 
     # -------------------------------------------------------
@@ -294,10 +357,10 @@ def generate_summary_tables(all_results):
         cell_colors7.append(row_colors)
 
     col_labels7 = [f"{dt}\ninter={iv}" for dt in data_tags for iv in INTERVALS]
-    fig7, ax7 = plt.subplots(figsize=(max(12, len(col_labels7) * 1.5), max(4, len(model_tags) * 1.5 + 2)))
-    _make_table((fig7, ax7), "Avg Per-Frame Inference Time (s) by Model × Data × Interval\n(mean over goal/task)",
+    _make_table(None, "Avg Per-Frame Inference Time (s) by Model × Data × Interval\n(mean over goal/task)",
                 model_tags, col_labels7, cell_text7, cell_colors7, fontsize=8,
-                save_path=os.path.join(output_dir, "summary_time_by_model_data_interval.png"))
+                save_path=os.path.join(output_dir, "summary_time_by_model_data_interval.png"),
+                max_cols=15)
     print("Saved: summary_time_by_model_data_interval.png")
 
     # -------------------------------------------------------

@@ -12,7 +12,7 @@ import cv2
 
 # ===================== 配置区 =====================
 # VIDEO_PATH = "/home/dais/workspace/bag2video/pick_3_suc@MASTER_SLAVE_MODE@2026_05_12_23_05_32/cam_high.mp4"
-VIDEO_PATH = "/home/dais/workspace/bag2video/pick_3_fail@MASTER_SLAVE_MODE@2026_05_12_23_15_05/cam_high.mp4"
+VIDEO_PATH = "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_4_cube/cam_high.mp4"
 OUTPUT_DIR = "/home/dais/workspace/Robo-Dopamine/examples/"
 
 # 选择模式（取消注释你想用的那一行，其余保持注释）
@@ -23,7 +23,7 @@ MODE = "timestamps"  # 按时间戳（秒）提取
 
 # --- 模式参数（按需填写） ---
 FRAME_INDICES = [0, 10, 20, 50, 100]        # MODE="indices" 时生效
-TIMESTAMPS = [9]                # MODE="timestamps" 时生效，单位：秒
+TIMESTAMPS = [21]                # MODE="timestamps" 时生效，单位：秒
 RANGE = (0, 600, 10)                         # MODE="range" 时生效: (起始帧, 结束帧, 步长)
 # ================================================
 
