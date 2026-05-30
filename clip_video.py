@@ -25,7 +25,7 @@ def get_frame_count(video_path: str) -> int:
     return count
 
 
-def clip_video(src: str, dst: str, target_frames: int) -> int:
+def clip_video(src: str, dst: str, target_frames: int, start_frame: int = 0) -> int:
     cap = cv2.VideoCapture(src)
     fps = cap.get(cv2.CAP_PROP_FPS)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -33,6 +33,9 @@ def clip_video(src: str, dst: str, target_frames: int) -> int:
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(dst, fourcc, fps, (w, h))
+
+    if start_frame > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
     count = 0
     while count < target_frames:
@@ -53,8 +56,9 @@ def main():
     # parser.add_argument("--dst", required=True, help="输出目录")
     # args = parser.parse_args()
 
-    SRC = "/home/dais/workspace/bag2video/pick_3_fail@MASTER_SLAVE_MODE@2026_05_12_23_25_29"
-    DST = "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_13_cube"
+    SRC = "/mnt/public1/dais/data_xuzhexuan/2025-challenge-demos/episode_1"
+    DST = "/home/dais/workspace/Robo-Dopamine/aligned_data/xzx_episode_1_sub2"
+    START_FRAME = 750  # 从第几帧开始截取
     os.makedirs(DST, exist_ok=True)
 
 
@@ -68,7 +72,8 @@ def main():
         frame_counts[cam] = get_frame_count(path)
 
     min_frames = min(frame_counts.values())
-    # min_frames = 250
+    target_frames = 1400
+    min_frames = target_frames - START_FRAME
 
     print(f"源目录: {SRC}")
     print(f"帧数统计:")
@@ -76,13 +81,14 @@ def main():
         tag = " <-- 最短" if cnt == min_frames else ""
         print(f"  {cam}: {cnt} 帧{tag}")
     print(f"对齐目标: {min_frames} 帧")
+    print(f"起始帧: {START_FRAME}")
     print()
 
     # 2. 截齐到最短帧数
     for cam in CAMERAS:
         src = os.path.join(SRC, f"{cam}.mp4")
         dst = os.path.join(DST, f"{cam}.mp4")
-        wrote = clip_video(src, dst, min_frames)
+        wrote = clip_video(src, dst, min_frames, start_frame=START_FRAME)
         print(f"  {cam}: {wrote} 帧 -> {dst}")
 
     print(f"\n完成! 对齐后的视频已保存到 {DST}")
