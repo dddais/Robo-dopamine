@@ -27,11 +27,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 #default settings
-DEFAULT_MODEL_PATH = "/home/dais/workspace/Robo-Dopamine/train/checkpoints/my_carrot_finetune_big"
-DEFAULT_FRONT_TOPIC = "/camera/color/image_raw"
-DEFAULT_LEFT_TOPIC = "/camera/color/image_raw"
-DEFAULT_RIGHT_TOPIC = "/camera/color/image_raw"
-DEFAULT_TASK = "pick the carrot and put it on yellow plate"
+DEFAULT_MODEL_PATH = "/home/ubuntu/dais/Robo-dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-4B-Preview"
+DEFAULT_FRONT_TOPIC = "/rgbd_splitter/output_rgb"
+DEFAULT_LEFT_TOPIC = "/rgbd_splitter/output_rgb"
+DEFAULT_RIGHT_TOPIC = "/rgbd_splitter/output_rgb"
+DEFAULT_TASK = "pick the bottle and put it into the bag"
 DEFAULT_GOAL_IMAGE = "./blank_goal.png"
 DEFAULT_OUT_ROOT = "./results/online"
 DEFAULT_SAMPLE_PERIOD = 1.0
