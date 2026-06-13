@@ -53,8 +53,8 @@ def main():
     # parser.add_argument("--dst", required=True, help="输出目录")
     # args = parser.parse_args()
 
-    SRC = "/home/dais/workspace/bag2video/pick_3_fail@MASTER_SLAVE_MODE@2026_05_12_23_25_29"
-    DST = "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_13_cube"
+    SRC = "/mnt/public1/dais/data_xuzhexuan/2025-challenge-demos/episode_2"
+    DST = "/home/dais/workspace/Robo-Dopamine/aligned_data/xzx_episode_2"
     os.makedirs(DST, exist_ok=True)
 
 
