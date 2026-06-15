@@ -14,9 +14,16 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from monitor_runtime.core import MONITOR_STATUS_FAIL, MONITOR_STATUS_RUNNING, MONITOR_STATUS_SUCCESS, MonitorSession
+
+DEFAULT_GRM_MODEL_PATH = (
+    "/home/ubuntu/dais/Robo-dopamine/pretrained_models/"
+    "Robo-Dopamine-GRM-2.0-4B-Preview"
+)
+DEFAULT_GRM_GOAL_IMAGE = str(Path(__file__).resolve().parents[1] / "examples" / "blank_goal.png")
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -65,7 +72,10 @@ class DeterministicMonitorBackend:
         progress = session.progress
         observation_result: dict[str, Any] = {}
         if self.observation_client is not None:
-            observation_result = self.observation_client.fetch()
+            try:
+                observation_result = self.observation_client.fetch()
+            except Exception as exc:
+                observation_result = {"error": str(exc)}
         if self.auto_success_after_polls and poll_count >= self.auto_success_after_polls:
             status = MONITOR_STATUS_SUCCESS
             progress = 1.0
@@ -171,18 +181,19 @@ class RobotRuntimeObservationClient:
 
 def create_app(backend: DeterministicMonitorBackend | None = None) -> "FastAPI":
     from fastapi import FastAPI
+    from starlette.concurrency import run_in_threadpool
 
     backend = backend or DeterministicMonitorBackend()
     app = FastAPI(title="Robo-Dopamine Monitor Service")
 
     @app.get("/health")
     async def health():
-        return _ok(backend.health())
+        return _ok(await run_in_threadpool(backend.health))
 
     @app.post("/monitors/start")
     async def monitors_start(body: dict[str, Any]):
         try:
-            session = backend.start(body)
+            session = await run_in_threadpool(backend.start, body)
         except ValueError as exc:
             return _fail(str(exc), status=400)
         return _ok(session.to_dict())
@@ -190,7 +201,7 @@ def create_app(backend: DeterministicMonitorBackend | None = None) -> "FastAPI":
     @app.post("/monitors/status")
     async def monitors_status(body: dict[str, Any]):
         try:
-            session = backend.status(body)
+            session = await run_in_threadpool(backend.status, body)
         except KeyError as exc:
             return _fail(str(exc), status=404)
         except ValueError as exc:
@@ -199,7 +210,7 @@ def create_app(backend: DeterministicMonitorBackend | None = None) -> "FastAPI":
 
     @app.post("/monitors/stop")
     async def monitors_stop(body: dict[str, Any]):
-        return _ok(backend.stop(body))
+        return _ok(await run_in_threadpool(backend.stop, body))
 
     return app
 
@@ -222,42 +233,183 @@ def _safe_path(path: str) -> str:
     return path
 
 
-def main(argv: list[str] | None = None) -> int:
+def _load_config(path: str | None) -> dict[str, Any]:
+    """Load YAML config. Returns {} when path is None/empty."""
+    if not path:
+        return {}
+    import yaml
+
+    cfg_path = Path(path).expanduser().resolve()
+    if not cfg_path.is_file():
+        raise FileNotFoundError(f"config file not found: {cfg_path}")
+    with cfg_path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"config root must be a mapping, got {type(data).__name__}")
+    return data
+
+
+def _build_argparser(config: dict[str, Any]) -> argparse.ArgumentParser:
+    """Build the argparser, using config values as defaults.
+
+    CLI flags override the config: argparse sees config values as ``default``,
+    so any flag the user actually passes wins, and unmentioned flags fall back
+    to the config (or to the hard-coded default when the config omits the key).
+    """
+    def cfg(name: str, fallback: Any) -> Any:
+        return config.get(name, fallback)
+
     parser = argparse.ArgumentParser(description="Robo-Dopamine monitor service")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8877)
-    parser.add_argument("--auto-success-after-polls", type=int, default=0)
+    parser.add_argument("--host", default=cfg("host", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=cfg("port", 8877))
+    parser.add_argument(
+        "--backend",
+        choices=("deterministic", "grm"),
+        default=cfg("backend", "deterministic"),
+        help="Monitor backend. 'grm' runs online Robo-Dopamine-GRM inference on each poll.",
+    )
+    parser.add_argument(
+        "--auto-success-after-polls",
+        type=int,
+        default=cfg("auto_success_after_polls", 0),
+    )
     parser.add_argument(
         "--robot-runtime-url",
-        default=None,
-        help="Optional Robot Runtime URL used to fetch binary JPEG observations.",
+        default=cfg("robot_runtime_url", "http://192.168.120.143:8767"),
+        help="Robot Runtime URL used to fetch binary JPEG observations.",
     )
     parser.add_argument(
         "--camera",
         action="append",
-        default=[],
+        default=cfg("cameras", None) or None,
         help="Camera to fetch from Robot Runtime; repeatable. Defaults to all dual-Franka cameras.",
     )
-    parser.add_argument("--observation-timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--observation-timeout",
+        type=float,
+        default=cfg("observation_timeout", 3.0),
+    )
+
+    # --- GRM backend options (only used when --backend grm) ---
+    parser.add_argument(
+        "--model-path",
+        default=cfg("model_path", DEFAULT_GRM_MODEL_PATH),
+        help="GRM checkpoint or HF model path.",
+    )
+    parser.add_argument(
+        "--goal-image",
+        default=cfg("goal_image", DEFAULT_GRM_GOAL_IMAGE),
+        help="Goal/reference image for ref_end and backward mode. "
+             "Defaults to examples/blank_goal.png (no target).",
+    )
+    parser.add_argument(
+        "--fisheye-config",
+        default=cfg("fisheye_config", None),
+        help="Optional fisheye_process/config.yaml to undistort wrist cameras.",
+    )
+    parser.add_argument(
+        "--no-backward",
+        action="store_true",
+        default=bool(cfg("no_backward", False)),
+        help="Exclude backward mode from GRM inference and fused progress.",
+    )
+    parser.add_argument(
+        "--success-threshold",
+        type=float,
+        default=cfg("success_threshold", 0.60),
+    )
+    parser.add_argument(
+        "--success-stable-steps",
+        type=int,
+        default=cfg("success_stable_steps", 5),
+    )
+    parser.add_argument(
+        "--success-max-drift",
+        type=float,
+        default=cfg("success_max_drift", 0.02),
+    )
+    parser.add_argument(
+        "--fail-stable-steps",
+        type=int,
+        default=cfg("fail_stable_steps", 8),
+    )
+    parser.add_argument(
+        "--fail-min-progress",
+        type=float,
+        default=cfg("fail_min_progress", 0.01),
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=cfg("interval", 1.0),
+        help="Seconds between GRM inference steps (background cadence).",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Two-phase parse: first peel off --config so we can use the YAML as the
+    # source of argparse defaults; the second (real) parse then lets any
+    # explicitly-passed CLI flag override the config.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default=None)
+    known, _remaining = pre.parse_known_args(argv)
+    config = _load_config(known.config)
+
+    parser = _build_argparser(config)
+    parser.add_argument(
+        "--config",
+        default=known.config,
+        help="Path to a YAML config file. CLI flags override values in the file.",
+    )
     args = parser.parse_args(argv)
 
     import uvicorn
 
-    observation_client = None
-    if args.robot_runtime_url:
-        observation_client = RobotRuntimeObservationClient(
+    backend: DeterministicMonitorBackend | "GRMMonitorBackend"
+    if args.backend == "grm":
+        from monitor_runtime.grm_backend import (
+            GRMMonitorBackend,
+            init_fisheye_remap,
+            VALID_MODES,
+        )
+
+        fisheye_remap = None
+        if args.fisheye_config:
+            fisheye_remap = init_fisheye_remap(args.fisheye_config)
+
+        active_modes = [m for m in VALID_MODES if not (args.no_backward and m == "backward")]
+
+        backend = GRMMonitorBackend(
+            model_path=args.model_path,
+            goal_image=args.goal_image,
             runtime_url=args.robot_runtime_url,
             cameras=args.camera or None,
-            timeout=args.observation_timeout,
+            observation_timeout=args.observation_timeout,
+            fisheye_remap=fisheye_remap,
+            active_modes=active_modes,
+            interval=args.interval,
+            success_threshold=args.success_threshold,
+            success_stable_steps=args.success_stable_steps,
+            success_max_drift=args.success_max_drift,
+            fail_stable_steps=args.fail_stable_steps,
+            fail_min_progress=args.fail_min_progress,
+        )
+    else:
+        observation_client = None
+        if args.robot_runtime_url:
+            observation_client = RobotRuntimeObservationClient(
+                runtime_url=args.robot_runtime_url,
+                cameras=args.camera or None,
+                timeout=args.observation_timeout,
+            )
+        backend = DeterministicMonitorBackend(
+            auto_success_after_polls=args.auto_success_after_polls,
+            observation_client=observation_client,
         )
 
     uvicorn.run(
-        create_app(
-            DeterministicMonitorBackend(
-                auto_success_after_polls=args.auto_success_after_polls,
-                observation_client=observation_client,
-            )
-        ),
+        create_app(backend),
         host=args.host,
         port=args.port,
         log_level="info",
