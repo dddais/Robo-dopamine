@@ -38,10 +38,11 @@ model_path: /home/ubuntu/dais/Robo-dopamine/pretrained_models/Robo-Dopamine-GRM-
 goal_image: /home/ubuntu/dais/Robo-dopamine/examples/blank_goal.png
 
 # 鱼眼去畸变配置 (fisheye_process/config.yaml)。不需要去畸变就留 null
+# fisheye_config: /home/ubuntu/dais/fisheye_process/config.yaml
 fisheye_config: null
 
 # 是否禁用 backward 模式 (禁用后只跑 forward + incremental)
-no_backward: false
+no_backward: true
 
 # 后台推理节拍 (秒)。GRM 在独立线程按此间隔持续推理, poll 只读最新结果
 interval: 1.0

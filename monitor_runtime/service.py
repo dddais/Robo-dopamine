@@ -264,9 +264,11 @@ def _build_argparser(config: dict[str, Any]) -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=cfg("port", 8877))
     parser.add_argument(
         "--backend",
-        choices=("deterministic", "grm"),
+        choices=("deterministic", "grm", "scripted"),
         default=cfg("backend", "deterministic"),
-        help="Monitor backend. 'grm' runs online Robo-Dopamine-GRM inference on each poll.",
+        help="Monitor backend. 'grm' runs online Robo-Dopamine-GRM inference on each poll. "
+             "'scripted' replays a predefined progress curve from the config (offline, "
+             "no model, no robot runtime).",
     )
     parser.add_argument(
         "--auto-success-after-polls",
@@ -344,6 +346,27 @@ def _build_argparser(config: dict[str, Any]) -> argparse.ArgumentParser:
         default=cfg("interval", 1.0),
         help="Seconds between GRM inference steps (background cadence).",
     )
+
+    # --- Scripted backend options (only used when --backend scripted) ---
+    hold_last_group = parser.add_mutually_exclusive_group()
+    hold_last_group.add_argument(
+        "--hold-last",
+        action="store_true",
+        default=None,
+        help="Scripted: keep replaying the final progress value after the script ends (default).",
+    )
+    hold_last_group.add_argument(
+        "--no-hold-last",
+        dest="hold_last",
+        action="store_false",
+        help="Scripted: stop stepping once the curve is consumed.",
+    )
+    parser.add_argument(
+        "--script",
+        default=None,
+        help="Scripted: inline JSON progress list, e.g. '[0.1, 0.3, 0.6, 0.65]'. "
+             "Overrides success_curve in the config.",
+    )
     return parser
 
 
@@ -366,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
-    backend: DeterministicMonitorBackend | "GRMMonitorBackend"
+    backend: DeterministicMonitorBackend | "GRMMonitorBackend" | "ScriptedMonitorBackend"
     if args.backend == "grm":
         from monitor_runtime.grm_backend import (
             GRMMonitorBackend,
@@ -389,6 +412,32 @@ def main(argv: list[str] | None = None) -> int:
             fisheye_remap=fisheye_remap,
             active_modes=active_modes,
             interval=args.interval,
+            success_threshold=args.success_threshold,
+            success_stable_steps=args.success_stable_steps,
+            success_max_drift=args.success_max_drift,
+            fail_stable_steps=args.fail_stable_steps,
+            fail_min_progress=args.fail_min_progress,
+        )
+    elif args.backend == "scripted":
+        from monitor_runtime.scripted_backend import ScriptedMonitorBackend
+
+        # Two named curves + an ordered queue of scenario names consumed
+        # one-per-/monitors/start. Queue is defined entirely in config,
+        # not by the remote caller.
+        success_curve = config.get("success_curve")
+        fail_curve = config.get("fail_curve")
+        scenario_queue = config.get("scenario_queue")
+        if args.script:
+            success_curve = json.loads(args.script)
+
+        hold_last = args.hold_last if args.hold_last is not None else bool(config.get("hold_last", True))
+
+        backend = ScriptedMonitorBackend(
+            success_curve=success_curve,
+            fail_curve=fail_curve,
+            scenario_queue=scenario_queue,
+            interval=args.interval,
+            hold_last=hold_last,
             success_threshold=args.success_threshold,
             success_stable_steps=args.success_stable_steps,
             success_max_drift=args.success_max_drift,

@@ -1,0 +1,44 @@
+dataset:
+  input_dir: /mnt/public/datasets/lumos/grasp_20260327_zsr_sxl
+  output_dir: /mnt/public/datasets/lumos/grasp_20260327_zsr_sxl_converted
+  image_subdir: images
+  image_ext: .png
+# fisheye:
+#   image_width: 480 #1280
+#   image_height: 480 #1280
+#   fx: 387.197
+#   fy: 387.197
+#   cx: 637.535
+#   cy: 644.538
+#   alpha: 0.67481
+#   beta: 0.755646
+fisheye:
+  image_width: 480
+  image_height: 480
+  fx: 193.599
+  fy: 145.199
+  cx: 238.768
+  cy: 241.702
+  alpha: 0.67481    # 畸变系数不变
+  beta: 0.755646    # 畸变系数不变
+pinhole:
+  intrinsics_file: calibration/camera3_intrinsics.yaml
+extrinsics:
+  T_cam_tcp_A: calibration/T_cam_tcp_A.yaml
+  T_cam_tcp_B: calibration/T_cam_tcp_B.yaml
+depth:
+  enabled: true
+  default_depth: 0.1
+  subdir: depth
+  ext: .png
+  scale: 0.001
+  type: z_depth
+  inpaint_radius: 3
+  depth_discontinuity: 0.05
+processing:
+  interpolation: LINEAR
+  border_mode: CONSTANT
+  border_value: 0
+  num_workers: 4
+  save_quality: 95
+coordinate_convention: opencv_camera_xyz_right_down_forward

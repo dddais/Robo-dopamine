@@ -246,6 +246,9 @@ class _SubtaskState:
     """
 
     subtask: str
+    # Unique id used to isolate this session's cache directory so that two
+    # monitors with the same subtask text don't trample each other's frames.
+    monitor_id: str = ""
     # ref_start/previous are None until the background thread captures the
     # initial reference frame; status() must tolerate this warm-up window.
     ref_start: Optional[dict[str, str]] = None
@@ -306,7 +309,14 @@ class GRMMonitorBackend:
 
         self._ref_end_path = self._materialize_goal_image(goal_image)
         self._cache_root = Path(tempfile.mkdtemp(prefix="grm_monitor_"))
+        # _lock guards session-state reads/writes (start/status/stop).
         self._lock = threading.Lock()
+        # _infer_lock serializes calls into the shared vLLM model: vLLM's
+        # internal request queue is not safe under multi-thread concurrent
+        # generate() calls from background threads, and the resulting
+        # missing/short outputs surface as opaque KeyError('incremental')
+        # downstream. One inference at a time keeps the model well-behaved.
+        self._infer_lock = threading.Lock()
         self.sessions: dict[str, _SubtaskState] = {}
 
         # Heavy import is deferred to construction so the module can be
@@ -326,9 +336,16 @@ class GRMMonitorBackend:
             raise FileNotFoundError(f"Goal image not found: {src}")
         return str(src)
 
-    def _cam_dirs(self, subtask: str) -> dict[str, Path]:
-        safe = re.sub(r"[^A-Za-z0-9_]+", "_", subtask).strip("_")[:80] or "task"
-        root = self._cache_root / safe
+    def _cam_dirs(self, subtask: str, monitor_id: str = "") -> dict[str, Path]:
+        safe_sub = re.sub(r"[^A-Za-z0-9_]+", "_", subtask).strip("_")[:80] or "task"
+        # Include monitor_id in the path so concurrent monitors sharing the
+        # same subtask text (e.g. duplicate /monitors/start calls) write to
+        # disjoint directories instead of racing on the same PNG files.
+        if monitor_id:
+            safe_mid = re.sub(r"[^A-Za-z0-9_]+", "_", monitor_id).strip("_")[:32]
+            root = self._cache_root / safe_sub / safe_mid
+        else:
+            root = self._cache_root / safe_sub
         dirs = {}
         for key in CAMERA_KEYS:
             d = root / key
@@ -354,14 +371,16 @@ class GRMMonitorBackend:
             return payload
         raise RuntimeError("robot runtime returned non-object JSON")
 
-    def _snapshot_current(self, subtask: str, step: int) -> dict[str, str]:
+    def _snapshot_current(
+        self, subtask: str, step: int, monitor_id: str = ""
+    ) -> dict[str, str]:
         """Pull latest frames from Robot Runtime, undistort, save to cache."""
         metadata = self._fetch_json("/observations/latest/metadata")
         endpoints = metadata.get("binary_endpoints") if isinstance(metadata, dict) else None
         if not isinstance(endpoints, dict):
             raise RuntimeError("observation metadata missing binary_endpoints")
 
-        cam_dirs = self._cam_dirs(subtask)
+        cam_dirs = self._cam_dirs(subtask, monitor_id)
         saved: dict[str, str] = {}
         for camera in CAMERA_KEYS:
             path = endpoints.get(camera) or f"/observations/latest/{camera}.jpg"
@@ -374,8 +393,14 @@ class GRMMonitorBackend:
             if camera in FISHEYE_KEYS and self.fisheye_remap is not None:
                 img = undistort_fisheye(img, self.fisheye_remap)
 
-            out_path = cam_dirs[camera] / f"frame_{step:06d}.png"
-            cv2.imwrite(str(out_path), img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+            out_dir = cam_dirs[camera]
+            # The cache dir may have been removed by stop() while this thread
+            # was blocked in a network call; recreate it before writing.
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"frame_{step:06d}.png"
+            ok = cv2.imwrite(str(out_path), img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+            if not ok or not out_path.exists():
+                raise RuntimeError(f"failed to write frame for {camera}: {out_path}")
             saved[camera] = str(out_path)
         return saved
 
@@ -385,7 +410,7 @@ class GRMMonitorBackend:
         Also prints a real-time one-liner matching the reference agent script:
             [GRM] "<task>" step=NNNNNN fused=FF.FF% fwd=.. inc=.. bwd=.. lat=L.LLs [status]
         """
-        current = self._snapshot_current(state.subtask, state.step)
+        current = self._snapshot_current(state.subtask, state.step, state.monitor_id)
         infer_start = time.time()
 
         samples = build_online_samples(
@@ -397,7 +422,20 @@ class GRMMonitorBackend:
             current=current,
             modes=self.active_modes,
         )
-        outputs = self.model.inference_batch(samples)
+        # Serialize inference across monitors. vLLM is not safe under
+        # concurrent generate() calls from sibling background threads; without
+        # this lock, parallel requests can return fewer/shorter outputs and
+        # surface downstream as opaque KeyError('<mode>') errors.
+        with self._infer_lock:
+            outputs = self.model.inference_batch(samples)
+
+        if len(outputs) != len(samples):
+            missing = len(samples) - len(outputs)
+            raise RuntimeError(
+                f"GRM returned {len(outputs)} outputs for {len(samples)} samples "
+                f"(missing {missing}); this usually means vLLM dropped or "
+                f"truncated requests under contention"
+            )
 
         mode_results: dict[str, dict[str, Any]] = {}
         for item in outputs:
@@ -410,6 +448,13 @@ class GRMMonitorBackend:
                 "hop": stats["hop"],
                 "progress": stats["progress"],
             }
+
+        missing_modes = [m for m in self.active_modes if m not in mode_results]
+        if missing_modes:
+            raise RuntimeError(
+                f"GRM outputs missing modes: {missing_modes}; "
+                f"got {sorted(mode_results.keys())}"
+            )
 
         fused = clamp(
             sum(float(mode_results[m]["progress"]) for m in self.active_modes)
@@ -468,7 +513,7 @@ class GRMMonitorBackend:
         # loop just keeps trying until the runtime is reachable.
         while not state.stop_event.is_set() and state.ref_start is None:
             try:
-                ref = self._snapshot_current(state.subtask, 0)
+                ref = self._snapshot_current(state.subtask, 0, state.monitor_id)
                 with self._lock:
                     state.ref_start = ref
                     state.previous = ref
@@ -490,11 +535,19 @@ class GRMMonitorBackend:
                 return
 
             try:
+                # Re-check stop right before the heavy step, so a thread that
+                # was unblocked from a network call after stop() doesn't do
+                # pointless work (and write into a cache dir about to be torn
+                # down by a new monitor reusing the same subtask name).
+                if state.stop_event.is_set():
+                    return
                 record = self._run_one_step(state)
                 with self._lock:
                     state.latest = record
                     state.error = None
             except Exception as exc:  # network/model hiccup: log + keep looping
+                if state.stop_event.is_set():
+                    return
                 with self._lock:
                     state.error = str(exc)
                 print(f"[GRM] monitor={monitor_id} step error: {exc}", flush=True)
@@ -526,7 +579,7 @@ class GRMMonitorBackend:
         # captured by the background thread (_inference_loop warm-up), so a
         # Robot Runtime hiccup never fails /monitors/start with a 500.
         with self._lock:
-            state = _SubtaskState(subtask=subtask)
+            state = _SubtaskState(subtask=subtask, monitor_id=monitor_id)
             state.monitor = MonitorState(
                 success_threshold=self.success_threshold,
                 success_stable_steps=self.success_stable_steps,
@@ -623,21 +676,33 @@ class GRMMonitorBackend:
         monitor_id = str(payload.get("monitor_id") or "")
         with self._lock:
             state = self.sessions.pop(monitor_id, None)
-        if state is not None:
-            state.stop_event.set()
-            thread = state.thread
-        else:
-            thread = None
+        if state is None:
+            return {"stopped": True, "monitor_id": monitor_id}
+
+        state.stop_event.set()
+        thread = state.thread
+        thread_alive_after_join = True
         # Join outside the lock so we don't block other sessions.
         if thread is not None and thread.is_alive():
             thread.join(timeout=5.0)
-        if state is not None:
-            # best-effort cache cleanup for the subtask
+            thread_alive_after_join = thread.is_alive()
+
+        # Only clean up the cache when the inference thread has actually
+        # stopped. If it is still alive (e.g. blocked inside a network call),
+        # deleting its working directory would turn its next write into a
+        # confusing FileNotFoundError; better to leak the temp dir (it lives
+        # under mkdtemp and is harmless) than to corrupt a running thread.
+        if not thread_alive_after_join:
+            safe_sub = re.sub(r"[^A-Za-z0-9_]+", "_", state.subtask).strip("_")[:80]
+            safe_mid = re.sub(r"[^A-Za-z0-9_]+", "_", monitor_id).strip("_")[:32]
+            # New layout: cache_root/<subtask>/<monitor_id>/
             shutil.rmtree(
-                self._cache_root
-                / re.sub(r"[^A-Za-z0-9_]+", "_", state.subtask).strip("_")[:80],
+                self._cache_root / safe_sub / safe_mid,
                 ignore_errors=True,
             )
+        else:
+            print(f"[GRM] monitor={monitor_id} inference thread still alive after "
+                  f"stop; deferring cache cleanup.", flush=True)
         return {"stopped": True, "monitor_id": monitor_id}
 
     def health(self) -> dict[str, Any]:
