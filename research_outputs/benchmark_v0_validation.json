@@ -1,0 +1,38 @@
+{
+  "valid": true,
+  "num_episodes": 1,
+  "num_errors": 0,
+  "num_warnings": 0,
+  "expected_non_markovian_episodes": [
+    "xzx_radio_sub23"
+  ],
+  "episodes": [
+    {
+      "episode_id": "xzx_radio_sub23",
+      "valid": true,
+      "num_errors": 0,
+      "num_warnings": 0,
+      "event_summary": {
+        "annotation_status": "human_verified_from_keyframes",
+        "required_events": [
+          "grasp",
+          "lift",
+          "button_press",
+          "indicator_green",
+          "place",
+          "release"
+        ],
+        "non_markovian_events": [
+          "button_press",
+          "indicator_green"
+        ],
+        "num_events": 6,
+        "order_ok": true,
+        "mean_confidence": 0.8633333333333333,
+        "active_negative_latches": []
+      },
+      "issues": []
+    }
+  ],
+  "issues": []
+}

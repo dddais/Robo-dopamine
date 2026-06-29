@@ -1,0 +1,130 @@
+{
+  "valid": true,
+  "num_errors": 0,
+  "num_warnings": 0,
+  "errors": [],
+  "warnings": [],
+  "checks": [
+    {
+      "name": "required_file:manuscript/main.tex",
+      "ok": true,
+      "detail": "size=15014"
+    },
+    {
+      "name": "required_file:manuscript/references.bib",
+      "ok": true,
+      "detail": "size=1796"
+    },
+    {
+      "name": "required_file:manuscript/README.md",
+      "ok": true,
+      "detail": "size=1526"
+    },
+    {
+      "name": "required_file:research_outputs/paper_tables.tex",
+      "ok": true,
+      "detail": "size=2269"
+    },
+    {
+      "name": "required_file:research_outputs/figures/radio_memory_grm_case.tex",
+      "ok": true,
+      "detail": "size=641"
+    },
+    {
+      "name": "required_file:research_outputs/figures/radio_memory_grm_case.pdf",
+      "ok": true,
+      "detail": "size=139990"
+    },
+    {
+      "name": "required_file:research_outputs/paper_ready_results_summary.json",
+      "ok": true,
+      "detail": "size=3262"
+    },
+    {
+      "name": "required_file:research_outputs/benchmark_v0_validation.json",
+      "ok": true,
+      "detail": "size=824"
+    },
+    {
+      "name": "main_tex:generated_figure_input",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "main_tex:generated_table_input",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "main_tex:bibliography_path",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "main_tex:one_case_language",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "main_tex:feasibility_language",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "main_tex:radio_episode_id",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "main_tex:all_required_citations_used",
+      "ok": true,
+      "detail": "missing=[]"
+    },
+    {
+      "name": "references:required_bib_keys",
+      "ok": true,
+      "detail": "missing=[]"
+    },
+    {
+      "name": "paper_tables:label:tab:benchmark_v0_radio",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "paper_tables:label:tab:radio_counterfactuals",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "paper_tables:label:tab:score_memory",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "paper_tables:label:tab:visible_state_grm",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "figure:caption_names_verified_episode",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "paper_summary:verified_non_markovian_scope",
+      "ok": true,
+      "detail": "verified=['xzx_radio_sub23']"
+    },
+    {
+      "name": "benchmark_validation:valid_zero_errors",
+      "ok": true,
+      "detail": "valid=True, errors=0, warnings=0"
+    }
+  ],
+  "data_scope": {
+    "verified_non_markovian_episodes": [
+      "xzx_radio_sub23"
+    ],
+    "note": "This checker intentionally enforces the current one-case Benchmark v0 boundary."
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "episode_id": "pick3fail_4",
+  "source": "aligned_data/pick3fail_4",
+  "candidate_priority": "high_scoring_negative",
+  "task_tag": "carrot",
+  "scene_object": "carrot",
+  "selection_reason": "Failed or non-goal-success episode with high final fused GRM score; inspect for visually plausible failure, transient violation, or missing event labels.",
+  "video_metadata": {
+    "frames": 911,
+    "fps": 30.0,
+    "front_resolution": [
+      640,
+      480
+    ]
+  },
+  "frames": [
+    {
+      "frame_id": 0,
+      "time_sec": 0.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000000_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000000_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000000_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 83,
+      "time_sec": 2.7666666666666666,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000083_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000083_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000083_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 165,
+      "time_sec": 5.5,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000165_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000165_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000165_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 248,
+      "time_sec": 8.266666666666667,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000248_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000248_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000248_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 331,
+      "time_sec": 11.033333333333333,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000331_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000331_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000331_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 414,
+      "time_sec": 13.8,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000414_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000414_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000414_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 496,
+      "time_sec": 16.533333333333335,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000496_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000496_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000496_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 579,
+      "time_sec": 19.3,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000579_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000579_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000579_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 662,
+      "time_sec": 22.066666666666666,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000662_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000662_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000662_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 745,
+      "time_sec": 24.833333333333332,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000745_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000745_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000745_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 827,
+      "time_sec": 27.566666666666666,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000827_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000827_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000827_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 910,
+      "time_sec": 30.333333333333332,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000910_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000910_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_4/frame_000910_cam_right_wrist.png"
+      }
+    }
+  ]
+}

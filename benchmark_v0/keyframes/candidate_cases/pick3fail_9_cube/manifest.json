@@ -1,0 +1,126 @@
+{
+  "episode_id": "pick3fail_9_cube",
+  "source": "aligned_data/pick3fail_9_cube",
+  "candidate_priority": "large_score_regression",
+  "task_tag": "cube",
+  "scene_object": "cube",
+  "selection_reason": "Trajectory has large progress drawdown; inspect for slip, drop, recovery, or other transient events that scalar final progress may miss.",
+  "video_metadata": {
+    "frames": 579,
+    "fps": 30.0,
+    "front_resolution": [
+      640,
+      480
+    ]
+  },
+  "frames": [
+    {
+      "frame_id": 0,
+      "time_sec": 0.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000000_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000000_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000000_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 53,
+      "time_sec": 1.7666666666666666,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000053_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000053_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000053_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 105,
+      "time_sec": 3.5,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000105_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000105_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000105_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 158,
+      "time_sec": 5.266666666666667,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000158_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000158_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000158_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 210,
+      "time_sec": 7.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000210_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000210_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000210_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 263,
+      "time_sec": 8.766666666666667,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000263_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000263_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000263_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 315,
+      "time_sec": 10.5,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000315_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000315_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000315_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 368,
+      "time_sec": 12.266666666666667,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000368_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000368_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000368_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 420,
+      "time_sec": 14.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000420_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000420_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000420_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 473,
+      "time_sec": 15.766666666666667,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000473_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000473_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000473_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 525,
+      "time_sec": 17.5,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000525_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000525_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000525_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 578,
+      "time_sec": 19.266666666666666,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000578_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000578_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_9_cube/frame_000578_cam_right_wrist.png"
+      }
+    }
+  ]
+}

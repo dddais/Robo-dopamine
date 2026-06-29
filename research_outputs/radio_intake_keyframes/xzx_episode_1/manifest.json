@@ -1,0 +1,141 @@
+{
+  "candidate_episode_id": "xzx_episode_1",
+  "source": "aligned_data/xzx_episode_1",
+  "annotation_status": "pending_human_verification",
+  "benchmark_label_status": "not_a_new_benchmark_label",
+  "purpose": "manual review before any possible Benchmark v0 inclusion",
+  "video_metadata": {
+    "frames": 1956,
+    "fps": 30.0,
+    "width": 720,
+    "height": 720
+  },
+  "frames": [
+    {
+      "frame_id": 0,
+      "time_sec": 0.0,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000000_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000000_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000000_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 150,
+      "time_sec": 5.0,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000150_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000150_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000150_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 301,
+      "time_sec": 10.033333333333333,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000301_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000301_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000301_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 451,
+      "time_sec": 15.033333333333333,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000451_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000451_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000451_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 602,
+      "time_sec": 20.066666666666666,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000602_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000602_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000602_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 752,
+      "time_sec": 25.066666666666666,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000752_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000752_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000752_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 902,
+      "time_sec": 30.066666666666666,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000902_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000902_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_000902_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 1053,
+      "time_sec": 35.1,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001053_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001053_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001053_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 1203,
+      "time_sec": 40.1,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001203_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001203_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001203_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 1353,
+      "time_sec": 45.1,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001353_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001353_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001353_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 1504,
+      "time_sec": 50.13333333333333,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001504_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001504_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001504_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 1654,
+      "time_sec": 55.13333333333333,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001654_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001654_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001654_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 1805,
+      "time_sec": 60.166666666666664,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001805_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001805_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001805_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 1955,
+      "time_sec": 65.16666666666667,
+      "views": {
+        "cam_high": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001955_cam_high.png",
+        "cam_left_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001955_cam_left_wrist.png",
+        "cam_right_wrist": "research_outputs/radio_intake_keyframes/xzx_episode_1/frame_001955_cam_right_wrist.png"
+      }
+    }
+  ]
+}

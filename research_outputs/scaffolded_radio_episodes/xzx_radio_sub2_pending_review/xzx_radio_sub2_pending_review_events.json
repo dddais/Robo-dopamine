@@ -1,0 +1,87 @@
+{
+  "episode_id": "xzx_radio_sub2_pending_review",
+  "annotation_status": "pending_human_verification",
+  "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+  "success_rule": {
+    "type": "ordered_required_events",
+    "required_order": [
+      "grasp",
+      "lift",
+      "button_press",
+      "indicator_green",
+      "place",
+      "release"
+    ],
+    "non_markovian_events": [
+      "button_press",
+      "indicator_green"
+    ],
+    "description": "The episode is successful only if the switch is pressed, the indicator turns green, and the radio is released after those events."
+  },
+  "events": [
+    {
+      "event": "grasp",
+      "time_index": null,
+      "frame_id": null,
+      "view_evidence": [],
+      "confidence": null,
+      "source": "pending_human_verification",
+      "notes": "TODO: fill from keyframe inspection."
+    },
+    {
+      "event": "lift",
+      "time_index": null,
+      "frame_id": null,
+      "view_evidence": [],
+      "confidence": null,
+      "source": "pending_human_verification",
+      "notes": "TODO: fill from keyframe inspection."
+    },
+    {
+      "event": "button_press",
+      "time_index": null,
+      "frame_id": null,
+      "view_evidence": [],
+      "confidence": null,
+      "source": "pending_human_verification",
+      "notes": "TODO: fill from keyframe inspection."
+    },
+    {
+      "event": "indicator_green",
+      "time_index": null,
+      "frame_id": null,
+      "view_evidence": [],
+      "confidence": null,
+      "source": "pending_human_verification",
+      "notes": "TODO: fill from keyframe inspection."
+    },
+    {
+      "event": "place",
+      "time_index": null,
+      "frame_id": null,
+      "view_evidence": [],
+      "confidence": null,
+      "source": "pending_human_verification",
+      "notes": "TODO: fill from keyframe inspection."
+    },
+    {
+      "event": "release",
+      "time_index": null,
+      "frame_id": null,
+      "view_evidence": [],
+      "confidence": null,
+      "source": "pending_human_verification",
+      "notes": "TODO: fill from keyframe inspection."
+    }
+  ],
+  "negative_event_latches": {
+    "drop": false,
+    "slip": false,
+    "wrong_object": false,
+    "wrong_target": false,
+    "collision": false,
+    "forbidden_contact": false,
+    "order_violation": false
+  },
+  "human_correction_notes": "TODO: document keyframe inspection, ambiguous events, and whether this is a real episode or constructed/counterfactual history."
+}

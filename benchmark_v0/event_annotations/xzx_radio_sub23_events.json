@@ -1,0 +1,95 @@
+{
+  "episode_id": "xzx_radio_sub23",
+  "annotation_status": "human_verified_from_keyframes",
+  "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+  "success_rule": {
+    "type": "ordered_required_events",
+    "required_order": ["grasp", "lift", "button_press", "indicator_green", "place", "release"],
+    "non_markovian_events": ["button_press", "indicator_green"],
+    "description": "The episode is successful only if the radio is picked up, the switch is pressed with the left hand, the indicator turns green, and the radio is put down and released in order."
+  },
+  "events": [
+    {
+      "event": "grasp",
+      "time_index": 14.0,
+      "frame_id": 420,
+      "view_evidence": [
+        "benchmark_v0/keyframes/xzx_radio_sub23/frame_000420_cam_high.png",
+        "benchmark_v0/keyframes/xzx_radio_sub23/frame_000420_cam_left_wrist.png"
+      ],
+      "confidence": 0.85,
+      "source": "human_verified_from_keyframes",
+      "notes": "Radio is held above the table; high and left-wrist views show stable contact before the switch interaction."
+    },
+    {
+      "event": "lift",
+      "time_index": 15.0,
+      "frame_id": 450,
+      "view_evidence": [
+        "benchmark_v0/keyframes/xzx_radio_sub23/frame_000450_cam_high.png",
+        "benchmark_v0/keyframes/xzx_radio_sub23/frame_000450_cam_left_wrist.png"
+      ],
+      "confidence": 0.9,
+      "source": "human_verified_from_keyframes",
+      "notes": "Radio is clearly off the table and oriented toward the left hand."
+    },
+    {
+      "event": "button_press",
+      "time_index": 20.5,
+      "frame_id": 615,
+      "view_evidence": [
+        "benchmark_v0/keyframes/xzx_radio_sub23_event_window/frame_000600_cam_left_wrist.png",
+        "benchmark_v0/keyframes/xzx_radio_sub23_event_window/frame_000615_cam_left_wrist.png"
+      ],
+      "confidence": 0.78,
+      "source": "human_verified_from_keyframes",
+      "notes": "Left-wrist close-up shows the gripper contacting the central switch immediately before the indicator becomes green."
+    },
+    {
+      "event": "indicator_green",
+      "time_index": 21.0,
+      "frame_id": 630,
+      "view_evidence": [
+        "benchmark_v0/keyframes/xzx_radio_sub23_event_window/frame_000630_cam_left_wrist.png",
+        "benchmark_v0/keyframes/xzx_radio_sub23/frame_000630_cam_left_wrist.png"
+      ],
+      "confidence": 0.98,
+      "source": "human_verified_from_keyframes",
+      "notes": "Left-wrist view clearly shows the indicator/switch area turned green."
+    },
+    {
+      "event": "place",
+      "time_index": 22.0,
+      "frame_id": 660,
+      "view_evidence": [
+        "benchmark_v0/keyframes/xzx_radio_sub23_event_window/frame_000660_cam_high.png",
+        "benchmark_v0/keyframes/xzx_radio_sub23_event_window/frame_000660_cam_left_wrist.png"
+      ],
+      "confidence": 0.82,
+      "source": "human_verified_from_keyframes",
+      "notes": "High and left-wrist views show the radio descending back toward the table after the green indicator event."
+    },
+    {
+      "event": "release",
+      "time_index": 28.0,
+      "frame_id": 840,
+      "view_evidence": [
+        "benchmark_v0/keyframes/xzx_radio_sub23/frame_000840_cam_high.png",
+        "benchmark_v0/keyframes/xzx_radio_sub23/frame_000840_cam_left_wrist.png"
+      ],
+      "confidence": 0.85,
+      "source": "human_verified_from_keyframes",
+      "notes": "Radio is back on the table with hands no longer pressing the switch; final state no longer exposes the green indicator clearly."
+    }
+  ],
+  "negative_event_latches": {
+    "drop": false,
+    "slip": false,
+    "wrong_object": false,
+    "wrong_target": false,
+    "collision": false,
+    "forbidden_contact": false,
+    "order_violation": false
+  },
+  "human_correction_notes": "Manual keyframe inspection on 2026-05-31. The strongest non-Markovian evidence is the green indicator at frame 630 in the left-wrist view. The button_press frame is assigned to 615 based on close-up switch contact immediately before the green indicator appears. This annotation supports the MVP only; it is not an automated event detector."
+}

@@ -1,0 +1,34 @@
+[
+  {
+    "episode_id": "xzx_radio_sub23",
+    "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+    "video_path": {
+      "front": "aligned_data/xzx_episode_1_sub23/cam_high.mp4",
+      "left_wrist": "aligned_data/xzx_episode_1_sub23/cam_left_wrist.mp4",
+      "right_wrist": "aligned_data/xzx_episode_1_sub23/cam_right_wrist.mp4"
+    },
+    "video_metadata": {
+      "frames": 850,
+      "fps": 30.0,
+      "front_resolution": [720, 720],
+      "wrist_resolution": [480, 480]
+    },
+    "cached_pred_path": {
+      "forward": "results/xzx_episode_1_sub23_memory_grm/26-05-30-20-47-44_forward_mode_pick_up_the_red_radio__press_the_switch_with_the_left_hand_until_the_indicator_light_turns_green__then_put_the_radio_down/pred_vllm.json",
+      "incremental": "results/xzx_episode_1_sub23_memory_grm/26-05-30-20-48-03_incremental_mode_pick_up_the_red_radio__press_the_switch_with_the_left_hand_until_the_indicator_light_turns_green__then_put_the_radio_down/pred_vllm.json",
+      "backward": "results/xzx_episode_1_sub23_memory_grm/26-05-30-20-48-20_backward_mode_pick_up_the_red_radio__press_the_switch_with_the_left_hand_until_the_indicator_light_turns_green__then_put_the_radio_down/pred_vllm.json",
+      "summary": "results/xzx_episode_1_sub23_memory_grm/run_summary.json",
+      "progress_curve": "results/xzx_episode_1_sub23_memory_grm/progress_curve.png"
+    },
+    "object": "red_radio",
+    "success_label": true,
+    "label_status": "human_verified_from_keyframes",
+    "event_labels": "event_annotations/xzx_radio_sub23_events.json",
+    "non_markovian_rule": {
+      "type": "hidden_intermediate_success_event",
+      "required_events": ["grasp", "lift", "button_press", "indicator_green", "place", "release"],
+      "description": "The episode succeeds only if the radio is picked up, the switch is pressed with the left hand, and the indicator light turns green before the radio is put down. The final frame may not show the green light."
+    },
+    "notes": "This is a canonical Memory-GRM case: the final radio pose can look similar to the start or to a failed ending, so success depends on remembered intermediate evidence. GRM-2.0-8B with blank goal and interval 30 gives fused final progress 34.17%, while mid-trajectory fused progress peaks at 71.43%, supporting the hidden-intermediate-event motivation."
+  }
+]

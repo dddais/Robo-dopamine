@@ -1,0 +1,142 @@
+{
+  "episode_id": "xzx_radio_sub23",
+  "source": "aligned_data/xzx_episode_1_sub23",
+  "purpose": "manual correction of button_press and indicator_green events",
+  "frames": [
+    {
+      "frame_id": 0,
+      "time_sec": 0.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000000_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000000_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000000_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 30,
+      "time_sec": 1.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000030_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000030_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000030_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 120,
+      "time_sec": 4.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000120_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000120_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000120_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 210,
+      "time_sec": 7.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000210_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000210_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000210_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 240,
+      "time_sec": 8.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000240_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000240_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000240_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 330,
+      "time_sec": 11.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000330_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000330_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000330_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 420,
+      "time_sec": 14.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000420_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000420_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000420_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 450,
+      "time_sec": 15.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000450_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000450_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000450_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 480,
+      "time_sec": 16.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000480_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000480_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000480_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 570,
+      "time_sec": 19.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000570_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000570_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000570_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 630,
+      "time_sec": 21.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000630_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000630_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000630_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 660,
+      "time_sec": 22.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000660_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000660_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000660_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 720,
+      "time_sec": 24.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000720_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000720_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000720_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 840,
+      "time_sec": 28.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000840_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000840_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000840_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 849,
+      "time_sec": 28.3,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000849_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000849_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000849_cam_right_wrist.png"
+      }
+    }
+  ]
+}

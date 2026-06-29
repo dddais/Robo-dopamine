@@ -1,0 +1,48 @@
+{
+  "episode_id": "xzx_radio_sub23",
+  "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+  "frame_interval": 30,
+  "thresholds": {
+    "final_success_threshold": 70.0,
+    "score_memory_threshold": 70.0
+  },
+  "grm": {
+    "fused_final_progress": 34.170567053347916,
+    "fused_mean_progress": 35.26073540132431,
+    "fused_peak_progress": 71.43152849490959,
+    "fused_peak_index": 15,
+    "fused_peak_frame": 450,
+    "fused_peak_time_sec": 15.0,
+    "peak_minus_final": 37.26096144156167
+  },
+  "events": {
+    "required_order": [
+      "grasp",
+      "lift",
+      "button_press",
+      "indicator_green",
+      "place",
+      "release"
+    ],
+    "missing_events": [],
+    "incomplete_events": [],
+    "order_ok": true,
+    "order_violations": [],
+    "active_violations": [],
+    "success": true
+  },
+  "decisions": {
+    "final_only_grm": {
+      "success": false,
+      "reason": "final fused progress 34.17% < 70.00%"
+    },
+    "score_memory_grm": {
+      "success": true,
+      "reason": "peak fused progress 71.43% >= 70.00%"
+    },
+    "event_latched_grm": {
+      "success": true,
+      "reason": "all required events are present in order and no negative latch is active"
+    }
+  }
+}

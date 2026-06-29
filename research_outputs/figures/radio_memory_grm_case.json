@@ -1,0 +1,91 @@
+{
+  "episode_id": "xzx_radio_sub23",
+  "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+  "data_scope": "single verified non-Markovian radio episode",
+  "frame_interval": 30,
+  "frames": [
+    0,
+    30,
+    60,
+    90,
+    120,
+    150,
+    180,
+    210,
+    240,
+    270,
+    300,
+    330,
+    360,
+    390,
+    420,
+    450,
+    480,
+    510,
+    540,
+    570,
+    600,
+    630,
+    660,
+    690,
+    720,
+    750,
+    780,
+    810,
+    840
+  ],
+  "grm": {
+    "fused_final_progress": 34.170567053347916,
+    "fused_peak_progress": 71.43152849490959,
+    "fused_peak_frame": 450,
+    "fused_peak_time_sec": 15.0,
+    "final_success_threshold": 70.0
+  },
+  "event_rule": {
+    "type": "ordered_required_events",
+    "required_order": [
+      "grasp",
+      "lift",
+      "button_press",
+      "indicator_green",
+      "place",
+      "release"
+    ],
+    "non_markovian_events": [
+      "button_press",
+      "indicator_green"
+    ],
+    "description": "The episode is successful only if the radio is picked up, the switch is pressed with the left hand, the indicator turns green, and the radio is put down and released in order."
+  },
+  "shown_events": [
+    {
+      "event": "lift",
+      "frame_id": 450,
+      "time_index": 15.0,
+      "image_path": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000450_cam_high.png"
+    },
+    {
+      "event": "button_press",
+      "frame_id": 615,
+      "time_index": 20.5,
+      "image_path": "benchmark_v0/keyframes/xzx_radio_sub23_event_window/frame_000600_cam_left_wrist.png"
+    },
+    {
+      "event": "indicator_green",
+      "frame_id": 630,
+      "time_index": 21.0,
+      "image_path": "benchmark_v0/keyframes/xzx_radio_sub23_event_window/frame_000630_cam_left_wrist.png"
+    },
+    {
+      "event": "release",
+      "frame_id": 840,
+      "time_index": 28.0,
+      "image_path": "benchmark_v0/keyframes/xzx_radio_sub23/frame_000840_cam_high.png"
+    }
+  ],
+  "decisions": {
+    "final_only_grm": "not success",
+    "event_latched_grm": "success"
+  },
+  "limitation": "This figure is generated from cached GRM outputs and human-verified radio event labels; it is not an automatic event detector and not additional robot data."
+}

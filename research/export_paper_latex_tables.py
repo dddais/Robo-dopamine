@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Export current Memory-GRM paper result tables as LaTeX."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_INPUT = ROOT / "research_outputs/paper_ready_results_summary.json"
+DEFAULT_OUT_TEX = ROOT / "research_outputs/paper_tables.tex"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument("--out-tex", type=Path, default=DEFAULT_OUT_TEX)
+    return parser.parse_args()
+
+
+def load_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def escape_latex(value: object) -> str:
+    text = str(value)
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(ch, ch) for ch in text)
+
+
+def pct(value: float) -> str:
+    return f"{100.0 * float(value):.1f}\\%"
+
+
+def bool_text(value: bool) -> str:
+    return "success" if value else "not success"
+
+
+def table_environment(
+    label: str,
+    caption: str,
+    column_spec: str,
+    header: list[str],
+    rows: list[list[str]],
+) -> list[str]:
+    lines = [
+        r"\begin{table}[t]",
+        r"\centering",
+        rf"\caption{{{escape_latex(caption)}}}",
+        rf"\label{{{label}}}",
+        rf"\begin{{tabular}}{{{column_spec}}}",
+        r"\toprule",
+        " & ".join(header) + r" \\",
+        r"\midrule",
+    ]
+    for row in rows:
+        lines.append(" & ".join(row) + r" \\")
+    lines += [
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\end{table}",
+        "",
+    ]
+    return lines
+
+
+def visible_state_table(payload: dict) -> list[str]:
+    rows = []
+    for row in payload["cached_grm_visible_state"]:
+        rows.append(
+            [
+                escape_latex(row["setting"]),
+                pct(row["auroc"]),
+                f"{float(row['best_f1']):.3f}",
+                pct(row["accuracy"]),
+            ]
+        )
+    return table_environment(
+        label="tab:visible_state_grm",
+        caption="Visible-state GRM baseline on cached local Robo-Dopamine results.",
+        column_spec="lccc",
+        header=["Setting", "AUROC", "Best F1", "Accuracy"],
+        rows=rows,
+    )
+
+
+def score_memory_table(payload: dict) -> list[str]:
+    rows = []
+    for row in payload["score_memory_visible_state"]:
+        rows.append(
+            [
+                escape_latex(row["feature"]),
+                pct(row["auroc"]),
+                f"{float(row['best_f1']):.3f}",
+                pct(row["accuracy"]),
+                str(row["fp"]),
+                str(row["fn"]),
+            ]
+        )
+    return table_environment(
+        label="tab:score_memory",
+        caption="Score-only temporal memory features on cached visible-state cases.",
+        column_spec="lccccc",
+        header=["Feature", "AUROC", "Best F1", "Accuracy", "FP", "FN"],
+        rows=rows,
+    )
+
+
+def benchmark_radio_table(payload: dict) -> list[str]:
+    rows = []
+    for row in payload["benchmark_v0_radio"]:
+        rows.append(
+            [
+                escape_latex(row["monitor"]),
+                pct(row["accuracy"]),
+                escape_latex(bool_text(bool(row["decision"]))),
+                escape_latex(row["evidence"]),
+            ]
+        )
+    return table_environment(
+        label="tab:benchmark_v0_radio",
+        caption=(
+            "Current Benchmark v0 radio result. The benchmark currently has one "
+            "human-verified non-Markovian episode."
+        ),
+        column_spec="lccl",
+        header=["Monitor", "Accuracy", "Decision", "Evidence"],
+        rows=rows,
+    )
+
+
+def counterfactual_table(payload: dict) -> list[str]:
+    rows = []
+    for row in payload["radio_event_counterfactuals"]:
+        rows.append(
+            [
+                escape_latex(row["monitor"]),
+                pct(row["accuracy"]),
+                pct(row["balanced_accuracy"]),
+                pct(row["valid_history_recall"]),
+                pct(row["invalid_history_recall"]),
+            ]
+        )
+    return table_environment(
+        label="tab:radio_counterfactuals",
+        caption=(
+            "Radio event-label counterfactuals over the same GRM score curve. "
+            "These variants test monitor logic and are not additional real episodes."
+        ),
+        column_spec="lcccc",
+        header=[
+            "Monitor",
+            "Accuracy",
+            "Balanced acc.",
+            "Valid recall",
+            "Invalid recall",
+        ],
+        rows=rows,
+    )
+
+
+def build_tex(payload: dict) -> str:
+    lines = [
+        "% Auto-generated by research/export_paper_latex_tables.py",
+        "% Requires: \\usepackage{booktabs}",
+        "% Current verified non-Markovian data scope: xzx_radio_sub23 only.",
+        "",
+    ]
+    for table in (
+        visible_state_table(payload),
+        score_memory_table(payload),
+        benchmark_radio_table(payload),
+        counterfactual_table(payload),
+    ):
+        lines.extend(table)
+    return "\n".join(lines)
+
+
+def main() -> None:
+    args = parse_args()
+    payload = load_json(args.input)
+    args.out_tex.parent.mkdir(parents=True, exist_ok=True)
+    args.out_tex.write_text(build_tex(payload), encoding="utf-8")
+    print(f"wrote={args.out_tex}")
+    print("tables=4")
+    print("verified_non_markovian=xzx_radio_sub23")
+
+
+if __name__ == "__main__":
+    main()

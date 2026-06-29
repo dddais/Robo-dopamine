@@ -1,0 +1,47 @@
+{
+  "adds_benchmark_labels": false,
+  "source_inventory": "research_outputs/radio_intake_candidates.json",
+  "num_extracted": 4,
+  "extracted": [
+    {
+      "candidate_episode_id": "xzx_episode_1",
+      "source": "aligned_data/xzx_episode_1",
+      "frames_sampled": 14,
+      "video_frames": 1956,
+      "fps": 30.0,
+      "manifest": "research_outputs/radio_intake_keyframes/xzx_episode_1/manifest.json",
+      "contact_sheet": "research_outputs/radio_intake_keyframes/xzx_episode_1/contact_sheet.png",
+      "adds_benchmark_label": false
+    },
+    {
+      "candidate_episode_id": "xzx_episode_1_sub1",
+      "source": "aligned_data/xzx_episode_1_sub1",
+      "frames_sampled": 14,
+      "video_frames": 750,
+      "fps": 30.0,
+      "manifest": "research_outputs/radio_intake_keyframes/xzx_episode_1_sub1/manifest.json",
+      "contact_sheet": "research_outputs/radio_intake_keyframes/xzx_episode_1_sub1/contact_sheet.png",
+      "adds_benchmark_label": false
+    },
+    {
+      "candidate_episode_id": "xzx_episode_1_sub2",
+      "source": "aligned_data/xzx_episode_1_sub2",
+      "frames_sampled": 14,
+      "video_frames": 650,
+      "fps": 30.0,
+      "manifest": "research_outputs/radio_intake_keyframes/xzx_episode_1_sub2/manifest.json",
+      "contact_sheet": "research_outputs/radio_intake_keyframes/xzx_episode_1_sub2/contact_sheet.png",
+      "adds_benchmark_label": false
+    },
+    {
+      "candidate_episode_id": "xzx_episode_2",
+      "source": "aligned_data/xzx_episode_2",
+      "frames_sampled": 14,
+      "video_frames": 2340,
+      "fps": 30.0,
+      "manifest": "research_outputs/radio_intake_keyframes/xzx_episode_2/manifest.json",
+      "contact_sheet": "research_outputs/radio_intake_keyframes/xzx_episode_2/contact_sheet.png",
+      "adds_benchmark_label": false
+    }
+  ]
+}

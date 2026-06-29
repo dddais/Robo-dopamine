@@ -1,0 +1,327 @@
+{
+  "stress_test_type": "event_label_counterfactuals_on_single_radio_trajectory",
+  "source_summary": "results/xzx_episode_1_sub23_memory_grm/run_summary.json",
+  "source_events": "benchmark_v0/event_annotations/xzx_radio_sub23_events.json",
+  "num_variants": 5,
+  "accuracy": {
+    "final_only_grm": 0.8,
+    "score_memory_grm": 0.2,
+    "event_latched_grm": 1.0
+  },
+  "balanced_accuracy": {
+    "final_only_grm": 0.5,
+    "score_memory_grm": 0.5,
+    "event_latched_grm": 1.0
+  },
+  "positive_recall": {
+    "final_only_grm": 0.0,
+    "score_memory_grm": 1.0,
+    "event_latched_grm": 1.0
+  },
+  "negative_recall": {
+    "final_only_grm": 1.0,
+    "score_memory_grm": 0.0,
+    "event_latched_grm": 1.0
+  },
+  "variants": [
+    {
+      "variant_id": "observed_success",
+      "label": true,
+      "description": "Human-verified observed radio success event chain.",
+      "result": {
+        "episode_id": "xzx_radio_sub23",
+        "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+        "frame_interval": 30,
+        "thresholds": {
+          "final_success_threshold": 70.0,
+          "score_memory_threshold": 70.0
+        },
+        "grm": {
+          "fused_final_progress": 34.170567053347916,
+          "fused_mean_progress": 35.26073540132431,
+          "fused_peak_progress": 71.43152849490959,
+          "fused_peak_index": 15,
+          "fused_peak_frame": 450,
+          "fused_peak_time_sec": 15.0,
+          "peak_minus_final": 37.26096144156167
+        },
+        "events": {
+          "required_order": [
+            "grasp",
+            "lift",
+            "button_press",
+            "indicator_green",
+            "place",
+            "release"
+          ],
+          "missing_events": [],
+          "incomplete_events": [],
+          "order_ok": true,
+          "order_violations": [],
+          "active_violations": [],
+          "success": true
+        },
+        "decisions": {
+          "final_only_grm": {
+            "success": false,
+            "reason": "final fused progress 34.17% < 70.00%"
+          },
+          "score_memory_grm": {
+            "success": true,
+            "reason": "peak fused progress 71.43% >= 70.00%"
+          },
+          "event_latched_grm": {
+            "success": true,
+            "reason": "all required events are present in order and no negative latch is active"
+          }
+        }
+      },
+      "correct": {
+        "final_only_grm": false,
+        "score_memory_grm": true,
+        "event_latched_grm": true
+      }
+    },
+    {
+      "variant_id": "missing_indicator_green",
+      "label": false,
+      "description": "Synthetic invalid history: the green indicator event is absent.",
+      "result": {
+        "episode_id": "xzx_radio_sub23",
+        "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+        "frame_interval": 30,
+        "thresholds": {
+          "final_success_threshold": 70.0,
+          "score_memory_threshold": 70.0
+        },
+        "grm": {
+          "fused_final_progress": 34.170567053347916,
+          "fused_mean_progress": 35.26073540132431,
+          "fused_peak_progress": 71.43152849490959,
+          "fused_peak_index": 15,
+          "fused_peak_frame": 450,
+          "fused_peak_time_sec": 15.0,
+          "peak_minus_final": 37.26096144156167
+        },
+        "events": {
+          "required_order": [
+            "grasp",
+            "lift",
+            "button_press",
+            "indicator_green",
+            "place",
+            "release"
+          ],
+          "missing_events": [
+            "indicator_green"
+          ],
+          "incomplete_events": [],
+          "order_ok": false,
+          "order_violations": [],
+          "active_violations": [],
+          "success": false
+        },
+        "decisions": {
+          "final_only_grm": {
+            "success": false,
+            "reason": "final fused progress 34.17% < 70.00%"
+          },
+          "score_memory_grm": {
+            "success": true,
+            "reason": "peak fused progress 71.43% >= 70.00%"
+          },
+          "event_latched_grm": {
+            "success": false,
+            "reason": "missing required events: indicator_green"
+          }
+        }
+      },
+      "correct": {
+        "final_only_grm": true,
+        "score_memory_grm": false,
+        "event_latched_grm": true
+      }
+    },
+    {
+      "variant_id": "missing_button_press",
+      "label": false,
+      "description": "Synthetic invalid history: the required switch press event is absent.",
+      "result": {
+        "episode_id": "xzx_radio_sub23",
+        "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+        "frame_interval": 30,
+        "thresholds": {
+          "final_success_threshold": 70.0,
+          "score_memory_threshold": 70.0
+        },
+        "grm": {
+          "fused_final_progress": 34.170567053347916,
+          "fused_mean_progress": 35.26073540132431,
+          "fused_peak_progress": 71.43152849490959,
+          "fused_peak_index": 15,
+          "fused_peak_frame": 450,
+          "fused_peak_time_sec": 15.0,
+          "peak_minus_final": 37.26096144156167
+        },
+        "events": {
+          "required_order": [
+            "grasp",
+            "lift",
+            "button_press",
+            "indicator_green",
+            "place",
+            "release"
+          ],
+          "missing_events": [
+            "button_press"
+          ],
+          "incomplete_events": [],
+          "order_ok": false,
+          "order_violations": [],
+          "active_violations": [],
+          "success": false
+        },
+        "decisions": {
+          "final_only_grm": {
+            "success": false,
+            "reason": "final fused progress 34.17% < 70.00%"
+          },
+          "score_memory_grm": {
+            "success": true,
+            "reason": "peak fused progress 71.43% >= 70.00%"
+          },
+          "event_latched_grm": {
+            "success": false,
+            "reason": "missing required events: button_press"
+          }
+        }
+      },
+      "correct": {
+        "final_only_grm": true,
+        "score_memory_grm": false,
+        "event_latched_grm": true
+      }
+    },
+    {
+      "variant_id": "indicator_before_button_press",
+      "label": false,
+      "description": "Synthetic invalid history: required event order is violated.",
+      "result": {
+        "episode_id": "xzx_radio_sub23",
+        "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+        "frame_interval": 30,
+        "thresholds": {
+          "final_success_threshold": 70.0,
+          "score_memory_threshold": 70.0
+        },
+        "grm": {
+          "fused_final_progress": 34.170567053347916,
+          "fused_mean_progress": 35.26073540132431,
+          "fused_peak_progress": 71.43152849490959,
+          "fused_peak_index": 15,
+          "fused_peak_frame": 450,
+          "fused_peak_time_sec": 15.0,
+          "peak_minus_final": 37.26096144156167
+        },
+        "events": {
+          "required_order": [
+            "grasp",
+            "lift",
+            "button_press",
+            "indicator_green",
+            "place",
+            "release"
+          ],
+          "missing_events": [],
+          "incomplete_events": [],
+          "order_ok": false,
+          "order_violations": [
+            "indicator_green"
+          ],
+          "active_violations": [],
+          "success": false
+        },
+        "decisions": {
+          "final_only_grm": {
+            "success": false,
+            "reason": "final fused progress 34.17% < 70.00%"
+          },
+          "score_memory_grm": {
+            "success": true,
+            "reason": "peak fused progress 71.43% >= 70.00%"
+          },
+          "event_latched_grm": {
+            "success": false,
+            "reason": "required event order violated at: indicator_green"
+          }
+        }
+      },
+      "correct": {
+        "final_only_grm": true,
+        "score_memory_grm": false,
+        "event_latched_grm": true
+      }
+    },
+    {
+      "variant_id": "forbidden_contact_latched",
+      "label": false,
+      "description": "Synthetic invalid history: a negative event latch is active.",
+      "result": {
+        "episode_id": "xzx_radio_sub23",
+        "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+        "frame_interval": 30,
+        "thresholds": {
+          "final_success_threshold": 70.0,
+          "score_memory_threshold": 70.0
+        },
+        "grm": {
+          "fused_final_progress": 34.170567053347916,
+          "fused_mean_progress": 35.26073540132431,
+          "fused_peak_progress": 71.43152849490959,
+          "fused_peak_index": 15,
+          "fused_peak_frame": 450,
+          "fused_peak_time_sec": 15.0,
+          "peak_minus_final": 37.26096144156167
+        },
+        "events": {
+          "required_order": [
+            "grasp",
+            "lift",
+            "button_press",
+            "indicator_green",
+            "place",
+            "release"
+          ],
+          "missing_events": [],
+          "incomplete_events": [],
+          "order_ok": true,
+          "order_violations": [],
+          "active_violations": [
+            "forbidden_contact"
+          ],
+          "success": false
+        },
+        "decisions": {
+          "final_only_grm": {
+            "success": false,
+            "reason": "final fused progress 34.17% < 70.00%"
+          },
+          "score_memory_grm": {
+            "success": true,
+            "reason": "peak fused progress 71.43% >= 70.00%"
+          },
+          "event_latched_grm": {
+            "success": false,
+            "reason": "negative latch active: forbidden_contact"
+          }
+        }
+      },
+      "correct": {
+        "final_only_grm": true,
+        "score_memory_grm": false,
+        "event_latched_grm": true
+      }
+    }
+  ],
+  "limitation": "These are event-label counterfactuals over one observed trajectory. They test monitor logic under identical GRM score evidence; they are not additional real robot episodes."
+}

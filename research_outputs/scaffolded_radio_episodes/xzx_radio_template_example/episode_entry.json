@@ -1,0 +1,45 @@
+{
+  "episode_id": "xzx_radio_template_example",
+  "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+  "video_path": {
+    "front": "aligned_data/xzx_episode_1_sub23/cam_high.mp4",
+    "left_wrist": "aligned_data/xzx_episode_1_sub23/cam_left_wrist.mp4",
+    "right_wrist": "aligned_data/xzx_episode_1_sub23/cam_right_wrist.mp4"
+  },
+  "video_metadata": {
+    "frames": 850,
+    "fps": 30.0,
+    "front_resolution": [
+      720,
+      720
+    ],
+    "wrist_resolution": [
+      480,
+      480
+    ]
+  },
+  "cached_pred_path": {
+    "forward": "TODO/results/xzx_radio_template_example/forward/pred_vllm.json",
+    "incremental": "TODO/results/xzx_radio_template_example/incremental/pred_vllm.json",
+    "backward": "TODO/results/xzx_radio_template_example/backward/pred_vllm.json",
+    "summary": "TODO/results/xzx_radio_template_example/run_summary.json",
+    "progress_curve": "TODO/results/xzx_radio_template_example/progress_curve.png"
+  },
+  "object": "red_radio",
+  "success_label": null,
+  "label_status": "pending_human_verification",
+  "event_labels": "event_annotations/xzx_radio_template_example_events.json",
+  "non_markovian_rule": {
+    "type": "radio_success_hidden_green",
+    "required_events": [
+      "grasp",
+      "lift",
+      "button_press",
+      "indicator_green",
+      "place",
+      "release"
+    ],
+    "description": "The episode succeeds only if the radio is picked up, the switch is pressed with the left hand, and the indicator light turns green before the radio is put down. The final frame may not show the green light."
+  },
+  "notes": "Scaffold only. Fill event labels from keyframe inspection, run GRM, replace cached_pred_path TODOs, then run research/validate_benchmark_v0.py."
+}

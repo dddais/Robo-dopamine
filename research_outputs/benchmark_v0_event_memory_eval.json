@@ -1,0 +1,100 @@
+{
+  "episodes_path": "benchmark_v0/episodes.json",
+  "thresholds": {
+    "final_success_threshold": 70.0,
+    "score_memory_threshold": 70.0
+  },
+  "aggregate": {
+    "num_episodes": 1,
+    "num_evaluated": 1,
+    "num_skipped": 0,
+    "num_labeled": 1,
+    "accuracy": {
+      "final_only_grm": 0.0,
+      "score_memory_grm": 1.0,
+      "event_latched_grm": 1.0
+    },
+    "mean_fused_final_progress": 34.170567053347916,
+    "mean_fused_peak_progress": 71.43152849490959,
+    "skipped": [],
+    "data_scope_note": "Benchmark v0 currently contains one human-verified non-Markovian episode, xzx_radio_sub23. Cached carrot/cube candidates are not counted as non-Markovian benchmark cases under the current data."
+  },
+  "episodes": [
+    {
+      "episode_id": "xzx_radio_sub23",
+      "status": "evaluated",
+      "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+      "success_label": true,
+      "label_status": "human_verified_from_keyframes",
+      "annotation_status": "human_verified_from_keyframes",
+      "non_markovian_rule": {
+        "type": "hidden_intermediate_success_event",
+        "required_events": [
+          "grasp",
+          "lift",
+          "button_press",
+          "indicator_green",
+          "place",
+          "release"
+        ],
+        "description": "The episode succeeds only if the radio is picked up, the switch is pressed with the left hand, and the indicator light turns green before the radio is put down. The final frame may not show the green light."
+      },
+      "summary_path": "results/xzx_episode_1_sub23_memory_grm/run_summary.json",
+      "event_path": "benchmark_v0/event_annotations/xzx_radio_sub23_events.json",
+      "non_markovian_evidence": "button_press: frame 615; indicator_green: frame 630",
+      "result": {
+        "episode_id": "xzx_radio_sub23",
+        "task": "pick up the red radio, press the switch with the left hand until the indicator light turns green, then put the radio down",
+        "frame_interval": 30,
+        "thresholds": {
+          "final_success_threshold": 70.0,
+          "score_memory_threshold": 70.0
+        },
+        "grm": {
+          "fused_final_progress": 34.170567053347916,
+          "fused_mean_progress": 35.26073540132431,
+          "fused_peak_progress": 71.43152849490959,
+          "fused_peak_index": 15,
+          "fused_peak_frame": 450,
+          "fused_peak_time_sec": 15.0,
+          "peak_minus_final": 37.26096144156167
+        },
+        "events": {
+          "required_order": [
+            "grasp",
+            "lift",
+            "button_press",
+            "indicator_green",
+            "place",
+            "release"
+          ],
+          "missing_events": [],
+          "incomplete_events": [],
+          "order_ok": true,
+          "order_violations": [],
+          "active_violations": [],
+          "success": true
+        },
+        "decisions": {
+          "final_only_grm": {
+            "success": false,
+            "reason": "final fused progress 34.17% < 70.00%"
+          },
+          "score_memory_grm": {
+            "success": true,
+            "reason": "peak fused progress 71.43% >= 70.00%"
+          },
+          "event_latched_grm": {
+            "success": true,
+            "reason": "all required events are present in order and no negative latch is active"
+          }
+        }
+      },
+      "correct": {
+        "final_only_grm": false,
+        "score_memory_grm": true,
+        "event_latched_grm": true
+      }
+    }
+  ]
+}

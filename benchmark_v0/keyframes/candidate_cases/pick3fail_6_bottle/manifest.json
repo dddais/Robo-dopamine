@@ -1,0 +1,126 @@
+{
+  "episode_id": "pick3fail_6_bottle",
+  "source": "aligned_data/pick3fail_6_bottle",
+  "candidate_priority": "high_scoring_negative",
+  "task_tag": "bottle",
+  "scene_object": "bottle",
+  "selection_reason": "Failed or non-goal-success episode with high final fused GRM score; inspect for visually plausible failure, transient violation, or missing event labels.",
+  "video_metadata": {
+    "frames": 827,
+    "fps": 30.0,
+    "front_resolution": [
+      640,
+      480
+    ]
+  },
+  "frames": [
+    {
+      "frame_id": 0,
+      "time_sec": 0.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000000_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000000_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000000_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 75,
+      "time_sec": 2.5,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000075_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000075_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000075_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 150,
+      "time_sec": 5.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000150_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000150_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000150_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 225,
+      "time_sec": 7.5,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000225_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000225_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000225_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 300,
+      "time_sec": 10.0,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000300_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000300_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000300_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 375,
+      "time_sec": 12.5,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000375_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000375_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000375_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 451,
+      "time_sec": 15.033333333333333,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000451_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000451_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000451_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 526,
+      "time_sec": 17.533333333333335,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000526_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000526_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000526_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 601,
+      "time_sec": 20.033333333333335,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000601_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000601_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000601_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 676,
+      "time_sec": 22.533333333333335,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000676_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000676_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000676_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 751,
+      "time_sec": 25.033333333333335,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000751_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000751_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000751_cam_right_wrist.png"
+      }
+    },
+    {
+      "frame_id": 826,
+      "time_sec": 27.533333333333335,
+      "views": {
+        "cam_high": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000826_cam_high.png",
+        "cam_left_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000826_cam_left_wrist.png",
+        "cam_right_wrist": "benchmark_v0/keyframes/candidate_cases/pick3fail_6_bottle/frame_000826_cam_right_wrist.png"
+      }
+    }
+  ]
+}
