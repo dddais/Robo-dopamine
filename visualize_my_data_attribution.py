@@ -42,7 +42,7 @@ from transformers import AutoConfig, AutoProcessor, Qwen3VLForConditionalGenerat
 # ============================
 # MODEL_PATH = "/home/dais/workspace/Robo-Dopamine/train/checkpoints/my_carrot_finetune_big"
 MODEL_PATH = './pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview'
-DATA_DIR = "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_1"
+DATA_DIR = "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_1_carrot"
 OUTPUT_ROOT = "./results/eval_visual/exp_suc1_inter20_cube_ref_attribution_new"
 
 TASK_INSTRUCTION = "pick the cube and put it on yellow plate "
