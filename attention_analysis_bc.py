@@ -79,76 +79,78 @@ TASK_INSTRUCTION = "pick the white cube and put it on the plate"
 GOAL_IMAGE = "./examples/blank_goal.png"
 
 FRAME_INTERVAL = 20
-EVAL_MODE = "incremental"
+EVAL_MODE = "forward"
 
 # Attention 分析参数
-# 归因哪些图（支持多图，会同时对所有目标图算 attention 并联合排序/平均）
-# 8 张图顺序：[0]REF_START [1]REF_END [2]BEFORE_high [3]BEFORE_left [4]BEFORE_right
-#             [5]AFTER_high  [6]AFTER_left  [7]AFTER_right
-TARGET_VIEW_INDICES = [5, 6, 7]   # AFTER 的三个视角
-
+TARGET_VIEW_INDEX = 5        # 归因哪张图（5 = AFTER High）
 # 输出
-OUTPUT_ROOT = "./results/attention_analysis_cube_score_sum_new"
+OUTPUT_ROOT = "./results/attention_analysis_cube_score_sum"
 VIDEO_FPS = 2.0
-OVERLAY_ALPHA = 0.45   # 热力图叠加透明度（0=只原图，1=只热力图；0.45 接近 scan 脚本）
-
 # 前向模式：
-#   'generate'        : 正常自回归生成 score（逐 token，attention 取自生成过程）
+#   'generate'    : 正常自回归生成 score（逐 token，attention 取自生成过程）
+#                   优点：attention 来自模型真实生成路径，最贴近实际推理
+#                   缺点：慢（每生成一个 token 都要保存 attention）
 #   'teacher_forcing' : 先 generate 拿 score 文本，再 teacher-force 一次前向
+#                   优点：快（只一次前向）
+#                   缺点：attention 来自"已知答案后重走一遍"，与真实生成略有差异
 FORWARD_MODE = "generate"
 
 # Query 选择：
-#   'last_prompt' : 最后一个 prompt token（对齐 2503.06287 的"最后一个输入文本 token"）
+#   'last_prompt' : 最后一个 prompt token（默认，对齐 2503.06287）
 #   'score_digit' : <score> 标签里的数字 token（生成时正在看的）
 #   注意：FORWARD_MODE='generate' 时，query 自动取生成过程中最后一个数字 token，
 #         此参数只影响 teacher_forcing 模式
 QUERY_MODE = "score_digit"
 
 # Head 聚合策略：
-#   'mean' : 所有 head 平均（sanity check）
-#   'topk' : 按 HEAD_CRITERION 选 top-k head 再平均
+#   'mean'   : 所有 head 平均（sanity check，论文里说通常无信息）
+#   'topk'   : 按 head 评分选 top-k head 再平均
+# 评分标准（HEAD_CRITERION）：
+#   'attn_sum'      : attention sum 高（head 在看图） —— 论文标准 1
+#   'attn_sum_low_entropy' : attention sum 高 且 空间熵低 —— 论文完整标准 1+2
+#   'low_entropy'   : 仅空间熵低（attention 聚焦）
+# 注：GRM 是全局 score 任务，不一定要求熵低；先用 attn_sum 试，效果不好再切换
 HEAD_AGG = "topk"
 HEAD_TOPK = 5
-
-# Head 排序公式（HEAD_AGG='topk' 时生效，多图时先对所有 target 的指标取平均再排序）：
-#   'attn_sum'     : 仅按 attention sum 排序（论文标准 1）
-#   'low_entropy'  : 仅按空间熵升序排序（论文标准 2）
-#   'localization' : s_norm * (1 - e_norm)，两个标准联合（论文完整标准，推荐）
-#                    先用 ATTN_SUM_FLOOR 淘汰不看图的 head，再在剩余 head 里按联合分排序
-HEAD_CRITERION = "localization"
+HEAD_CRITERION = "attn_sum"
 
 # 论文细节：排除前 N 层（论文排除前 2 层，因为早期层行为不同）
+# 这能解决你观察到的"靠前 layer head 的 attention 集中在左上角"问题
 EXCLUDE_FIRST_LAYERS = 2
 
 # 论文标准 1：attention sum 阈值 τ 的选取方式
-#   'floor'        : 用固定值 ATTN_SUM_FLOOR（推荐，单样本稳定）
-#   'max_curvature': 最大曲率法（论文默认，但需多样本才稳定）
-ATTN_SUM_THRESHOLD = "floor"
-ATTN_SUM_FLOOR = 0.01    # s_img 低于此值的 head 直接淘汰（对齐 scan_localization_heads_best.py）
+#   'max_curvature' : 最大曲率法（论文默认，自动）
+#   'percentile'    : 按分位数（LOW_ENTROPY_PERCENTILE 之上的算"高 sum"）
+ATTN_SUM_THRESHOLD = "max_curvature"
 
 # 论文标准 2：spatial entropy 的计算方式
 #   'connected' : 论文原文——二值化 + 连通分量 entropy（推荐）
-#   'shannon'   : 简单 Shannon entropy
+#   'shannon'   : 简单 Shannon entropy（之前的实现，对"聚焦"更敏感但不严格对应论文）
 SPATIAL_ENTROPY_MODE = "connected"
 
-# 是否为固定 top-K head 输出单独视频
-# True  : 跑完所有 sample 后，在聚合（多 sample 平均）的指标上选固定 HEAD_TOPK 个 head，
-#         每个 head 对每个 target 视图各输出一个完整视频
+# 是否为固定 top-K head 输出单独视频（对齐论文 2503.06287 的 selection frequency 思想）
+# True  : 跑完所有 sample 后，按 selection frequency 选固定 HEAD_TOPK 个 head，每个输出完整视频
 # False : 不输出 per-head 视频
 OUTPUT_PER_HEAD_VIDEOS = True
 
-# Head 筛选时"熵低"的分位数（仅 ATTN_SUM_THRESHOLD='percentile' 旧逻辑兼容用，默认不用）
+# 固定 head 的选取方式：
+#   'frequency' : 跨 sample 统计每个 head 被选中的频率，取 top-K（论文方法，推荐）
+#                 每个 sample 独立选 top-K，统计谁出现得多
+#   'mean_sum'  : 用所有 sample 平均的 attn_sum 排序，取 top-K
+HEAD_SELECTION_MODE = "frequency"
+
+# Head 筛选时"熵低"的阈值（仅 HEAD_CRITERION 含 low_entropy 且 ATTN_SUM_THRESHOLD='percentile' 时生效）
 LOW_ENTROPY_PERCENTILE = 30
 
-# 视频输出内容（主视频）：
-#   'selected' : 用 HEAD_AGG/HEAD_CRITERION 筛出的 head 平均
+# 视频输出内容：
+#   'selected' : 用 HEAD_AGG 筛出的 head 平均（top-k 或 mean）
 #   'mean'     : 强制用全 head 平均（独立于 HEAD_AGG）
 VIDEO_CONTENT = "selected"
 
 # 是否保存全 head 的 attention 统计（npz，用于后续离线 head 分析）
 SAVE_ALL_HEAD_STATS = False
 
-# head_stats_overview / head_scatter 的统计方式：
+# head_stats_overview 的统计方式：
 #   'mean'  : 所有 sample 的 attn_sum / 熵 取平均（推荐，更稳定）
 #   'first' : 只用第一个 sample（快但不稳定）
 HEAD_STATS_AGG = "mean"
@@ -323,30 +325,30 @@ class AttentionAttributor:
         self,
         image_paths: List[str],
         task: str,
-        target_view_indices: List[int],
+        target_view_idx: int = 5,
         query_mode: str = "last_prompt",
         forward_mode: str = "generate",
-    ) -> Tuple[Dict[int, np.ndarray], float, Dict[int, Tuple[int, int]], Dict]:
+    ) -> Tuple[np.ndarray, float, Tuple[int, int], Dict]:
         """
-        抽取 query token → 多张目标图 image token 的 attention 权重。
+        抽取 query token → 目标图 image token 的 attention 权重。
 
         forward_mode:
             'generate'        : 正常自回归生成，attention 来自生成过程
             'teacher_forcing' : teacher-force 一次前向，attention 来自重放
 
         返回:
-            agg_maps:   {target_view_idx: [num_target_tokens]} 每个 target 的聚合 attention
-            score:      原始 score
-            target_ranges: {target_view_idx: (start, end)}
-            stats:      全 head 统计（含多 target）
+            attention_map: [num_target_tokens]（已按 HEAD_AGG 聚合）
+            score: 原始 score
+            (target_start, target_end): 目标图 token 范围
+            stats: 全 head 统计
         """
         if forward_mode == "generate":
             return self._compute_attention_generate(
-                image_paths, task, target_view_indices
+                image_paths, task, target_view_idx
             )
         else:
             return self._compute_attention_teacher_forcing(
-                image_paths, task, target_view_indices, query_mode
+                image_paths, task, target_view_idx, query_mode
             )
 
     @torch.no_grad()
@@ -354,8 +356,8 @@ class AttentionAttributor:
         self,
         image_paths: List[str],
         task: str,
-        target_view_indices: List[int],
-    ) -> Tuple[Dict[int, np.ndarray], float, Dict[int, Tuple[int, int]], Dict]:
+        target_view_idx: int = 5,
+    ) -> Tuple[np.ndarray, float, Tuple[int, int], Dict]:
         """
         正常自回归生成模式。
 
@@ -364,7 +366,6 @@ class AttentionAttributor:
 
         取 query = 最后一个生成的数字 token（score 最后一位数字），
         它的 attention 反映"模型在确定 score 数值时看了哪里"。
-        同时支持多个 target 视图，对所有 target 联合排序选出统一的 selected_heads。
         """
         messages = build_messages(task)
         prompt_text = self.processor.apply_chat_template(
@@ -380,11 +381,15 @@ class AttentionAttributor:
 
         # 定位 image spans（基于 prompt 的 input_ids，生成后位置不变）
         image_spans = self._find_image_token_spans(inputs["input_ids"])
-        for tvi in target_view_indices:
-            if tvi >= len(image_spans):
-                raise ValueError(
-                    f"target_view_idx={tvi} 超出图像数 {len(image_spans)}"
-                )
+        if target_view_idx >= len(image_spans):
+            raise ValueError(
+                f"target_view_idx={target_view_idx} 超出图像数 {len(image_spans)}"
+            )
+        target_start, target_end = image_spans[target_view_idx]
+        target_token_count = target_end - target_start
+
+        # 获取目标图的 grid_thw（用于 spatial entropy 的 2D reshape）
+        grid_thw_target = inputs["image_grid_thw"][target_view_idx].tolist()
 
         # 生成 + 收集 attention
         print(f"    [generate mode] generating with output_attentions ...")
@@ -405,6 +410,7 @@ class AttentionAttributor:
         print(f"    Score text: {score_text!r}  score={score}")
 
         # 找最后一个数字 token 的生成步
+        # gen_ids[k] 是第 k+1 个生成 token
         digit_step = None
         for k in range(len(gen_ids) - 1, -1, -1):
             tok_str = self.tok.decode([int(gen_ids[k])]).strip()
@@ -413,7 +419,8 @@ class AttentionAttributor:
                 break
         if digit_step is None:
             digit_step = len(gen_ids) - 1
-        # out.attentions[0] 是 prefill，out.attentions[1] 是第 1 个生成 token
+        # 生成步索引：out.attentions[0] 是 prefill，out.attentions[1] 是第 1 个 token
+        # 所以第 digit_step 个生成 token 对应 out.attentions[digit_step + 1]
         attn_idx = digit_step + 1
         print(f"    Last digit token at gen step {digit_step}, attn idx {attn_idx}")
         print(f"    Last digit token: {self.tok.decode([int(gen_ids[digit_step])])!r}")
@@ -423,46 +430,70 @@ class AttentionAttributor:
         num_heads = attentions[0].shape[1]
         print(f"    Got attentions: {num_layers} layers × {num_heads} heads")
 
-        # query 行：每个 (layer, head) 在 query token（最后一个生成 token）位置上的 attention 分布
-        # generate 模式下 query 就是 attention 矩阵的最后一行（1, H, 1, T -> 取 [0])
-        query_rows = np.zeros((num_layers, num_heads, attentions[0].shape[-1]), dtype=np.float32)
+        # 计算 grid 用于 spatial entropy 的 reshape
+        grid_h, grid_w = _grid_hw_from_thw(grid_thw_target, self.processor)
+
+        # 抽取 query(=生成 token) → target_img 的 attention
+        q_to_target = np.zeros(
+            (num_layers, num_heads, target_token_count), dtype=np.float32
+        )
+        attn_sum = np.zeros((num_layers, num_heads), dtype=np.float32)
+        spatial_entropy = np.zeros((num_layers, num_heads), dtype=np.float32)
+
         for l in range(num_layers):
-            query_rows[l] = attentions[l][0, :, 0, :].float().cpu().numpy()
+            # [1, H, 1, T] -> [H, T]
+            attn_lh = attentions[l][0, :, 0, :].float().cpu().numpy()
+            for h in range(num_heads):
+                row = attn_lh[h]                              # [T]
+                seg = row[target_start:target_end]            # [target_token_count]
+                q_to_target[l, h] = seg
+                total = seg.sum()
+                attn_sum[l, h] = total
+                if SPATIAL_ENTROPY_MODE == "connected" and grid_h > 0 and grid_w > 0:
+                    seg_2d = _safe_reshape_2d(seg, grid_h, grid_w)
+                    spatial_entropy[l, h] = _spatial_entropy_connected(seg_2d) if total > 1e-12 else float(seg.size)
+                else:  # shannon
+                    if total > 1e-12:
+                        p = seg / total
+                        p_nz = p[p > 1e-12]
+                        spatial_entropy[l, h] = -float((p_nz * np.log(p_nz)).sum())
+                    else:
+                        spatial_entropy[l, h] = float(target_token_count) * np.log(target_token_count)
 
         del out, attentions
         torch.cuda.empty_cache()
 
-        image_grid_thw = inputs["image_grid_thw"]
-        agg_maps, selected_heads, agg_info, per_target = _aggregate_heads_multi(
-            query_rows, image_spans, target_view_indices, image_grid_thw, self.processor,
-            query_positions=[prompt_len + digit_step],
+        agg_map, selected_heads, agg_info = _aggregate_heads(
+            q_to_target, attn_sum, spatial_entropy, target_token_count,
+            grid_thw_target=grid_thw_target,
         )
 
-        target_ranges = {tvi: (int(per_target[tvi]["start"]), int(per_target[tvi]["end"]))
-                         for tvi in target_view_indices}
         stats = {
-            "per_target": per_target,
+            "attn_sum": attn_sum,
+            "spatial_entropy": spatial_entropy,
+            "q_to_target_full": q_to_target if (SAVE_ALL_HEAD_STATS or OUTPUT_PER_HEAD_VIDEOS) else None,
             "selected_heads": selected_heads,
             "num_layers": num_layers,
             "num_heads": num_heads,
             "query_positions": [prompt_len + digit_step],
+            "target_start": int(target_start),
+            "target_end": int(target_end),
             "forward_mode": "generate",
             "agg_info": agg_info,
-            "target_view_indices": list(target_view_indices),
+            "grid_thw_target": grid_thw_target,
         }
-        return agg_maps, score, target_ranges, stats
+        return agg_map, score, (int(target_start), int(target_end)), stats
 
     @torch.no_grad()
     def _compute_attention_teacher_forcing(
         self,
         image_paths: List[str],
         task: str,
-        target_view_indices: List[int],
+        target_view_idx: int = 5,
         query_mode: str = "last_prompt",
-    ) -> Tuple[Dict[int, np.ndarray], float, Dict[int, Tuple[int, int]], Dict]:
+    ) -> Tuple[np.ndarray, float, Tuple[int, int], Dict]:
         """
         Teacher-forcing 模式：先 generate 拿 score 文本，再 teacher-force 一次前向。
-        支持多个 target 视图，联合排序选 head。
         """
         # Step 1: 拿 score 文本
         score_text, score = self.generate_score(image_paths, task)
@@ -473,15 +504,15 @@ class AttentionAttributor:
         inputs, image_spans, prompt_len = self.build_forward_inputs(
             image_paths, task, score_text
         )
-        for tvi in target_view_indices:
-            if tvi >= len(image_spans):
-                raise ValueError(
-                    f"target_view_idx={tvi} 超出图像数 {len(image_spans)}"
-                )
+        if target_view_idx >= len(image_spans):
+            raise ValueError(
+                f"target_view_idx={target_view_idx} 超出图像数 {len(image_spans)}"
+            )
+        target_start, target_end = image_spans[target_view_idx]
+        target_token_count = target_end - target_start
         print(f"    Image spans: {len(image_spans)} images")
-        for tvi in target_view_indices:
-            s, e = image_spans[tvi]
-            print(f"    Target image[{tvi}] token range: [{s}, {e})  ({e - s} tokens)")
+        print(f"    Target image[{target_view_idx}] token range: "
+              f"[{target_start}, {target_end})  ({target_token_count} tokens)")
 
         # 找 query token 位置
         query_positions = self._find_query_positions(
@@ -501,35 +532,59 @@ class AttentionAttributor:
         num_heads = attentions[0].shape[1]
         print(f"    Got attentions: {num_layers} layers × {num_heads} heads")
 
-        # query 行：每个 (layer, head) 在 query_positions 行上的平均
-        T_full = attentions[0].shape[-1]
-        query_rows = np.zeros((num_layers, num_heads, T_full), dtype=np.float32)
+        # 获取目标图的 grid_thw（用于 spatial entropy 的 2D reshape）
+        grid_thw_target = inputs["image_grid_thw"][target_view_idx].tolist()
+        grid_h, grid_w = _grid_hw_from_thw(grid_thw_target, self.processor)
+
+        # 抽取 [layer, head] 的 query→target_img attention
+        q_to_target = np.zeros(
+            (num_layers, num_heads, target_token_count), dtype=np.float32
+        )
+        attn_sum = np.zeros((num_layers, num_heads), dtype=np.float32)
+        spatial_entropy = np.zeros((num_layers, num_heads), dtype=np.float32)
+
         for l in range(num_layers):
-            attn_lh = attentions[l][0].float().cpu().numpy()    # [H, T_full, T_full]
-            query_rows[l] = attn_lh[:, query_positions, :].mean(axis=1)
+            attn_lh = attentions[l][0].float().cpu().numpy()
+            for h in range(num_heads):
+                row = attn_lh[h, query_positions, :].mean(axis=0)
+                seg = row[target_start:target_end]
+                q_to_target[l, h] = seg
+                total = seg.sum()
+                attn_sum[l, h] = total
+                if SPATIAL_ENTROPY_MODE == "connected" and grid_h > 0 and grid_w > 0:
+                    seg_2d = _safe_reshape_2d(seg, grid_h, grid_w)
+                    spatial_entropy[l, h] = _spatial_entropy_connected(seg_2d) if total > 1e-12 else float(seg.size)
+                else:  # shannon
+                    if total > 1e-12:
+                        p = seg / total
+                        p_nz = p[p > 1e-12]
+                        spatial_entropy[l, h] = -float((p_nz * np.log(p_nz)).sum())
+                    else:
+                        spatial_entropy[l, h] = float(target_token_count) * np.log(target_token_count)
 
         del outputs, attentions
         torch.cuda.empty_cache()
 
-        image_grid_thw = inputs["image_grid_thw"]
-        agg_maps, selected_heads, agg_info, per_target = _aggregate_heads_multi(
-            query_rows, image_spans, target_view_indices, image_grid_thw, self.processor,
-            query_positions=query_positions,
+        agg_map, selected_heads, agg_info = _aggregate_heads(
+            q_to_target, attn_sum, spatial_entropy, target_token_count,
+            grid_thw_target=grid_thw_target,
         )
 
-        target_ranges = {tvi: (int(per_target[tvi]["start"]), int(per_target[tvi]["end"]))
-                         for tvi in target_view_indices}
         stats = {
-            "per_target": per_target,
+            "attn_sum": attn_sum,
+            "spatial_entropy": spatial_entropy,
+            "q_to_target_full": q_to_target if (SAVE_ALL_HEAD_STATS or OUTPUT_PER_HEAD_VIDEOS) else None,
             "selected_heads": selected_heads,
             "num_layers": num_layers,
             "num_heads": num_heads,
             "query_positions": query_positions,
+            "target_start": int(target_start),
+            "target_end": int(target_end),
             "forward_mode": "teacher_forcing",
             "agg_info": agg_info,
-            "target_view_indices": list(target_view_indices),
+            "grid_thw_target": grid_thw_target,
         }
-        return agg_maps, score, target_ranges, stats
+        return agg_map, score, (int(target_start), int(target_end)), stats
 
 
 # ============================================================
@@ -655,252 +710,142 @@ def _max_curvature_threshold(sorted_values: np.ndarray) -> float:
     return float(sorted_values[knee_idx])
 
 
-def _extract_per_target(
-    query_rows: np.ndarray,
-    target_start: int,
-    target_end: int,
-    grid_thw: List[int],
-    processor,
-) -> Dict:
+def _most_common_heads(all_records: List[Dict], top_n: int = 8) -> List[Tuple[int, int]]:
+    """统计所有 sample 里被选中的 head 出现频率，返回 top_n 最频繁的。"""
+    from collections import Counter
+    counter = Counter()
+    for r in all_records:
+        for lh in r.get("selected_heads", []):
+            counter[tuple(lh)] += 1
+    return [lh for lh, _ in counter.most_common(top_n)]
+
+
+def _aggregate_heads(
+    q_to_target: np.ndarray,
+    attn_sum: np.ndarray,
+    spatial_entropy: np.ndarray,
+    target_token_count: int,
+    grid_thw_target: Optional[List[int]] = None,
+) -> Tuple[np.ndarray, List[Tuple[int, int]], Dict]:
     """
-    从 query_rows [L, H, T_full] 切出某张 target 图的片段，计算 q_to_target / attn_sum / spatial_entropy。
+    按 HEAD_AGG / HEAD_CRITERION 聚合全 head 的 attention。
 
-    返回 dict:
-        q_to_target: [L, H, T_target]
-        attn_sum:    [L, H]
-        spatial_entropy: [L, H]
-        start, end, grid_thw, grid_h, grid_w
-    """
-    L, H, _ = query_rows.shape
-    seg = query_rows[:, :, target_start:target_end]          # [L, H, T_target]
-    attn_sum = seg.sum(axis=2)                                # [L, H]
-    grid_h, grid_w = _grid_hw_from_thw(grid_thw, processor)
+    改进点（对齐论文 2503.06287）：
+    - 排除前 EXCLUDE_FIRST_LAYERS 层（论文排除前 2 层）
+    - ATTN_SUM_THRESHOLD='max_curvature' 时用最大曲率法选 τ
+    - HEAD_CRITERION 含 low_entropy 时按 SPATIAL_ENTROPY_MODE 选 entropy 计算
 
-    spatial_entropy = np.zeros((L, H), dtype=np.float32)
-    if SPATIAL_ENTROPY_MODE == "connected" and grid_h > 0 and grid_w > 0:
-        for l in range(L):
-            for h in range(H):
-                total = float(attn_sum[l, h])
-                if total > 1e-12:
-                    seg_2d = _safe_reshape_2d(seg[l, h], grid_h, grid_w)
-                    spatial_entropy[l, h] = _spatial_entropy_connected(seg_2d)
-                else:
-                    spatial_entropy[l, h] = float(seg.shape[-1])
-    else:  # shannon
-        for l in range(L):
-            for h in range(H):
-                total = float(attn_sum[l, h])
-                if total > 1e-12:
-                    p = seg[l, h] / total
-                    p_nz = p[p > 1e-12]
-                    spatial_entropy[l, h] = -float((p_nz * np.log(p_nz)).sum())
-                else:
-                    spatial_entropy[l, h] = float(seg.shape[-1]) * np.log(max(seg.shape[-1], 1))
-
-    return {
-        "q_to_target": seg,
-        "attn_sum": attn_sum,
-        "spatial_entropy": spatial_entropy,
-        "start": int(target_start),
-        "end": int(target_end),
-        "grid_thw": list(grid_thw),
-        "grid_h": int(grid_h),
-        "grid_w": int(grid_w),
-    }
-
-
-def _aggregate_heads_multi(
-    query_rows: np.ndarray,
-    image_spans: List[Tuple[int, int]],
-    target_view_indices: List[int],
-    image_grid_thw: torch.Tensor,
-    processor,
-    query_positions: Optional[List[int]] = None,
-) -> Tuple[Dict[int, np.ndarray], List[Tuple[int, int]], Dict, Dict[int, Dict]]:
-    """
-    多 target 联合 head 选择 + 每 target 独立聚合。
-
-    流程：
-      1. 对每个 target 切出 q_to_target / attn_sum / spatial_entropy
-      2. 对所有 target 的 attn_sum / spatial_entropy 取平均，得到 [L, H] 的联合指标
-      3. 按 HEAD_CRITERION 在联合指标上排序选出统一 selected_heads（排除前 EXCLUDE_FIRST_LAYERS 层）
-      4. 用同一份 selected_heads 对每个 target 的 q_to_target 做平均，得到 per-target agg_map
+    q_to_target: [L, H, T]
+    attn_sum:    [L, H]
+    spatial_entropy: [L, H]  （注意：这里传入的应该是 connected entropy）
 
     返回:
-        agg_maps:      {target_view_idx: [T_target]}
-        selected_heads:[(layer, head), ...]
-        info:          诊断信息
-        per_target:    {target_view_idx: {q_to_target, attn_sum, spatial_entropy, start, end, grid_thw, ...}}
+        agg_map: [T] 聚合后的 attention
+        selected_heads: 选中的 (layer, head) 列表（mean 模式为空）
+        info: 诊断信息（阈值、候选池大小等）
     """
-    num_layers, num_heads = query_rows.shape[:2]
-    info = {
-        "excluded_layers": list(range(EXCLUDE_FIRST_LAYERS)),
-        "criterion": HEAD_CRITERION,
-        "num_targets": len(target_view_indices),
-    }
+    num_layers, num_heads = attn_sum.shape
+    info = {"excluded_layers": list(range(EXCLUDE_FIRST_LAYERS))}
 
-    per_target: Dict[int, Dict] = {}
-    for tvi in target_view_indices:
-        s, e = image_spans[tvi]
-        grid_thw = image_grid_thw[tvi].tolist()
-        per_target[tvi] = _extract_per_target(query_rows, s, e, grid_thw, processor)
-
-    # 联合指标：所有 target 的 sum / entropy 取平均
-    sum_stack = np.stack([per_target[tvi]["attn_sum"] for tvi in target_view_indices], axis=0)
-    ent_stack = np.stack([per_target[tvi]["spatial_entropy"] for tvi in target_view_indices], axis=0)
-    sum_mean = sum_stack.mean(axis=0)     # [L, H]
-    ent_mean = ent_stack.mean(axis=0)     # [L, H]
-    info["sum_mean"] = sum_mean
-    info["entropy_mean"] = ent_mean
-
-    # mean 模式：直接用全 head 平均
-    if HEAD_AGG == "mean":
-        agg_maps = {}
-        for tvi in target_view_indices:
-            agg_maps[tvi] = per_target[tvi]["q_to_target"].mean(axis=(0, 1))
-        print(f"    Aggregation: mean over all {num_layers * num_heads} heads "
-              f"({len(target_view_indices)} targets)")
-        return agg_maps, [], info, per_target
-
-    # topk 模式：构造候选池（排除前 N 层）
+    # 构造 layer mask：True 表示该层参与筛选
     layer_mask = np.array([l >= EXCLUDE_FIRST_LAYERS for l in range(num_layers)])
+
+    if HEAD_AGG == "mean":
+        agg_map = q_to_target.mean(axis=(0, 1))
+        print(f"    Aggregation: mean over all {num_layers * num_heads} heads")
+        return agg_map, [], info
+
+    # topk 模式：按 HEAD_CRITERION 评分排序
+    # 先把有效层（排除前 N 层）的 head 收集起来
     valid_indices = []   # (flat_idx, layer, head)
     for l in range(num_layers):
         if not layer_mask[l]:
             continue
         for h in range(num_heads):
             valid_indices.append((l * num_heads + h, l, h))
+
     print(f"    Candidate pool: {len(valid_indices)} heads "
           f"(excluded first {EXCLUDE_FIRST_LAYERS} layers)")
 
-    flat_sum = np.array([sum_mean[l, h] for (_, l, h) in valid_indices])
-    flat_ent = np.array([ent_mean[l, h] for (_, l, h) in valid_indices])
-
-    # 决定 sum 阈值 τ（floor / max_curvature / percentile）
-    if ATTN_SUM_THRESHOLD == "floor":
-        tau = float(ATTN_SUM_FLOOR)
-    elif ATTN_SUM_THRESHOLD == "max_curvature":
-        tau = _max_curvature_threshold(np.sort(flat_sum))
-    else:  # percentile
-        tau = float(np.percentile(flat_sum, 100 - LOW_ENTROPY_PERCENTILE))
-    info["tau"] = tau
-
-    # 按 criterion 排序
     if HEAD_CRITERION == "attn_sum":
-        score = flat_sum.copy()
-        print(f"    Criterion: attn_sum (τ={tau:.4f} ignored for pure-sum ranking)")
-    elif HEAD_CRITERION == "low_entropy":
-        score = -flat_ent.copy()   # 熵越小分越高
-        print(f"    Criterion: low spatial entropy ({SPATIAL_ENTROPY_MODE})")
-    elif HEAD_CRITERION == "localization":
-        # 标准 1+2 联合：s_norm * (1 - e_norm)，先用 floor 淘汰不看图的 head
-        mask_pass = flat_sum >= tau
-        if not mask_pass.any():
-            print(f"    [WARN] no head passes s_img_floor={tau:.4f}; disabling floor")
-            mask_pass = np.ones_like(flat_sum, dtype=bool)
-        s_eff = flat_sum.copy()
-        e_eff = flat_ent.copy()
-        s_eff[~mask_pass] = float(flat_sum.min())
-        finite_e = np.where(np.isfinite(e_eff), e_eff, -1.0)
-        e_max = float(finite_e.max()) if finite_e.size else 0.0
-        e_for_norm = np.where(np.isfinite(e_eff), e_eff, e_max)
-        s_norm = (s_eff - s_eff.min()) / max(float(s_eff.max() - s_eff.min()), 1e-12)
-        e_norm = (e_for_norm - e_for_norm.min()) / max(float(e_for_norm.max() - e_for_norm.min()), 1e-12)
-        score = s_norm * (1.0 - e_norm)
-        score[~mask_pass] = -np.inf
-        info["pass_mask_count"] = int(mask_pass.sum())
-        print(f"    Criterion: localization = s_norm*(1-e_norm), "
-              f"τ={tau:.4f}, {int(mask_pass.sum())} heads pass floor")
-    else:
-        print(f"    [WARN] unknown HEAD_CRITERION={HEAD_CRITERION}, fallback to attn_sum")
-        score = flat_sum.copy()
+        # 标准 1：attention sum 高
+        if ATTN_SUM_THRESHOLD == "max_curvature":
+            # 论文方法：先对所有有效 head 的 sum 排序，找最大曲率点作为阈值 τ
+            valid_sums = np.array([attn_sum[l, h] for (_, l, h) in valid_indices])
+            sorted_sums = np.sort(valid_sums)
+            tau = _max_curvature_threshold(sorted_sums)
+            info["tau"] = tau
+            print(f"    Max-curvature threshold τ = {tau:.4f}")
+            # 选 sum >= τ 的 head，如果不够 HEAD_TOPK 个，就取 top HEAD_TOPK
+            candidates = [(l, h) for (_, l, h) in valid_indices if attn_sum[l, h] >= tau]
+            if len(candidates) < HEAD_TOPK:
+                # 退回到 top-K by sum
+                flat_scores = np.array([attn_sum[l, h] for (_, l, h) in valid_indices])
+                top_order = np.argsort(flat_scores)[::-1][:HEAD_TOPK]
+                candidates = [valid_indices[i][1:] for i in top_order]
+                print(f"    τ too strict, fell back to top-{HEAD_TOPK} by attn_sum")
+            else:
+                # 在候选里按 sum 降序取 top-K
+                candidates.sort(key=lambda lh: attn_sum[lh[0], lh[1]], reverse=True)
+                candidates = candidates[:HEAD_TOPK]
+            selected_heads = candidates
+            print(f"    Aggregation: top-{HEAD_TOPK} by attn_sum (τ={tau:.4f})")
+        else:
+            # 分位数法
+            flat_scores = np.array([attn_sum[l, h] for (_, l, h) in valid_indices])
+            topk_local = np.argsort(flat_scores)[::-1][:HEAD_TOPK]
+            selected_heads = [valid_indices[i][1:] for i in topk_local]
+            print(f"    Aggregation: top-{HEAD_TOPK} by attn_sum")
 
-    topk_local = np.argsort(score)[::-1][:HEAD_TOPK]
-    selected_heads = [valid_indices[i][1:] for i in topk_local]
-    print(f"    Aggregation: top-{HEAD_TOPK} by {HEAD_CRITERION}")
+    elif HEAD_CRITERION == "low_entropy":
+        # 标准 2：空间熵低（attention 聚焦）
+        flat_ent = np.array([spatial_entropy[l, h] for (_, l, h) in valid_indices])
+        topk_local = np.argsort(flat_ent)[:HEAD_TOPK]   # 升序：熵小在前
+        selected_heads = [valid_indices[i][1:] for i in topk_local]
+        print(f"    Aggregation: top-{HEAD_TOPK} by low spatial entropy ({SPATIAL_ENTROPY_MODE})")
+
+    elif HEAD_CRITERION == "attn_sum_low_entropy":
+        # 标准 1+2：attention sum 高 且 熵低（论文完整标准）
+        # 先用 attn_sum 筛候选（max_curvature 或 top 比例）
+        flat_sum = np.array([attn_sum[l, h] for (_, l, h) in valid_indices])
+        flat_ent = np.array([spatial_entropy[l, h] for (_, l, h) in valid_indices])
+
+        if ATTN_SUM_THRESHOLD == "max_curvature":
+            tau = _max_curvature_threshold(np.sort(flat_sum))
+            info["tau"] = tau
+            sum_mask = flat_sum >= tau
+            print(f"    Max-curvature threshold τ = {tau:.4f}, "
+                  f"{int(sum_mask.sum())} heads pass")
+        else:
+            cutoff = np.percentile(flat_sum, 100 - LOW_ENTROPY_PERCENTILE)
+            tau = float(cutoff)
+            info["tau"] = tau
+            sum_mask = flat_sum >= cutoff
+
+        # 在候选里按熵升序取 top-K
+        candidate_local = np.where(sum_mask)[0]
+        if len(candidate_local) == 0:
+            # 退回到 top-K by sum
+            candidate_local = np.argsort(flat_sum)[::-1][:HEAD_TOPK * 4]
+        ent_order = candidate_local[np.argsort(flat_ent[candidate_local])]
+        topk_local = ent_order[:HEAD_TOPK]
+        selected_heads = [valid_indices[i][1:] for i in topk_local]
+        print(f"    Aggregation: top-{HEAD_TOPK} by attn_sum(≥τ) + low entropy")
+    else:
+        flat_scores = np.array([attn_sum[l, h] for (_, l, h) in valid_indices])
+        topk_local = np.argsort(flat_scores)[::-1][:HEAD_TOPK]
+        selected_heads = [valid_indices[i][1:] for i in topk_local]
+        print(f"    Aggregation: top-{HEAD_TOPK} by attn_sum (default)")
+
+    sel_maps = np.stack([q_to_target[l, h] for (l, h) in selected_heads])
+    agg_map = sel_maps.mean(axis=0)
     print(f"    Selected heads (layer, head): {selected_heads}")
-
-    # 用统一 selected_heads 对每个 target 聚合
-    agg_maps = {}
-    for tvi in target_view_indices:
-        sel_maps = np.stack([per_target[tvi]["q_to_target"][l, h] for (l, h) in selected_heads])
-        agg_maps[tvi] = sel_maps.mean(axis=0)
-
-    return agg_maps, selected_heads, info, per_target
-
-
-def _rank_aggregated(
-    sum_mat: np.ndarray,
-    ent_mat: np.ndarray,
-) -> Dict:
-    """
-    在聚合后的 [L, H] sum/entropy 矩阵上按 HEAD_CRITERION 选 top-K head。
-
-    与 _aggregate_heads_multi 内的排序逻辑保持一致：
-      - 排除前 EXCLUDE_FIRST_LAYERS 层
-      - ATTN_SUM_THRESHOLD 决定 τ（floor / max_curvature / percentile）
-      - HEAD_CRITERION: attn_sum / low_entropy / localization
-
-    返回: {"selected_heads": [(l,h),...], "tau": float|None}
-    用于 head_stats_overview / head_scatter 高亮，以及 per-head 固定视频的 head 选择。
-    """
-    num_layers, num_heads = sum_mat.shape
-    layer_mask = np.array([l >= EXCLUDE_FIRST_LAYERS for l in range(num_layers)])
-    valid_indices = [(l * num_heads + h, l, h)
-                     for l in range(num_layers) if layer_mask[l]
-                     for h in range(num_heads)]
-    if not valid_indices:
-        return {"selected_heads": [], "tau": None}
-
-    flat_sum = np.array([sum_mat[l, h] for (_, l, h) in valid_indices])
-    flat_ent = np.array([ent_mat[l, h] for (_, l, h) in valid_indices])
-
-    if ATTN_SUM_THRESHOLD == "floor":
-        tau = float(ATTN_SUM_FLOOR)
-    elif ATTN_SUM_THRESHOLD == "max_curvature":
-        tau = _max_curvature_threshold(np.sort(flat_sum))
-    else:
-        tau = float(np.percentile(flat_sum, 100 - LOW_ENTROPY_PERCENTILE))
-
-    if HEAD_CRITERION == "attn_sum":
-        score = flat_sum.copy()
-    elif HEAD_CRITERION == "low_entropy":
-        score = -flat_ent.copy()
-    elif HEAD_CRITERION == "localization":
-        mask_pass = flat_sum >= tau
-        if not mask_pass.any():
-            mask_pass = np.ones_like(flat_sum, dtype=bool)
-        s_eff = flat_sum.copy()
-        e_eff = flat_ent.copy()
-        s_eff[~mask_pass] = float(flat_sum.min())
-        finite_e = np.where(np.isfinite(e_eff), e_eff, -1.0)
-        e_max = float(finite_e.max()) if finite_e.size else 0.0
-        e_for_norm = np.where(np.isfinite(e_eff), e_eff, e_max)
-        s_norm = (s_eff - s_eff.min()) / max(float(s_eff.max() - s_eff.min()), 1e-12)
-        e_norm = (e_for_norm - e_for_norm.min()) / max(float(e_for_norm.max() - e_for_norm.min()), 1e-12)
-        score = s_norm * (1.0 - e_norm)
-        score[~mask_pass] = -np.inf
-    else:
-        score = flat_sum.copy()
-
-    topk_local = np.argsort(score)[::-1][:HEAD_TOPK]
-    selected_heads = [valid_indices[i][1:] for i in topk_local]
-    return {"selected_heads": selected_heads, "tau": tau}
+    return agg_map, selected_heads, info
 
 
 # ============================================================
 # 可视化
 # ============================================================
-
-def _normalize_heatmap(grid: np.ndarray) -> np.ndarray:
-    """减去最小值后归一化到 [0,1]，让对比度更强（背景归零）。"""
-    arr = np.asarray(grid, dtype=np.float64)
-    arr = arr - np.nanmin(arr)
-    denom = np.nanmax(arr)
-    if denom <= 0:
-        return np.zeros_like(arr)
-    return arr / denom
-
 
 def render_attention_frame(
     image_path: str,
@@ -911,61 +856,61 @@ def render_attention_frame(
     frame_idx: int,
     task: str,
     out_path: str,
-    alpha: float = 0.45,
+    panel_w: int = 384,
+    panel_h: int = 288,
     head_label: str = "",
 ) -> np.ndarray:
-    """单张原图分辨率 overlay（对齐 scan_localization_heads_best.py 的视觉风格）。"""
-    with Image.open(image_path) as im:
-        image = np.asarray(im.convert("RGB")).copy()
-        img_w, img_h = im.size
+    img = cv2.imread(image_path)
+    if img is None:
+        img = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.resize(img, (panel_w, panel_h))
 
-    # 热力图归一化（减最小值）+ PIL BICUBIC 上采样到原图尺寸
     heatmap_2d = patches_to_2d(attention_map, grid_thw_target)
-    max_val = float(np.nanmax(heatmap_2d))
-    heat_norm = _normalize_heatmap(heatmap_2d)
-    heat_pil = Image.fromarray(np.uint8(np.clip(heat_norm, 0, 1) * 255))
-    heat_pil = heat_pil.resize((img_w, img_h), resample=Image.Resampling.BICUBIC)
-    heat_resized = np.asarray(heat_pil, dtype=np.float32) / 255.0
+    max_val = float(heatmap_2d.max())
+    if max_val > 1e-8:
+        heatmap_norm = heatmap_2d / max_val
+    else:
+        heatmap_norm = heatmap_2d
 
-    heat_u8 = np.uint8(np.clip(heat_resized, 0, 1) * 255)
-    heat_color = cv2.applyColorMap(heat_u8, cv2.COLORMAP_JET)
-    heat_color = cv2.cvtColor(heat_color, cv2.COLOR_BGR2RGB)
+    heatmap_resized = cv2.resize(heatmap_norm, (panel_w, panel_h), interpolation=cv2.INTER_CUBIC)
+    heatmap_uint8 = (heatmap_resized * 255).astype(np.uint8)
+    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
 
-    overlay = np.clip(
-        (1.0 - alpha) * image.astype(np.float32) + alpha * heat_color.astype(np.float32),
-        0, 255,
-    ).astype(np.uint8)
+    overlay = cv2.addWeighted(img, 0.5, heatmap_color, 0.5, 0)
+    canvas = np.hstack([img, heatmap_color, overlay])
 
-    # 标题栏叠在图顶部（半透明黑底白字），不另起画布行，保持原图分辨率
-    title = (f"[{head_label}] " if head_label else "") + \
-            f"Step {step_idx}  Frame {frame_idx}  |  Score: {orig_score:+.1f}%  |  Max attn: {max_val:.4f}"
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = max(0.45, img_w / 1400.0)
-    thickness = max(1, int(round(scale * 2)))
-    (tw, th), baseline = cv2.getTextSize(title, font, scale, thickness)
-    bar_h = th + baseline + 8
-    cv2.rectangle(overlay, (0, 0), (min(img_w, tw + 12), bar_h), (0, 0, 0), -1)
-    cv2.putText(overlay, title, (6, th + 4), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    info_h = 50
+    info_bar = np.ones((info_h, canvas.shape[1], 3), dtype=np.uint8) * 30
+    label_prefix = f"[{head_label}]  " if head_label else ""
+    info_txt = (f"{label_prefix}Step {step_idx}  Frame {frame_idx}  |  "
+                f"Score: {orig_score:+.1f}%  |  Max attn: {max_val:.4f}  |  "
+                f"Grid: {heatmap_2d.shape}")
+    cv2.putText(info_bar, info_txt, (10, 32),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
-    # task 栏贴在底部
-    task_txt = f"Task: {task}"
-    max_chars = max(24, img_w // 8)
-    if len(task_txt) > max_chars:
-        task_txt = task_txt[: max_chars - 3] + "..."
-    scale_t = max(0.4, img_w / 1600.0)
-    thick_t = max(1, int(round(scale_t * 2)))
-    (tw2, th2), base2 = cv2.getTextSize(task_txt, font, scale_t, thick_t)
-    bar_h2 = th2 + base2 + 8
-    cv2.rectangle(overlay, (0, img_h - bar_h2), (min(img_w, tw2 + 12), img_h), (0, 0, 0), -1)
-    cv2.putText(overlay, task_txt, (6, img_h - base2 - 2), font, scale_t, (220, 220, 220), thick_t, cv2.LINE_AA)
+    task_h = 30
+    task_bar = np.ones((task_h, canvas.shape[1], 3), dtype=np.uint8) * 30
+    cv2.putText(task_bar, f"Task: {task}", (10, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+    title_h = 25
+    title_bar = np.ones((title_h, canvas.shape[1], 3), dtype=np.uint8) * 60
+    for i, txt in enumerate(["Original", "Attention", "Overlay"]):
+        cv2.putText(title_bar, txt,
+                    (i * panel_w + panel_w // 2 - 50, 17),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    final = np.vstack([info_bar, title_bar, canvas, task_bar])
 
     if out_path:
-        fig = plt.figure(figsize=(img_w / 100, img_h / 100), dpi=100)
-        plt.imshow(overlay)
+        fig = plt.figure(figsize=(12, 4))
+        plt.imshow(final)
         plt.axis('off')
-        plt.savefig(out_path, bbox_inches='tight', pad_inches=0)
+        plt.savefig(out_path, dpi=120, bbox_inches='tight')
         plt.close(fig)
-    return overlay
+    return final
 
 
 def plot_head_stats(stats: Dict, out_path: str):
@@ -1080,15 +1025,15 @@ def main():
     print(f"Data:            {DATA_DIR}")
     print(f"Task:            {TASK_INSTRUCTION}")
     print(f"Eval mode:       {EVAL_MODE}")
-    print(f"Target views:    images{TARGET_VIEW_INDICES}")
+    print(f"Target view:     image[{TARGET_VIEW_INDEX}] (AFTER High)")
     print(f"Forward mode:    {FORWARD_MODE}")
     print(f"Query mode:      {QUERY_MODE} (仅 teacher_forcing 模式生效)")
     print(f"Head aggregation:{HEAD_AGG} (topk={HEAD_TOPK}, criterion={HEAD_CRITERION})")
     print(f"Exclude layers:  first {EXCLUDE_FIRST_LAYERS} layers")
-    print(f"Attn sum thresh: {ATTN_SUM_THRESHOLD}" + (f" (floor={ATTN_SUM_FLOOR})" if ATTN_SUM_THRESHOLD == "floor" else ""))
+    print(f"Attn sum thresh: {ATTN_SUM_THRESHOLD}")
     print(f"Spatial entropy: {SPATIAL_ENTROPY_MODE}")
     print(f"Video content:   {VIDEO_CONTENT}")
-    print(f"Per-head videos: {OUTPUT_PER_HEAD_VIDEOS}")
+    print(f"Per-head videos: {OUTPUT_PER_HEAD_VIDEOS} (mode={HEAD_SELECTION_MODE})")
     print(f"Save npz:        {SAVE_ALL_HEAD_STATS}")
     print(f"Head stats agg:  {HEAD_STATS_AGG}")
     print(f"{'=' * 70}\n")
@@ -1142,29 +1087,25 @@ def main():
 
     # --- 4. 逐帧 attention 抽取 ---
     print("\n[4/5] Running attention extraction ...")
-    # 主视频：每个 target view 一个视频，按 target 顺序拼接帧列表
-    # video_frames_by_target[tvi] = [frame_rgb, ...]
-    video_frames_by_target: Dict[int, List[np.ndarray]] = {tvi: [] for tvi in TARGET_VIEW_INDICES}
+    video_frames = []                # 聚合后的视频帧
     all_records = []
-    # 累积全 head 统计（用于最后的 head_stats_overview / scatter），按 target 分开
-    accumulated_sum_by_target: Dict[int, List[np.ndarray]] = {tvi: [] for tvi in TARGET_VIEW_INDICES}
-    accumulated_ent_by_target: Dict[int, List[np.ndarray]] = {tvi: [] for tvi in TARGET_VIEW_INDICES}
-    accumulated_tau: List[float] = []
-    # per-sample per-target 的完整 head 数据，用于跑完后统一渲染 per-head 视频
-    # per_sample_data[step_idx] = {tvi: {image_path, q_to_target_full, grid_thw, ...}, "score", ...}
-    per_sample_data: List[Dict] = []
+    accumulated_attn_sum = []        # 累积所有 sample 的 attn_sum，用于最后的 overview
+    accumulated_entropy = []
+    accumulated_tau = []             # 累积阈值（用于报告平均 τ）
+    per_sample_data = []             # 每个 sample 的 (image_path, score, step, frame_idx, q_to_target_full, grid_thw)
     total_steps = len(samples)
 
     for step_idx, item in enumerate(samples):
         t0 = time.time()
         frame_idx = indices[step_idx + 1]
+        target_image_path = item["image"][TARGET_VIEW_INDEX]
         print(f"\n  [Step {step_idx + 1}/{total_steps}] frame_idx={frame_idx}")
 
         try:
-            agg_maps, orig_score, target_ranges, stats = attributor.compute_attention(
+            attention_map, orig_score, (t_start, t_end), stats = attributor.compute_attention(
                 image_paths=item["image"],
                 task=item["task"],
-                target_view_indices=TARGET_VIEW_INDICES,
+                target_view_idx=TARGET_VIEW_INDEX,
                 query_mode=QUERY_MODE,
                 forward_mode=FORWARD_MODE,
             )
@@ -1175,124 +1116,98 @@ def main():
             continue
 
         elapsed = time.time() - t0
-        print(f"    Score: {orig_score:+.1f}%  |  Time: {elapsed:.1f}s")
+        max_attn = float(attention_map.max())
+        print(f"    Score: {orig_score:+.1f}%  |  Max attn: {max_attn:.4f}  |  Time: {elapsed:.1f}s")
 
-        # 累积每个 target 的全 head 统计
-        per_target = stats["per_target"]
-        for tvi in TARGET_VIEW_INDICES:
-            accumulated_sum_by_target[tvi].append(per_target[tvi]["attn_sum"])
-            accumulated_ent_by_target[tvi].append(per_target[tvi]["spatial_entropy"])
+        # 累积全 head 统计（用于最后的 head_stats_overview）
+        accumulated_attn_sum.append(stats["attn_sum"])
+        accumulated_entropy.append(stats["spatial_entropy"])
         if stats.get("agg_info", {}).get("tau") is not None:
             accumulated_tau.append(stats["agg_info"]["tau"])
 
-        # 每个 target 渲染一帧热力图，加入对应 target 的主视频
-        step_sample_data: Dict = {
-            "score": orig_score,
-            "step_idx": step_idx,
-            "frame_idx": frame_idx,
-            "selected_heads": stats.get("selected_heads", []),
-        }
-        for tvi in TARGET_VIEW_INDICES:
-            attention_map = agg_maps[tvi]
-            target_image_path = item["image"][tvi]
-            grid_thw_target = per_target[tvi]["grid_thw"]
-            max_attn = float(attention_map.max()) if attention_map.size else 0.0
-            print(f"    [target {tvi}] max attn: {max_attn:.4f}")
-
-            heatmap_png = str(heatmaps_dir / f"heatmap_step{step_idx:04d}_frame{frame_idx:06d}_t{tvi}.png")
-            frame_rgb = render_attention_frame(
-                image_path=target_image_path,
-                attention_map=attention_map,
-                grid_thw_target=grid_thw_target,
-                orig_score=orig_score,
-                step_idx=step_idx,
-                frame_idx=frame_idx,
-                task=TASK_INSTRUCTION,
-                out_path=heatmap_png,
-                alpha=OVERLAY_ALPHA,
-                head_label=f"t{tvi} top-{HEAD_TOPK} {HEAD_CRITERION}",
+        # 拿目标图 grid_thw
+        grid_thw_target = stats.get("grid_thw_target")
+        if grid_thw_target is None:
+            images_pil = [Image.open(p).convert("RGB") for p in item["image"]]
+            messages = build_messages(item["task"])
+            prompt_text = attributor.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
             )
-            video_frames_by_target[tvi].append(frame_rgb)
+            proc_inputs = attributor.processor(
+                text=[prompt_text], images=images_pil, return_tensors="pt", padding=True
+            )
+            grid_thw_target = proc_inputs["image_grid_thw"][TARGET_VIEW_INDEX].tolist()
 
-            # 保存完整 head 数据用于 per-head 视频（仅开启时保留 q_to_target）
-            if OUTPUT_PER_HEAD_VIDEOS or SAVE_ALL_HEAD_STATS:
-                step_sample_data[tvi] = {
-                    "image_path": target_image_path,
-                    "q_to_target_full": per_target[tvi]["q_to_target"],   # [L, H, T_target]
-                    "grid_thw_target": grid_thw_target,
-                }
+        # 渲染聚合帧（主视频）
+        heatmap_png = str(heatmaps_dir / f"heatmap_step{step_idx:04d}_frame{frame_idx:06d}.png")
+        frame_rgb = render_attention_frame(
+            image_path=target_image_path,
+            attention_map=attention_map,
+            grid_thw_target=grid_thw_target,
+            orig_score=orig_score,
+            step_idx=step_idx,
+            frame_idx=frame_idx,
+            task=TASK_INSTRUCTION,
+            out_path=heatmap_png,
+            head_label=f"top-{HEAD_TOPK} {HEAD_CRITERION}",
+        )
+        video_frames.append(frame_rgb)
 
-            record = {
-                "step": step_idx,
+        # 保存每个 sample 的完整 head 数据（用于跑完后统一渲染 per-head 视频）
+        # 注意：q_to_target_full 只在 OUTPUT_PER_HEAD_VIDEOS 或 SAVE_ALL_HEAD_STATS 开启时保留
+        if OUTPUT_PER_HEAD_VIDEOS and stats.get("q_to_target_full") is not None:
+            per_sample_data.append({
+                "image_path": target_image_path,
+                "score": orig_score,
+                "step_idx": step_idx,
                 "frame_idx": frame_idx,
-                "target_view_idx": tvi,
-                "orig_score": orig_score,
-                "max_attn": max_attn,
-                "mean_attn": float(attention_map.mean()) if attention_map.size else 0.0,
-                "attention_map": attention_map.tolist(),
+                "q_to_target_full": stats["q_to_target_full"],   # [L, H, T]
                 "grid_thw_target": grid_thw_target,
-                "target_token_range": [target_ranges[tvi][0], target_ranges[tvi][1]],
-            }
-            all_records.append(record)
+                "selected_heads": stats.get("selected_heads", []),
+            })
 
-        if OUTPUT_PER_HEAD_VIDEOS or SAVE_ALL_HEAD_STATS:
-            per_sample_data.append(step_sample_data)
+        record = {
+            "step": step_idx,
+            "frame_idx": frame_idx,
+            "orig_score": orig_score,
+            "max_attn": max_attn,
+            "mean_attn": float(attention_map.mean()),
+            "attention_map": attention_map.tolist(),
+            "grid_thw_target": grid_thw_target,
+            "selected_heads": stats.get("selected_heads", []),
+            "target_token_range": [t_start, t_end],
+            "forward_mode": stats.get("forward_mode", FORWARD_MODE),
+        }
+        all_records.append(record)
 
         # 保存这一步的全 head 统计（npz，可选）
         if SAVE_ALL_HEAD_STATS:
-            for tvi in TARGET_VIEW_INDICES:
-                npz_path = run_root / f"head_stats_step{step_idx:04d}_t{tvi}.npz"
-                save_dict = {
-                    "attn_sum": per_target[tvi]["attn_sum"],
-                    "spatial_entropy": per_target[tvi]["spatial_entropy"],
-                }
-                if (OUTPUT_PER_HEAD_VIDEOS or SAVE_ALL_HEAD_STATS):
-                    save_dict["q_to_target_full"] = per_target[tvi]["q_to_target"]
-                np.savez_compressed(str(npz_path), **save_dict)
+            npz_path = run_root / f"head_stats_step{step_idx:04d}.npz"
+            save_dict = {
+                "attn_sum": stats["attn_sum"],
+                "spatial_entropy": stats["spatial_entropy"],
+            }
+            if stats.get("q_to_target_full") is not None:
+                save_dict["q_to_target_full"] = stats["q_to_target_full"]
+            np.savez_compressed(str(npz_path), **save_dict)
 
-    print(f"\n  Done. "
-          + ", ".join(f"t{tvi}={len(fs)} frames" for tvi, fs in video_frames_by_target.items())
-          + "\n")
+    print(f"\n  Done. {len(video_frames)} frames rendered.\n")
 
     # --- 5. 保存 ---
     print("[5/5] Saving results ...")
 
-    # 计算聚合后的 sum/entropy 矩阵（多 target 取平均 + 跨 sample 取平均/首帧）
-    agg_sum_mat = None
-    agg_ent_mat = None
-    if any(accumulated_sum_by_target[tvi] for tvi in TARGET_VIEW_INDICES):
-        # 每个 target 内部先跨 sample 聚合
-        per_target_sum = {}
-        per_target_ent = {}
-        for tvi in TARGET_VIEW_INDICES:
-            sums = accumulated_sum_by_target[tvi]
-            ents = accumulated_ent_by_target[tvi]
-            if not sums:
-                continue
-            if HEAD_STATS_AGG == "first":
-                per_target_sum[tvi] = sums[0]
-                per_target_ent[tvi] = ents[0]
-            else:
-                per_target_sum[tvi] = np.mean(np.stack(sums), axis=0)
-                per_target_ent[tvi] = np.mean(np.stack(ents), axis=0)
-        if per_target_sum:
-            # 多 target 再平均
-            agg_sum_mat = np.mean(np.stack(list(per_target_sum.values())), axis=0)
-            agg_ent_mat = np.mean(np.stack(list(per_target_ent.values())), axis=0)
-
-    # JSON
     json_path = run_root / "attention_results.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump({
             "config": {
-                "method": "Attention (query token → target images)",
+                "method": "Attention (query token → target image)",
                 "model_path": MODEL_PATH,
                 "data_dir": DATA_DIR,
                 "task": TASK_INSTRUCTION,
                 "goal_image": GOAL_IMAGE,
                 "frame_interval": FRAME_INTERVAL,
                 "eval_mode": EVAL_MODE,
-                "target_view_indices": TARGET_VIEW_INDICES,
+                "target_view_index": TARGET_VIEW_INDEX,
                 "forward_mode": FORWARD_MODE,
                 "query_mode": QUERY_MODE,
                 "head_agg": HEAD_AGG,
@@ -1300,151 +1215,147 @@ def main():
                 "head_criterion": HEAD_CRITERION,
                 "exclude_first_layers": EXCLUDE_FIRST_LAYERS,
                 "attn_sum_threshold": ATTN_SUM_THRESHOLD,
-                "attn_sum_floor": ATTN_SUM_FLOOR,
                 "spatial_entropy_mode": SPATIAL_ENTROPY_MODE,
                 "video_content": VIDEO_CONTENT,
                 "per_head_videos": OUTPUT_PER_HEAD_VIDEOS,
-                "save_all_head_stats": SAVE_ALL_HEAD_STATS,
-                "head_stats_agg": HEAD_STATS_AGG,
+                "head_selection_mode": HEAD_SELECTION_MODE,
             },
             "records": all_records,
         }, f, indent=2, ensure_ascii=False)
     print(f"  Results JSON: {json_path}")
 
-    # 头统计汇总：layer×head 热力图 + scatter plot（用聚合 sum/ent 矩阵）
-    if agg_sum_mat is not None:
+    # 头统计汇总：layer×head 热力图 + scatter plot
+    if accumulated_attn_sum:
         try:
-            # 用聚合后的指标重新选一次 head（与每步排序方式一致），用于在图上高亮
-            agg_info = _rank_aggregated(agg_sum_mat, agg_ent_mat)
-            common_heads = agg_info["selected_heads"]
+            if HEAD_STATS_AGG == "first":
+                sum_mat = accumulated_attn_sum[0]
+                ent_mat = accumulated_entropy[0]
+            else:
+                sum_mat = np.mean(np.stack(accumulated_attn_sum), axis=0)
+                ent_mat = np.mean(np.stack(accumulated_entropy), axis=0)
+            common_heads = _most_common_heads(all_records)
 
             # 热力图
             plot_head_stats(
                 {
-                    "attn_sum": agg_sum_mat,
-                    "spatial_entropy": agg_ent_mat,
+                    "attn_sum": sum_mat,
+                    "spatial_entropy": ent_mat,
                     "selected_heads": common_heads,
                 },
                 str(run_root / "head_stats_overview.png"),
             )
-            print(f"  Head stats overview ({HEAD_STATS_AGG} over samples, "
-                  f"mean over {len(TARGET_VIEW_INDICES)} targets): "
+            print(f"  Head stats overview ({HEAD_STATS_AGG} over {len(accumulated_attn_sum)} samples): "
                   f"{run_root / 'head_stats_overview.png'}")
 
             # scatter plot（论文 Fig 6 风格）
-            tau_for_plot = agg_info.get("tau")
+            mean_tau = float(np.mean(accumulated_tau)) if accumulated_tau else None
             plot_head_scatter(
-                attn_sum=agg_sum_mat,
-                spatial_entropy=agg_ent_mat,
+                attn_sum=sum_mat,
+                spatial_entropy=ent_mat,
                 selected_heads=common_heads,
-                tau=tau_for_plot,
+                tau=mean_tau,
                 out_path=str(run_root / "head_scatter.png"),
             )
             print(f"  Head scatter (sum vs entropy): {run_root / 'head_scatter.png'}")
-            if tau_for_plot is not None:
-                print(f"    τ used for ranking: {tau_for_plot:.4f}")
+            if mean_tau is not None:
+                print(f"    Mean τ (max curvature): {mean_tau:.4f}")
         except Exception as e:
             print(f"  [WARN] head stats plot failed: {e}")
             import traceback
             traceback.print_exc()
 
-    # 主视频：每个 target 一个
-    content_desc = {
-        "selected": f"top-{HEAD_TOPK} heads by {HEAD_CRITERION}" if HEAD_AGG == "topk" else "mean of all heads",
-        "mean": "mean of all heads (forced)",
-    }.get(VIDEO_CONTENT, VIDEO_CONTENT)
-    for tvi in TARGET_VIEW_INDICES:
-        frames = video_frames_by_target[tvi]
-        if not frames:
-            continue
-        video_path = run_root / f"attention_video_t{tvi}_{VIDEO_CONTENT}.mp4"
+    # 视频汇总
+    # VIDEO_CONTENT='selected' : 用 HEAD_AGG/HEAD_CRITERION 筛出的 head（即每帧热力图用的同一份）
+    # VIDEO_CONTENT='mean'     : 用全 head 平均（独立于 HEAD_AGG，作为对照）
+    video_path = run_root / f"attention_video_{VIDEO_CONTENT}.mp4"
+    if video_frames:
         if _MOVIEPY_AVAILABLE:
-            clip = ImageSequenceClip(frames, fps=VIDEO_FPS)
+            clip = ImageSequenceClip(video_frames, fps=VIDEO_FPS)
             clip.write_videofile(str(video_path), logger=None)
         else:
-            h, w = frames[0].shape[:2]
+            h, w = video_frames[0].shape[:2]
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             writer = cv2.VideoWriter(str(video_path), fourcc, VIDEO_FPS, (w, h))
-            for frm in frames:
+            for frm in video_frames:
                 writer.write(cv2.cvtColor(frm, cv2.COLOR_RGB2BGR))
             writer.release()
-        print(f"  Attention video t{tvi} ({VIDEO_CONTENT}: {content_desc}): {video_path}")
+        content_desc = {
+            "selected": f"top-{HEAD_TOPK} heads by {HEAD_CRITERION}" if HEAD_AGG == "topk" else "mean of all heads",
+            "mean": "mean of all heads (forced)",
+        }.get(VIDEO_CONTENT, VIDEO_CONTENT)
+        print(f"  Attention video ({VIDEO_CONTENT}: {content_desc}): {video_path}")
 
-    # 每个固定 top-K head 单独的视频（对每个 target 各输出一个）
-    # 流程：
-    # 1. 跑完所有 sample 后，在聚合 sum/entropy 上按 HEAD_CRITERION 选固定 HEAD_TOPK 个 head
-    # 2. 用这些固定 head 对每个 sample 渲染一帧，每个 head × 每个 target 一个视频
-    if OUTPUT_PER_HEAD_VIDEOS and per_sample_data and agg_sum_mat is not None:
+    # 每个固定 top-K head 单独的视频（对齐论文 selection frequency 思想）
+    # 不再每 sample 独立渲染（那样会产生 25+ 个视频），而是：
+    # 1. 跑完所有 sample 后，按 selection frequency 选固定 HEAD_TOPK 个 head
+    # 2. 用这些固定 head 对每个 sample 渲染一帧，组成完整视频
+    if OUTPUT_PER_HEAD_VIDEOS and per_sample_data:
         per_head_dir = run_root / "per_head_videos"
         per_head_dir.mkdir(exist_ok=True)
 
-        fixed_heads_info = _rank_aggregated(agg_sum_mat, agg_ent_mat)
-        fixed_heads = fixed_heads_info["selected_heads"]
-        print(f"  Fixed heads (ranked by {HEAD_CRITERION} on aggregated stats, top-{HEAD_TOPK}):")
-        for lh in fixed_heads:
-            print(f"    L{lh[0]:02d}H{lh[1]:02d}")
+        # 选固定 head
+        if HEAD_SELECTION_MODE == "frequency":
+            from collections import Counter
+            counter = Counter()
+            for sd in per_sample_data:
+                for lh in sd["selected_heads"]:
+                    counter[tuple(lh)] += 1
+            fixed_heads = [lh for lh, _ in counter.most_common(HEAD_TOPK)]
+            print(f"  Fixed heads by selection frequency (top-{HEAD_TOPK}):")
+            for lh in fixed_heads:
+                print(f"    L{lh[0]:02d}H{lh[1]:02d}: selected in {counter[lh]}/{len(per_sample_data)} samples")
+        else:  # 'mean_sum'
+            mean_sum = np.mean(np.stack(accumulated_attn_sum), axis=0)
+            flat = mean_sum.flatten()
+            topk = np.argsort(flat)[::-1][:HEAD_TOPK]
+            num_heads = mean_sum.shape[1]
+            fixed_heads = [(int(i // num_heads), int(i % num_heads)) for i in topk]
+            print(f"  Fixed heads by mean attn_sum (top-{HEAD_TOPK}): {fixed_heads}")
 
+        # 用固定 head 渲染每个 sample 的帧
         for (l, h) in fixed_heads:
-            for tvi in TARGET_VIEW_INDICES:
-                frames = []
-                for sd in per_sample_data:
-                    if tvi not in sd:
-                        continue
-                    q_full = sd[tvi]["q_to_target_full"]   # [L, H, T_target]
-                    head_map = q_full[l, h]
-                    head_frame = render_attention_frame(
-                        image_path=sd[tvi]["image_path"],
-                        attention_map=head_map,
-                        grid_thw_target=sd[tvi]["grid_thw_target"],
-                        orig_score=sd["score"],
-                        step_idx=sd["step_idx"],
-                        frame_idx=sd["frame_idx"],
-                        task=TASK_INSTRUCTION,
-                        out_path=None,
-                        alpha=OVERLAY_ALPHA,
-                        head_label=f"L{l:02d}H{h:02d} t{tvi}",
-                    )
-                    frames.append(head_frame)
-                if not frames:
-                    continue
+            frames = []
+            for sd in per_sample_data:
+                q_full = sd["q_to_target_full"]   # [L, H, T]
+                head_map = q_full[l, h]
+                head_frame = render_attention_frame(
+                    image_path=sd["image_path"],
+                    attention_map=head_map,
+                    grid_thw_target=sd["grid_thw_target"],
+                    orig_score=sd["score"],
+                    step_idx=sd["step_idx"],
+                    frame_idx=sd["frame_idx"],
+                    task=TASK_INSTRUCTION,
+                    out_path=None,
+                    head_label=f"L{l:02d}H{h:02d}",
+                )
+                frames.append(head_frame)
 
-                head_video_path = per_head_dir / f"L{l:02d}H{h:02d}_t{tvi}.mp4"
-                if _MOVIEPY_AVAILABLE:
-                    clip = ImageSequenceClip(frames, fps=VIDEO_FPS)
-                    clip.write_videofile(str(head_video_path), logger=None)
-                else:
-                    h_, w_ = frames[0].shape[:2]
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    writer = cv2.VideoWriter(str(head_video_path), fourcc, VIDEO_FPS, (w_, h_))
-                    for frm in frames:
-                        writer.write(cv2.cvtColor(frm, cv2.COLOR_RGB2BGR))
-                    writer.release()
-                print(f"    → {head_video_path}")
+            head_video_path = per_head_dir / f"L{l:02d}H{h:02d}.mp4"
+            if _MOVIEPY_AVAILABLE:
+                clip = ImageSequenceClip(frames, fps=VIDEO_FPS)
+                clip.write_videofile(str(head_video_path), logger=None)
+            else:
+                h_, w_ = frames[0].shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                writer = cv2.VideoWriter(str(head_video_path), fourcc, VIDEO_FPS, (w_, h_))
+                for frm in frames:
+                    writer.write(cv2.cvtColor(frm, cv2.COLOR_RGB2BGR))
+                writer.release()
+            print(f"    → {head_video_path}")
 
-    # score / max_attn 曲线（每个 target 一条 max_attn 线）
+    # score / max_attn 曲线
     try:
         fig, ax = plt.subplots(figsize=(10, 4))
-        steps_sorted = sorted({r["step"] for r in all_records})
-        score_by_step = {}
-        for r in all_records:
-            score_by_step.setdefault(r["step"], []).append(r["orig_score"])
-        scores = [float(np.mean(score_by_step[s])) for s in steps_sorted]
-
+        steps = [r["step"] for r in all_records]
+        scores = [r["orig_score"] for r in all_records]
+        maxes = [r["max_attn"] for r in all_records]
         ax2 = ax.twinx()
-        ax.plot(steps_sorted, scores, "o-", color="#2196F3", label="Score (%)")
-        colors = ["#FF5722", "#4CAF50", "#9C27B0", "#FF9800", "#00BCD4"]
-        for ci, tvi in enumerate(TARGET_VIEW_INDICES):
-            maxes_by_step = {}
-            for r in all_records:
-                if r["target_view_idx"] == tvi:
-                    maxes_by_step.setdefault(r["step"], []).append(r["max_attn"])
-            maxes = [float(np.mean(maxes_by_step[s])) if s in maxes_by_step else np.nan
-                     for s in steps_sorted]
-            ax2.plot(steps_sorted, maxes, "s-", color=colors[ci % len(colors)],
-                     label=f"Max attn t{tvi}")
+        ax.plot(steps, scores, "o-", color="#2196F3", label="Score (%)")
+        ax2.plot(steps, maxes, "s-", color="#FF5722", label="Max attention")
         ax.set_xlabel("Step")
         ax.set_ylabel("Original Score (%)", color="#2196F3")
-        ax2.set_ylabel("Max attention")
+        ax2.set_ylabel("Max attention", color="#FF5722")
         ax.set_title(f"Score vs Attention Over Time\nTask: {TASK_INSTRUCTION}")
         fig.legend(loc="upper left", bbox_to_anchor=(0.15, 0.95))
         fig.tight_layout()

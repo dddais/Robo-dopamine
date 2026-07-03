@@ -17,16 +17,16 @@ from examples.inference import GRMInference
 # MODEL_PATH = "/home/dais/workspace/Robo-Dopamine/train/checkpoints/my_carrot_finetune_big"
 # MODEL_PATH = "/home/dais/workspace/Robo-Dopamine/train/checkpoints/sub1_approach_grasp_finetune"
 MODEL_PATH = './pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview'
-DATA_DIR = "/home/dais/workspace/Robo-Dopamine/aligned_data/xzx_episode_1_sub2"
+DATA_DIR = "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_1_carrot"
 # OUTPUT_ROOT = "./results/pick_3_fail/exp_suc1_inter20_ckpt"
-OUTPUT_ROOT = "./results/xzx_episode_1_sub2_new_prompt_ref_inter30"
+OUTPUT_ROOT = "./results/white_cube_inter20"
 
-TASK_INSTRUCTION = "pick the red radio and turn it on, if the light turns green then it succeeds"
+TASK_INSTRUCTION = "pick the white cube and put it on the plate"
 # TASK_INSTRUCTION = "pick the carrot and put it on yellow plate "
-# GOAL_IMAGE = "./examples/blank_goal.png"
+GOAL_IMAGE = "./examples/blank_goal.png"
 # GOAL_IMAGE = "./examples/exp_suc_1.png"
-GOAL_IMAGE = "./examples/xzx_ep1_sub2.png"
-INTERVAL = 30
+# GOAL_IMAGE = "./examples/xzx_ep1_sub2.png"
+INTERVAL = 20
 # ============================
 # 加载模型
 # ============================
