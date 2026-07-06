@@ -46,12 +46,12 @@ SAMPLE_INDEX=0
 LAYERS="all"
 SKIP_EARLY_LAYERS=5   # Kang et al. exclude the first two LLM layers.
 FOCUS_IMAGES="after_cam_high,after_cam_left_wrist,after_cam_right_wrist"
-OUT_DIR="./results/scan_attention_cube_incre_prompt"
+OUT_DIR="./results/scan_attention_cube_incre_generate"
 # query 选择：
 #   'last_prompt' : prompt 最后一个 token（对齐 Kang 论文的"最后一个输入文本 token"，单次前向）
 #   'generate'    : 正常自回归生成 score，再由 --generate-query-stage 选择 score token 相关 attention
 #   'score'       : teacher-force "<score>0%</score>"，取数字 0 token（旧行为，保留兼容）
-QUERY_MODE="last_prompt"
+QUERY_MODE="generate"
 GENERATE_MAX_NEW_TOKENS=64
 
 SAVE_ATTENTION_VIDEOS=True
@@ -66,14 +66,16 @@ SAMPLE_INDEX=-1
 # - Criterion 1 uses an elbow/chord threshold over raw image-attention mass.
 # - Criterion 2 uses mean-centered connected components rather than max-relative
 #   peak thresholding, which can reward one-cell noise spikes.
-RANK_BY="selection_frequency"
+#"selection_frequency", "localization", "action_localization", "target_fraction", "target_density", "density_ratio", "iou"
+RANK_BY="localization"
+TOP_K=5
 S_IMG_THRESHOLD_METHOD="chord"
 S_IMG_FLOOR=0.01
 S_IMG_MIN_KEEP=1
 SELECTION_LOW_ENTROPY_K=10
-FOCUS_AGG="max"
-SCORE_QUERY_TOKENS="sign,digit"
-GENERATE_QUERY_STAGE="score_token" #score_token or predict_token
+FOCUS_AGG="mean" #max or mean
+SCORE_QUERY_TOKENS="digit"
+GENERATE_QUERY_STAGE="predict_token" #score_token or predict_token
 ENTROPY_METHOD="mean_relu"
 ENTROPY_THRESHOLD=0.001
 ENTROPY_THRESHOLD_REL=0.6
@@ -511,6 +513,137 @@ def score_token_kind_set(token_text: str) -> set[str]:
     return kinds
 
 
+def decode_one_token(tokenizer, token_id: int) -> str:
+    try:
+        return tokenizer.decode(
+            [int(token_id)],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+    except TypeError:
+        return tokenizer.decode([int(token_id)], skip_special_tokens=True)
+
+
+def generated_token_spans(tokenizer, gen_ids: Sequence[int]) -> Tuple[str, List[Tuple[int, str, int, int]]]:
+    spans: List[Tuple[int, str, int, int]] = []
+    parts: List[str] = []
+    cursor = 0
+    for idx, token_id in enumerate(gen_ids):
+        text = decode_one_token(tokenizer, int(token_id))
+        start = cursor
+        end = start + len(text)
+        spans.append((idx, text, start, end))
+        parts.append(text)
+        cursor = end
+    return "".join(parts), spans
+
+
+def find_generated_score_value_span(score_text: str) -> Optional[Tuple[Tuple[int, int], str]]:
+    score_value = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
+    patterns = [
+        rf"<score>\s*{score_value}\s*%?\s*</score>",
+        rf"{score_value}\s*%",
+        score_value,
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, score_text, flags=re.IGNORECASE)
+        if match:
+            return match.span(1), match.group(1)
+    return None
+
+
+def value_fragment_kind_set(fragment: str) -> set[str]:
+    kinds: set[str] = set()
+    if re.search(r"[+-]", fragment):
+        kinds.add("sign")
+    if re.search(r"\d", fragment):
+        kinds.add("digit")
+    if "%" in fragment:
+        kinds.add("percent")
+    return kinds
+
+
+def score_token_clean_for_value(token_text: str, value_fragment: str) -> bool:
+    stripped = token_text.strip()
+    fragment = value_fragment.strip()
+    if not stripped or not fragment:
+        return False
+    if "tag" in score_token_kind_set(stripped):
+        return False
+    return stripped == fragment
+
+
+def best_score_kind(matched_kinds: set[str], requested_kinds: set[str]) -> str:
+    for kind in ("digit", "sign", "percent", "tag"):
+        if kind in requested_kinds and kind in matched_kinds:
+            return kind
+    return sorted(matched_kinds)[0]
+
+
+def select_generated_score_token(
+    tokenizer,
+    gen_ids: Sequence[int],
+    requested_kinds: set[str],
+) -> Tuple[int, str, str, str, str, bool]:
+    score_text, token_spans = generated_token_spans(tokenizer, gen_ids)
+    score_value = find_generated_score_value_span(score_text)
+    candidates: List[Tuple[int, int, int, str, str, str, bool]] = []
+
+    if score_value is not None:
+        (value_start, value_end), value_text = score_value
+        for idx, token_text, token_start, token_end in token_spans:
+            if token_end <= value_start or token_start >= value_end:
+                continue
+            overlap_start = max(token_start, value_start)
+            overlap_end = min(token_end, value_end)
+            value_fragment = score_text[overlap_start:overlap_end]
+            token_kinds = value_fragment_kind_set(value_fragment)
+            matched_kinds = token_kinds & requested_kinds
+            if not matched_kinds:
+                continue
+            selected_kind = best_score_kind(matched_kinds, requested_kinds)
+            clean = score_token_clean_for_value(token_text, value_fragment)
+            kind_rank = {"digit": 0, "sign": 1, "percent": 2, "tag": 3}.get(selected_kind, 9)
+            clean_rank = 0 if clean else 1
+            candidates.append((clean_rank, kind_rank, idx, selected_kind, token_text, value_fragment, clean))
+
+        if candidates:
+            candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+            clean_rank, _kind_rank, idx, selected_kind, token_text, value_fragment, clean = candidates[0]
+            reason = "clean_score_value_token" if clean_rank == 0 else "mixed_score_boundary_token"
+            return idx, selected_kind, token_text, score_text, f"{reason}:value={value_text!r}:fragment={value_fragment!r}", clean
+
+    # Fallback for malformed generations. Keep the old behavior available, but
+    # prefer non-tag fragments so qualitative maps do not lock onto XML syntax.
+    fallback: List[Tuple[int, int, int, str, str, bool]] = []
+    for idx, token_text, _token_start, _token_end in token_spans:
+        token_kinds = score_token_kind_set(token_text)
+        matched_kinds = token_kinds & requested_kinds
+        if not matched_kinds:
+            continue
+        selected_kind = best_score_kind(matched_kinds, requested_kinds)
+        clean = "tag" not in token_kinds
+        clean_rank = 0 if clean else 1
+        kind_rank = {"digit": 0, "sign": 1, "percent": 2, "tag": 3}.get(selected_kind, 9)
+        fallback.append((clean_rank, kind_rank, idx, selected_kind, token_text, clean))
+    if not fallback:
+        for idx, token_text, _token_start, _token_end in token_spans:
+            token_kinds = score_token_kind_set(token_text)
+            if "digit" in token_kinds:
+                clean = "tag" not in token_kinds
+                clean_rank = 0 if clean else 1
+                fallback.append((clean_rank, 0, idx, "digit", token_text, clean))
+    if fallback:
+        fallback.sort(key=lambda item: (item[0], item[1], item[2]))
+        _clean_rank, _kind_rank, idx, selected_kind, token_text, clean = fallback[0]
+        reason = "fallback_clean_token" if clean else "fallback_mixed_token"
+        return idx, selected_kind, token_text, score_text, reason, clean
+
+    idx = max(0, len(token_spans) - 1)
+    token_text = token_spans[idx][1] if token_spans else ""
+    return idx, "fallback", token_text, score_text, "fallback_last_generated_token", False
+
+
 def classify_score_token(token_text: str) -> Optional[str]:
     kinds = score_token_kind_set(token_text)
     if "sign" in kinds:
@@ -533,20 +666,32 @@ def score_token_positions_in_range(
     special: set[int],
 ) -> List[int]:
     positions: List[int] = []
+    mixed_positions: List[int] = []
     fallback_digits: List[int] = []
+    fallback_mixed_digits: List[int] = []
     desired_kinds = set(kinds)
     for pos in range(max(0, start), min(len(input_ids), end)):
         token_id = int(input_ids[pos])
         if token_id in special:
             continue
         token_kinds = score_token_kind_set(tokenizer.decode([token_id]))
-        if "digit" in token_kinds:
+        clean = "tag" not in token_kinds
+        if "digit" in token_kinds and clean:
             fallback_digits.append(pos)
+        elif "digit" in token_kinds:
+            fallback_mixed_digits.append(pos)
         if token_kinds & desired_kinds:
-            positions.append(pos)
+            if clean:
+                positions.append(pos)
+            else:
+                mixed_positions.append(pos)
     if positions:
         return positions
-    return fallback_digits
+    if mixed_positions:
+        return mixed_positions
+    if fallback_digits:
+        return fallback_digits
+    return fallback_mixed_digits
 
 
 def select_query_positions(
@@ -1189,32 +1334,18 @@ def _run_forward_for_query(
             return_dict_in_generate=True,
             output_scores=False,
         )
-    # out.attentions[k] is the decode/prefill query used to predict gen_ids[k].
     gen_ids = out.sequences[0, prompt_len:]
-    score_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
-    print(f"    Generated: {score_text!r}")
 
-    # Find score-relevant generated tokens. For GRM, the sign token can be as
-    # semantically important as the first digit because it encodes progress vs.
-    # regress. Use the earliest requested score token kind so the query remains
-    # close to the score decision instead of later formatting tokens.
+    # Find score-value tokens by first locating the numeric span inside the
+    # generated <score>...</score> text. This avoids selecting mixed boundary
+    # tokens such as ">+" unless no clean score-value token exists.
     score_kinds = parse_score_query_token_kinds(score_query_tokens)
-    digit_step = None
-    selected_kind = None
-    for k in range(len(gen_ids)):
-        tok_str = tokenizer.decode([int(gen_ids[k])]).strip()
-        token_kinds = score_token_kind_set(tok_str)
-        matched_kinds = token_kinds & score_kinds
-        if matched_kinds:
-            digit_step = k
-            selected_kind = ",".join(sorted(matched_kinds))
-            break
-        if digit_step is None and "digit" in token_kinds:
-            digit_step = k
-            selected_kind = "digit"
-    if digit_step is None:
-        digit_step = max(0, len(gen_ids) - 1)
-        selected_kind = "fallback"
+    digit_step, selected_kind, token_text, score_text, token_reason, token_clean = select_generated_score_token(
+        tokenizer,
+        gen_ids.detach().cpu().tolist(),
+        score_kinds,
+    )
+    print(f"    Generated: {score_text!r}")
 
     if generate_query_stage == "predict_token":
         attn_idx = digit_step
@@ -1226,8 +1357,10 @@ def _run_forward_for_query(
     else:
         raise ValueError(f"Unknown generate query stage: {generate_query_stage}")
     attn_idx = min(attn_idx, len(out.attentions) - 1)
-    token_text = tokenizer.decode([int(gen_ids[digit_step])])
-    print(f"    Score token at gen step {digit_step}, kind={selected_kind}, token={token_text!r}")
+    print(
+        f"    Score token at gen step {digit_step}, kind={selected_kind}, "
+        f"clean={token_clean}, token={token_text!r}, reason={token_reason}"
+    )
     print(f"    Attention stage={generate_query_stage}, attn idx={attn_idx}")
 
     attentions = out.attentions[attn_idx]   # tuple[num_layers], 每层 [1, H, 1, T]
@@ -1243,7 +1376,7 @@ def _run_forward_for_query(
     query_desc = (
         f"generate:{generate_query_stage}:{','.join(sorted(score_kinds))}:"
         f"step={digit_step}:attn_idx={attn_idx}:kind={selected_kind}:"
-        f"token={token_text!r}:text={score_text!r}"
+        f"clean={token_clean}:reason={token_reason}:token={token_text!r}:text={score_text!r}"
     )
     return attentions, query_positions_effective, query_desc
 
@@ -1877,7 +2010,7 @@ def make_arg_parser() -> argparse.ArgumentParser:
             "include layer 0 (will likely surface a L0 head as a known artifact)."
         ),
     )
-    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--top-k", type=int, default=TOP_K)
     parser.add_argument(
         "--rank-by",
         default=RANK_BY,
@@ -2007,7 +2140,7 @@ def make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-pixels",
         type=int,
-        default=22500,
+        default=76800,
         help="Lower than inference.py by default to keep output_attentions memory manageable. Use 76800 to match inference.py.",
     )
     parser.add_argument("--dtype", default="auto", choices=["auto", "bfloat16", "float16", "float32"])
