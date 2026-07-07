@@ -19,9 +19,14 @@ from vllm import LLM, SamplingParams
 from transformers import AutoProcessor
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
-# Global Environment Settings
-os.environ['LOCAL_RANK'] = '0'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+def configure_runtime_env(
+    local_rank: str | None = None,
+    cuda_visible_devices: str | None = None,
+) -> None:
+    if local_rank is not None:
+        os.environ["LOCAL_RANK"] = local_rank
+    if cuda_visible_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
 
 
 # -----------------------------
@@ -431,7 +436,16 @@ def plot_video_reward(episode_root: Path):
 # -----------------------------
 
 class GRMInference:
-    def __init__(self, model_path: str, max_image_num=8, min_pixels=12544, max_pixels=76800):
+    def __init__(
+        self,
+        model_path: str,
+        max_image_num=8,
+        min_pixels=12544,
+        max_pixels=76800,
+        local_rank: str | None = None,
+        cuda_visible_devices: str | None = None,
+    ):
+        configure_runtime_env(local_rank, cuda_visible_devices)
         print(f"Loading model from {model_path} ...")
 
         self.model = LLM(

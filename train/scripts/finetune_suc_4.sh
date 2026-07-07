@@ -4,11 +4,11 @@ export PYTHONPATH=$(pwd)
 export CUDA_HOME=/mnt/public1/dais/miniconda3/envs/robo-dopamine-train/lib/python3.10/site-packages/nvidia
 
 # wandb
-export WANDB_MODE=online
+export WANDB_MODE=offline
 export WANDB_DIR=/tmp/wandb
-export WANDB_API_KEY="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"
-export WANDB_ENTITY='test180'
-export WANDB_PROJECT="robo-dopamine"
+# export WANDB_API_KEY="your_wandb_api_key"
+# export WANDB_ENTITY='your_entity'
+# export WANDB_PROJECT="robo-dopamine"
 
 # 注意：路径前缀已在数据生成时自动设置，无需切换符号链接
 
@@ -25,7 +25,7 @@ mkdir -p $OUTPUT_DIR
 # ======================
 # Training Hyperparameters
 # ======================
-export CUDA_VISIBLE_DEVICES=2,3
+# export CUDA_VISIBLE_DEVICES=2,3
 
 MODEL_MAX_LENGTH=8192
 MAX_PIXELS=76800

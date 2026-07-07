@@ -18,8 +18,7 @@ backend: grm
 # ---------------- Robot Runtime (图像源) ----------------
 # 机器人运行时 HTTP 地址, 用来拉取最新的三视角 JPEG 帧
 robot_runtime_url: http://192.168.120.143:8767
-# 要拉取的相机; 留空 / 不写则默认三个全要 (cam_high, cam_left_wrist, cam_right_wrist)
-cameras: []
+# 固定拉取三路相机: cam_high, cam_left_wrist, cam_right_wrist
 # 拉单张图的超时 (秒)
 observation_timeout: 3.0
 
@@ -46,6 +45,10 @@ no_backward: true
 
 # 后台推理节拍 (秒)。GRM 在独立线程按此间隔持续推理, poll 只读最新结果
 interval: 1.0
+
+# 可选 GPU 绑定。留 null 时不修改当前进程环境变量
+local_rank: null
+cuda_visible_devices: null
 
 # ---------------- 成功/失败判定 ----------------
 # MonitorState 的阈值, 语义与 examples/online_inference_local_img_agent.py 完全一致

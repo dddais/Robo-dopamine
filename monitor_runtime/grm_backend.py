@@ -24,7 +24,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -55,6 +54,12 @@ DEFAULT_GOAL_IMAGE = str(REPO_ROOT / "examples" / "blank_goal.png")
 CAMERA_KEYS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 FISHEYE_KEYS = ("cam_left_wrist", "cam_right_wrist")
 VALID_MODES = ("forward", "incremental", "backward")
+
+
+def _safe_path(path: str) -> str:
+    if not path.startswith("/") or "://" in path or ".." in path.split("/"):
+        raise ValueError(f"unsafe robot runtime path: {path!r}")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +251,7 @@ class _SubtaskState:
     """
 
     subtask: str
+    execution_id: str
     # Unique id used to isolate this session's cache directory so that two
     # monitors with the same subtask text don't trample each other's frames.
     monitor_id: str = ""
@@ -281,11 +287,12 @@ class GRMMonitorBackend:
         model_path: str = DEFAULT_MODEL_PATH,
         goal_image: str = DEFAULT_GOAL_IMAGE,
         runtime_url: str,
-        cameras: Optional[list[str]] = None,
         observation_timeout: float = 3.0,
         fisheye_remap: Optional[FisheyeRemap] = None,
         active_modes: Optional[list[str]] = None,
         interval: float = 1.0,
+        local_rank: Optional[str] = None,
+        cuda_visible_devices: Optional[str] = None,
         success_threshold: float = 0.60,
         success_stable_steps: int = 5,
         success_max_drift: float = 0.02,
@@ -295,11 +302,12 @@ class GRMMonitorBackend:
         self.model_path = model_path
         self.goal_image = goal_image
         self.runtime_url = runtime_url.rstrip("/")
-        self.cameras = list(cameras or CAMERA_KEYS)
         self.observation_timeout = observation_timeout
         self.fisheye_remap = fisheye_remap
         self.active_modes = list(active_modes or VALID_MODES)
         self.interval = max(0.1, float(interval))
+        self.local_rank = local_rank
+        self.cuda_visible_devices = cuda_visible_devices
 
         self.success_threshold = success_threshold
         self.success_stable_steps = success_stable_steps
@@ -324,7 +332,11 @@ class GRMMonitorBackend:
         print(f"[GRM] Loading GRM model: {model_path}")
         from examples.inference import GRMInference
 
-        self.model = GRMInference(model_path)
+        self.model = GRMInference(
+            model_path,
+            local_rank=local_rank,
+            cuda_visible_devices=cuda_visible_devices,
+        )
         print("[GRM] Model loaded.")
 
     # -- helpers --------------------------------------------------------
@@ -354,7 +366,7 @@ class GRMMonitorBackend:
         return dirs
 
     def _fetch_bytes(self, path: str) -> tuple[bytes, dict[str, str]]:
-        request = urllib.request.Request(self.runtime_url + path, method="GET")
+        request = urllib.request.Request(self.runtime_url + _safe_path(path), method="GET")
         with urllib.request.urlopen(
             request, timeout=self.observation_timeout
         ) as response:
@@ -579,7 +591,11 @@ class GRMMonitorBackend:
         # captured by the background thread (_inference_loop warm-up), so a
         # Robot Runtime hiccup never fails /monitors/start with a 500.
         with self._lock:
-            state = _SubtaskState(subtask=subtask, monitor_id=monitor_id)
+            state = _SubtaskState(
+                subtask=subtask,
+                execution_id=execution_id,
+                monitor_id=monitor_id,
+            )
             state.monitor = MonitorState(
                 success_threshold=self.success_threshold,
                 success_stable_steps=self.success_stable_steps,
@@ -621,6 +637,9 @@ class GRMMonitorBackend:
             state = self.sessions.get(monitor_id)
             if state is None:
                 raise KeyError(f"unknown monitor_id: {monitor_id}")
+            expected_execution_id = payload.get("execution_id")
+            if expected_execution_id and str(expected_execution_id) != state.execution_id:
+                raise ValueError("monitor_id does not belong to execution_id")
             latest = dict(state.latest)
             last_error = state.error
             warming_up = state.ref_start is None
@@ -636,7 +655,7 @@ class GRMMonitorBackend:
 
         session = MonitorSession(
             monitor_id=monitor_id,
-            execution_id=str(payload.get("execution_id") or ""),
+            execution_id=state.execution_id,
             subtask=state.subtask,
             status=status_val,
             progress=progress_val,
@@ -645,10 +664,6 @@ class GRMMonitorBackend:
             message="grm monitor backend",
             result={"provider": "grm"},
         )
-
-        expected_execution_id = payload.get("execution_id")
-        if expected_execution_id and str(expected_execution_id) != session.execution_id:
-            raise ValueError("monitor_id does not belong to execution_id")
 
         # Merge the latest inference snapshot (modes/latency/...) into the response.
         result: dict[str, Any] = {**session.result}
@@ -711,7 +726,7 @@ class GRMMonitorBackend:
             "provider": "grm",
             "model": self.model_path,
             "runtime_url": self.runtime_url,
-            "cameras": list(self.cameras),
+            "cameras": list(CAMERA_KEYS),
             "active_modes": list(self.active_modes),
             "fisheye_enabled": self.fisheye_remap is not None,
             "interval": self.interval,

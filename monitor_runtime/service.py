@@ -118,15 +118,9 @@ class DeterministicMonitorBackend:
 class RobotRuntimeObservationClient:
     """Pulls latest binary JPEG frames from Robot Runtime."""
 
-    def __init__(
-        self,
-        *,
-        runtime_url: str,
-        cameras: list[str] | None = None,
-        timeout: float = 10.0,
-    ) -> None:
+    def __init__(self, *, runtime_url: str, timeout: float = 10.0) -> None:
         self.runtime_url = runtime_url.rstrip("/")
-        self.cameras = cameras or ["cam_high", "cam_left_wrist", "cam_right_wrist"]
+        self.cameras = ("cam_high", "cam_left_wrist", "cam_right_wrist")
         self.timeout = timeout
 
     def fetch(self) -> dict[str, Any]:
@@ -264,11 +258,9 @@ def _build_argparser(config: dict[str, Any]) -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=cfg("port", 8877))
     parser.add_argument(
         "--backend",
-        choices=("deterministic", "grm", "scripted"),
+        choices=("deterministic", "grm"),
         default=cfg("backend", "deterministic"),
-        help="Monitor backend. 'grm' runs online Robo-Dopamine-GRM inference on each poll. "
-             "'scripted' replays a predefined progress curve from the config (offline, "
-             "no model, no robot runtime).",
+        help="Monitor backend. 'grm' runs online Robo-Dopamine-GRM inference in a background loop.",
     )
     parser.add_argument(
         "--auto-success-after-polls",
@@ -279,12 +271,6 @@ def _build_argparser(config: dict[str, Any]) -> argparse.ArgumentParser:
         "--robot-runtime-url",
         default=cfg("robot_runtime_url", "http://192.168.120.143:8767"),
         help="Robot Runtime URL used to fetch binary JPEG observations.",
-    )
-    parser.add_argument(
-        "--camera",
-        action="append",
-        default=cfg("cameras", None) or None,
-        help="Camera to fetch from Robot Runtime; repeatable. Defaults to all dual-Franka cameras.",
     )
     parser.add_argument(
         "--observation-timeout",
@@ -346,27 +332,17 @@ def _build_argparser(config: dict[str, Any]) -> argparse.ArgumentParser:
         default=cfg("interval", 1.0),
         help="Seconds between GRM inference steps (background cadence).",
     )
-
-    # --- Scripted backend options (only used when --backend scripted) ---
-    hold_last_group = parser.add_mutually_exclusive_group()
-    hold_last_group.add_argument(
-        "--hold-last",
-        action="store_true",
-        default=None,
-        help="Scripted: keep replaying the final progress value after the script ends (default).",
-    )
-    hold_last_group.add_argument(
-        "--no-hold-last",
-        dest="hold_last",
-        action="store_false",
-        help="Scripted: stop stepping once the curve is consumed.",
+    parser.add_argument(
+        "--local-rank",
+        default=cfg("local_rank", None),
+        help="Optional LOCAL_RANK value to set before loading GRM.",
     )
     parser.add_argument(
-        "--script",
-        default=None,
-        help="Scripted: inline JSON progress list, e.g. '[0.1, 0.3, 0.6, 0.65]'. "
-             "Overrides success_curve in the config.",
+        "--cuda-visible-devices",
+        default=cfg("cuda_visible_devices", None),
+        help="Optional CUDA_VISIBLE_DEVICES value to set before loading GRM.",
     )
+
     return parser
 
 
@@ -389,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
-    backend: DeterministicMonitorBackend | "GRMMonitorBackend" | "ScriptedMonitorBackend"
+    backend: DeterministicMonitorBackend | "GRMMonitorBackend"
     if args.backend == "grm":
         from monitor_runtime.grm_backend import (
             GRMMonitorBackend,
@@ -407,37 +383,12 @@ def main(argv: list[str] | None = None) -> int:
             model_path=args.model_path,
             goal_image=args.goal_image,
             runtime_url=args.robot_runtime_url,
-            cameras=args.camera or None,
             observation_timeout=args.observation_timeout,
             fisheye_remap=fisheye_remap,
             active_modes=active_modes,
             interval=args.interval,
-            success_threshold=args.success_threshold,
-            success_stable_steps=args.success_stable_steps,
-            success_max_drift=args.success_max_drift,
-            fail_stable_steps=args.fail_stable_steps,
-            fail_min_progress=args.fail_min_progress,
-        )
-    elif args.backend == "scripted":
-        from monitor_runtime.scripted_backend import ScriptedMonitorBackend
-
-        # Two named curves + an ordered queue of scenario names consumed
-        # one-per-/monitors/start. Queue is defined entirely in config,
-        # not by the remote caller.
-        success_curve = config.get("success_curve")
-        fail_curve = config.get("fail_curve")
-        scenario_queue = config.get("scenario_queue")
-        if args.script:
-            success_curve = json.loads(args.script)
-
-        hold_last = args.hold_last if args.hold_last is not None else bool(config.get("hold_last", True))
-
-        backend = ScriptedMonitorBackend(
-            success_curve=success_curve,
-            fail_curve=fail_curve,
-            scenario_queue=scenario_queue,
-            interval=args.interval,
-            hold_last=hold_last,
+            local_rank=args.local_rank,
+            cuda_visible_devices=args.cuda_visible_devices,
             success_threshold=args.success_threshold,
             success_stable_steps=args.success_stable_steps,
             success_max_drift=args.success_max_drift,
@@ -449,7 +400,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.robot_runtime_url:
             observation_client = RobotRuntimeObservationClient(
                 runtime_url=args.robot_runtime_url,
-                cameras=args.camera or None,
                 timeout=args.observation_timeout,
             )
         backend = DeterministicMonitorBackend(

@@ -5,7 +5,7 @@ export CUDA_HOME=/mnt/public1/dais/miniconda3/envs/robo-dopamine-train/lib/pytho
 # wandb
 export WANDB_MODE=offline
 export WANDB_DIR=/tmp/wandb
-# export WANDB_API_KEY="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"
+# export WANDB_API_KEY="your_wandb_api_key"
 # export WANDB_ENTITY='test180'
 # export WANDB_PROJECT="robo-dopamine"
 # export http_proxy=http://127.0.0.1:7898 
