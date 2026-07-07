@@ -46,7 +46,7 @@ SAMPLE_INDEX=0
 LAYERS="all"
 SKIP_EARLY_LAYERS=13   # Kang et al. exclude the first two LLM layers.
 FOCUS_IMAGES="after_cam_high,after_cam_left_wrist,after_cam_right_wrist"
-OUT_DIR="./results/scan_attention_cube_incre_prompt_new"
+OUT_DIR="./results/scan_attention_cube_incre_prompt"
 # query 选择：
 #   'last_prompt' : prompt 最后一个 token（对齐 Kang 论文的"最后一个输入文本 token"，单次前向）
 #   'generate'    : 正常自回归生成 score，再由 --generate-query-stage 选择 score token 相关 attention
@@ -821,7 +821,7 @@ def spatial_entropy_relmax(grid: np.ndarray, threshold_rel: float) -> float:
     return max(0.0, float(-sum(p * math.log(p + 1e-12) for p in probs)))
 
 
-def spatial_entropy_mean_relu(grid: np.ndarray, threshold: float, mean_multiplier: float = 1.0) -> float:
+def spatial_entropy_mean_relu(grid: np.ndarray, threshold: float) -> float:
     """LocalizationHeads-style spatial entropy.
 
     The reference code builds components from ReLU(S - 2 * mean(S)) and uses
@@ -829,18 +829,12 @@ def spatial_entropy_mean_relu(grid: np.ndarray, threshold: float, mean_multiplie
     This is stricter than a relative-to-max threshold: a one-cell peak does not
     automatically become a "good" localization head unless it carries enough
     mean-centered mass.
-
-    mean_multiplier is exposed because GRM score-token attention is far sparser
-    than LLaVA last-prompt-token attention (Kang's setting). 2.0*mean was tuned
-    for the latter; on GRM it filters out almost every cell on most heads,
-    producing the all-Infinity tables seen in practice. 1.0*mean ("above average")
-    is a less aggressive default that still penalizes diffuse maps.
     """
     arr = np.asarray(grid, dtype=np.float64)
     if arr.size == 0 or not np.isfinite(arr).any():
         return ENTROPY_SENTINEL_HIGH
 
-    relu = np.maximum(arr - (float(mean_multiplier) * float(np.nanmean(arr))), 0.0)
+    relu = np.maximum(arr - (2.0 * float(np.nanmean(arr))), 0.0)
     total = float(np.nansum(relu))
     if total <= 0:
         return ENTROPY_SENTINEL_HIGH
@@ -878,11 +872,11 @@ def spatial_entropy_mean_relu(grid: np.ndarray, threshold: float, mean_multiplie
     return max(0.0, float(-sum(p * math.log(p + 1e-12) for p in probs)))
 
 
-def focus_area_mean_relu(grid: np.ndarray, threshold: float, mean_multiplier: float = 1.0) -> float:
+def focus_area_mean_relu(grid: np.ndarray, threshold: float) -> float:
     arr = np.asarray(grid, dtype=np.float64)
     if arr.size == 0 or not np.isfinite(arr).any():
         return 1.0
-    relu = np.maximum(arr - (float(mean_multiplier) * float(np.nanmean(arr))), 0.0)
+    relu = np.maximum(arr - (2.0 * float(np.nanmean(arr))), 0.0)
     binary = relu > float(threshold)
     if not binary.any():
         return 1.0
@@ -900,17 +894,17 @@ def focus_area_relmax(grid: np.ndarray, threshold_rel: float) -> float:
     return float((arr >= threshold_rel * max_val).sum() / max(arr.size, 1))
 
 
-def focus_area(grid: np.ndarray, method: str, threshold: float, threshold_rel: float, mean_multiplier: float = 1.0) -> float:
+def focus_area(grid: np.ndarray, method: str, threshold: float, threshold_rel: float) -> float:
     if method == "mean_relu":
-        return focus_area_mean_relu(grid, threshold, mean_multiplier=mean_multiplier)
+        return focus_area_mean_relu(grid, threshold)
     if method == "relmax":
         return focus_area_relmax(grid, threshold_rel)
     raise ValueError(f"Unknown entropy method: {method}")
 
 
-def spatial_entropy(grid: np.ndarray, method: str, threshold: float, threshold_rel: float, mean_multiplier: float = 1.0) -> float:
+def spatial_entropy(grid: np.ndarray, method: str, threshold: float, threshold_rel: float) -> float:
     if method == "mean_relu":
-        return spatial_entropy_mean_relu(grid, threshold, mean_multiplier=mean_multiplier)
+        return spatial_entropy_mean_relu(grid, threshold)
     if method == "relmax":
         return spatial_entropy_relmax(grid, threshold_rel)
     raise ValueError(f"Unknown entropy method: {method}")
@@ -1022,7 +1016,7 @@ def mask_grid_from_box(image_path: str, grid_shape: Tuple[int, int], box: Sequen
     return np.outer(ymask, xmask)
 
 
-def target_metrics(grid: np.ndarray, image_path: str, box: Sequence[float], threshold_rel: float, entropy_method: str = "mean_relu", entropy_threshold: float = 0.0, mean_multiplier: float = 1.0) -> Dict[str, float]:
+def target_metrics(grid: np.ndarray, image_path: str, box: Sequence[float], threshold_rel: float) -> Dict[str, float]:
     heat = np.asarray(grid, dtype=np.float64)
     mask = mask_grid_from_box(image_path, heat.shape, box)
     total_mass = float(heat.sum())
@@ -1032,40 +1026,16 @@ def target_metrics(grid: np.ndarray, image_path: str, box: Sequence[float], thre
     outside_area = float(outside.sum())
     target_density = target_mass / max(target_area, 1.0)
     outside_density = float(heat[outside].sum()) / max(outside_area, 1.0)
-
-    # IoU pseudo-mask must NOT use min-max normalization. The old code did
-    # `normalize_heatmap(heat) >= threshold_rel`, but normalize_heatmap forces
-    # max -> 1.0, so with threshold_rel=0.6 every head had at least its peak
-    # cell pass the threshold -> IoU was never zero even for perfectly diffuse
-    # heads. That defeats the purpose of IoU as a discriminative metric.
-    # Use the same binarization as spatial_entropy so the IoU is consistent
-    # with the entropy ranking: mean-ReLU "above average" or relmax vs peak.
-    if entropy_method == "mean_relu":
-        relu = np.maximum(heat - (float(mean_multiplier) * float(np.nanmean(heat))), 0.0)
-        pred = relu > float(entropy_threshold)
-    elif entropy_method == "relmax":
-        shifted = heat - np.nanmin(heat)
-        peak = float(np.nanmax(shifted))
-        pred = (shifted >= threshold_rel * peak) if peak > 0 else np.zeros_like(heat, dtype=bool)
-    else:
-        pred = heat > 0
-    if not pred.any():
-        # Head predicts nothing concentrated -> IoU = 0 (correct: no localization).
-        iou = 0.0
-        pred_area = 0.0
-    else:
-        union = np.logical_or(pred, mask)
-        inter = np.logical_and(pred, mask)
-        iou = float(inter.sum() / max(union.sum(), 1))
-        pred_area = float(pred.sum())
+    pred = normalize_heatmap(heat) >= threshold_rel
+    union = np.logical_or(pred, mask)
+    inter = np.logical_and(pred, mask)
     return {
         "target_mass": target_mass,
         "target_fraction": target_mass / max(total_mass, 1e-12),
         "target_density": target_density,
         "outside_density": outside_density,
         "density_ratio": target_density / max(outside_density, 1e-12),
-        "iou": iou,
-        "pred_grid_area": pred_area,
+        "iou": float(inter.sum() / max(union.sum(), 1)),
         "target_grid_area": target_area,
     }
 
@@ -1363,7 +1333,6 @@ def _run_forward_for_query(
             output_attentions=True,
             return_dict_in_generate=True,
             output_scores=False,
-            use_cache=False,
         )
     gen_ids = out.sequences[0, prompt_len:]
 
@@ -1466,32 +1435,17 @@ def scan_sample(
 
     spatial_merge_size = int(getattr(model.config.vision_config, "spatial_merge_size", 2))
     per_label: Dict[str, Dict[str, List[np.ndarray]]] = {
-        label: {"s_img": [], "image_fraction": [], "entropy": [], "focus_area": [], "heatmaps": []}
-        for label in focus_labels
+        label: {"s_img": [], "entropy": [], "focus_area": [], "heatmaps": []} for label in focus_labels
     }
-
-    # Pre-compute, per head, the total attention mass on ALL image tokens
-    # (across all 8 image spans). This is the denominator for image_fraction,
-    # which distinguishes "this head puts mass on every image" from "this head
-    # selectively attends to this image span". Raw s_img alone cannot tell them
-    # apart under GRM's 8-image setting (Kang's single-image setup does not have
-    # this ambiguity).
-    all_image_bounds = [(span.start, span.end) for span in spans]
-    mean_multiplier = float(getattr(args, "entropy_mean_multiplier", 1.0))
 
     for layer_idx in selected_layers:
         attn = attentions[layer_idx]
         # Shape: [batch, heads, query_len, key_len].
         attn_cpu = attn[0, :, query_positions, :].detach().float().cpu()
-        # Per-head total image mass (denominator for image_fraction).
-        total_image_mass_per_head = np.zeros(attn_cpu.shape[0], dtype=np.float64)
-        for (s, e) in all_image_bounds:
-            total_image_mass_per_head += attn_cpu[:, :, s:e].mean(dim=1).numpy().sum(axis=1)
         for label in focus_labels:
             span = span_by_label[label]
             block = attn_cpu[:, :, span.start : span.end].mean(dim=1).numpy()
             s_img = block.sum(axis=1)
-            image_fraction = s_img / np.maximum(total_image_mass_per_head, 1e-12)
             heatmaps = []
             entropies = []
             focus_areas = []
@@ -1504,7 +1458,6 @@ def scan_sample(
                         method=args.entropy_method,
                         threshold=args.entropy_threshold,
                         threshold_rel=args.entropy_threshold_rel,
-                        mean_multiplier=mean_multiplier,
                     )
                 )
                 focus_areas.append(
@@ -1513,11 +1466,9 @@ def scan_sample(
                         method=args.entropy_method,
                         threshold=args.entropy_threshold,
                         threshold_rel=args.entropy_threshold_rel,
-                        mean_multiplier=mean_multiplier,
                     )
                 )
             per_label[label]["s_img"].append(s_img)
-            per_label[label]["image_fraction"].append(image_fraction)
             per_label[label]["entropy"].append(np.asarray(entropies, dtype=np.float64))
             per_label[label]["focus_area"].append(np.asarray(focus_areas, dtype=np.float64))
             per_label[label]["heatmaps"].append(np.stack(heatmaps, axis=0))
@@ -1526,7 +1477,6 @@ def scan_sample(
     for label, vals in per_label.items():
         packed[label] = {
             "s_img": np.stack(vals["s_img"], axis=0),
-            "image_fraction": np.stack(vals["image_fraction"], axis=0),
             "entropy": np.stack(vals["entropy"], axis=0),
             "focus_area": np.stack(vals["focus_area"], axis=0),
             "heatmaps": np.stack(vals["heatmaps"], axis=0),
@@ -1742,12 +1692,36 @@ def aggregate_samples(sample_results: List[Dict[str, Dict[str, np.ndarray]]], fo
     for label in focus_labels:
         aggregate[label] = {
             "s_img": np.mean([res[label]["s_img"] for res in sample_results], axis=0),
-            "image_fraction": np.mean([res[label]["image_fraction"] for res in sample_results], axis=0),
             "entropy": np.mean([res[label]["entropy"] for res in sample_results], axis=0),
             "focus_area": np.mean([res[label]["focus_area"] for res in sample_results], axis=0),
             "heatmaps": np.mean([res[label]["heatmaps"] for res in sample_results], axis=0),
         }
     return aggregate
+
+
+def compute_target_tables(
+    aggregate: Dict[str, Dict[str, np.ndarray]],
+    focus_labels: Sequence[str],
+    span_by_label: Dict[str, ImageSpan],
+    box_map: Dict[str, List[float]],
+    threshold_rel: float,
+) -> Dict[str, Dict[str, np.ndarray]]:
+    tables: Dict[str, Dict[str, np.ndarray]] = {}
+    for label in focus_labels:
+        box = lookup_box(box_map, label, span_by_label[label])
+        if box is None:
+            continue
+        heatmaps = aggregate[label]["heatmaps"]
+        shape = heatmaps.shape[:2]
+        metric_names = ["target_mass", "target_fraction", "target_density", "outside_density", "density_ratio", "iou"]
+        label_tables = {name: np.full(shape, np.nan, dtype=np.float64) for name in metric_names}
+        for li in range(shape[0]):
+            for hi in range(shape[1]):
+                metrics = target_metrics(heatmaps[li, hi], span_by_label[label].path, box, threshold_rel)
+                for name in metric_names:
+                    label_tables[name][li, hi] = metrics[name]
+        tables[label] = label_tables
+    return tables
 
 
 def compute_target_tables_over_samples(
@@ -1756,18 +1730,14 @@ def compute_target_tables_over_samples(
     focus_labels: Sequence[str],
     box_map: Dict[str, List[float]],
     threshold_rel: float,
-    entropy_method: str = "mean_relu",
-    entropy_threshold: float = 0.0,
-    mean_multiplier: float = 1.0,
 ) -> Dict[str, Dict[str, np.ndarray]]:
     """Average bbox metrics over frames/samples, using each frame's image path.
 
-    This is the only target-metric path used now. The previous variant that
-    evaluated target metrics on the cross-sample aggregate heatmap (but only
-    on the final sample's image path) was removed: for GRM videos it silently
-    evaluates a time-averaged map against the last frame, which is a weak and
-    often misleading signal. Always evaluate per-frame on the per-frame map,
-    then average metrics.
+    The previous implementation evaluated target metrics on the aggregate
+    heatmap but used only the final sample's span/path. That is fine for static
+    single-image grounding, but for GRM videos it silently evaluates a time-
+    averaged map against the last frame, which is a weak and often misleading
+    signal. This function keeps the metric frame-local before averaging.
     """
     if not sample_results:
         return {}
@@ -1786,15 +1756,7 @@ def compute_target_tables_over_samples(
             per_metric = {name: np.full(shape, np.nan, dtype=np.float64) for name in metric_names}
             for li in range(shape[0]):
                 for hi in range(shape[1]):
-                    metrics = target_metrics(
-                        heatmaps[li, hi],
-                        span.path,
-                        box,
-                        threshold_rel,
-                        entropy_method=entropy_method,
-                        entropy_threshold=entropy_threshold,
-                        mean_multiplier=mean_multiplier,
-                    )
+                    metrics = target_metrics(heatmaps[li, hi], span.path, box, threshold_rel)
                     for name in metric_names:
                         per_metric[name][li, hi] = metrics[name]
             for name in metric_names:
@@ -1881,9 +1843,6 @@ def run(args: argparse.Namespace) -> None:
         focus_labels,
         box_map,
         args.mask_threshold_rel,
-        entropy_method=args.entropy_method,
-        entropy_threshold=float(args.entropy_threshold),
-        mean_multiplier=float(getattr(args, "entropy_mean_multiplier", 1.0)),
     )
     selection_frequency_table = None
     selection_count_table = None
@@ -1914,7 +1873,6 @@ def run(args: argparse.Namespace) -> None:
             "path": last_span_by_label[label].path,
             "grid_thw": last_span_by_label[label].grid_thw,
             "s_img_mean_table": aggregate[label]["s_img"].tolist(),
-            "image_fraction_mean_table": aggregate[label]["image_fraction"].tolist(),
             "entropy_mean_table": aggregate[label]["entropy"].tolist(),
         }
         if label in target_tables:
@@ -1942,7 +1900,6 @@ def run(args: argparse.Namespace) -> None:
         "entropy_method": args.entropy_method,
         "entropy_threshold": float(args.entropy_threshold),
         "entropy_threshold_rel": float(args.entropy_threshold_rel),
-        "entropy_mean_multiplier": float(getattr(args, "entropy_mean_multiplier", 1.0)),
         "mask_threshold_rel": float(args.mask_threshold_rel),
         "skip_early_layers": int(args.skip_early_layers),
         "layers": selected_layers,
@@ -2172,16 +2129,6 @@ def make_arg_parser() -> argparse.ArgumentParser:
         help="Spatial entropy binarization. mean_relu matches the reference LocalizationHeads implementation.",
     )
     parser.add_argument("--entropy-threshold", type=float, default=ENTROPY_THRESHOLD)
-    parser.add_argument(
-        "--entropy-mean-multiplier",
-        type=float,
-        default=1.0,
-        help=(
-            "Multiplier on mean for mean_relu binarization. LocalizationHeads uses 2.0 "
-            "(tuned for LLaVA last-prompt-token attention). GRM score-token attention is "
-            "much sparser; 1.0 (above-average) avoids filtering out almost every cell."
-        ),
-    )
     parser.add_argument("--entropy-threshold-rel", type=float, default=ENTROPY_THRESHOLD_REL)
     parser.add_argument(
         "--mask-threshold-rel",

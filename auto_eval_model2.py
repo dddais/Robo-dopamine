@@ -21,7 +21,7 @@ from examples.inference import GRMInference
 # 配置（只跑第二个模型）
 # ============================================================
 
-OUT_JSON = "_intermediate_results_model_GRM8B_sub.json"
+OUT_JSON = "_intermediate_results_model_GRM8B.json"
 MODEL_PATH = "./pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview"
 # MODEL_PATH = "/home/dais/workspace/Robo-Dopamine/train/checkpoints/multi_task_finetune"
 
@@ -51,18 +51,18 @@ GOAL_IMAGES = [
     # "./examples/exp_suc_1.png",
 ]
 
-INTERVALS = [20, 10]
+INTERVALS = [20]
 
 TASK_INSTRUCTIONS = [
-    # "pick the carrot and put it on yellow plate ",
-    # "pick the bottle and put it on yellow plate ",
-    # "pick the white cube and put it on yellow plate ",
-    "just pick the carrot",
-    "just pick the bottle",
-    "just pick the cube",
+    "pick the carrot and put it on yellow plate ",
+    "pick the bottle and put it on yellow plate ",
+    "pick the white cube and put it on yellow plate ",
+    # "just pick the carrot",
+    # "just pick the bottle",
+    # "just pick the cube",
 ]
 
-OUTPUT_ROOT = "/home/dais/workspace/Robo-Dopamine/results/auto_pick_carrot_fail"
+OUTPUT_ROOT = "/home/dais/workspace/Robo-Dopamine/results/auto_pick_3_obj"
 EVAL_MODES = ["forward", "incremental", "backward"]
 
 
@@ -77,6 +77,8 @@ def get_model_tag(model_path: str) -> str:
         return "GRM-2.0-8B"
     elif "multi_task_finetune" in model_path:
         return "multi_task"
+    elif "mismatch" in model_path:
+        return "mismatch_finetune"
     return os.path.basename(model_path)
 
 

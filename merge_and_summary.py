@@ -10,9 +10,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-OUTPUT_ROOT = "/home/dais/workspace/Robo-Dopamine/results/auto_pick_carrot_fail"
-
-INTERVALS = [20, 10]
+OUTPUT_ROOT = "/home/dais/workspace/Robo-Dopamine/results/auto_pick_mismatch"
+OUTPUT_NAME = "summary_mismatch"
+INTERVALS = [20]
 
 
 def load_results():
@@ -20,7 +20,7 @@ def load_results():
     all_results = []
 
     # file1 = os.path.join(OUTPUT_ROOT, "_intermediate_results.json")
-    file2 = os.path.join(OUTPUT_ROOT, "_intermediate_results_model_GRM8B.json")
+    file2 = os.path.join(OUTPUT_ROOT, "_intermediate_results_model_mismatch.json")
 
     # if os.path.exists(file1):
     #     with open(file1) as f:
@@ -74,7 +74,7 @@ def _make_table(fig_ax, title, row_labels, col_labels, cell_text, cell_colors,
 
 def generate_summary_tables(all_results):
     """生成所有汇总表格（所有表格都包含 data 维度）"""
-    output_dir = os.path.join(OUTPUT_ROOT, "summary_GRM8B")
+    output_dir = os.path.join(OUTPUT_ROOT, OUTPUT_NAME)
     os.makedirs(output_dir, exist_ok=True)
 
     model_tags = sorted(set(r["model_tag"] for r in all_results))
