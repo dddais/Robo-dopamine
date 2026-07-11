@@ -37,7 +37,7 @@ DATA_DIRS = [
     "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_4",
     "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_7",
     "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_11",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_1",
+    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_1_carrot",
 ]
 
 # 2 种目标图

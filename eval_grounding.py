@@ -34,7 +34,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 from PIL import Image
 
-from grounding import TaskGrounding, task_to_phrases
+from grounding import TaskGrounding, task_to_phrases, task_to_target_phrase
 
 # Canonical GRM view order used by scan_localization_heads_best.IMAGE_LABELS.
 # Kept local to avoid importing the heavy scan module just for a constant.
@@ -87,13 +87,16 @@ def draw_boxes(image_path: str, boxes, out_path: Path) -> None:
 def main():
     ap = argparse.ArgumentParser(description="Standalone GroundingDINO diagnostic on GRM frames")
     ap.add_argument("--sample-json", action="append", required=True, help="Can be repeated to mix tasks")
-    ap.add_argument("--grounding-model", default="./model/grounding-dino-base")
+    ap.add_argument("--grounding-model", default="../model/grounding-dino-base")
     ap.add_argument("--box-threshold", type=float, default=0.25)
     ap.add_argument("--text-threshold", type=float, default=0.20)
     ap.add_argument("--views", nargs="+", default=["after_cam_high", "after_cam_left_wrist", "after_cam_right_wrist"],
                     choices=IMAGE_LABELS, help="Which GRM views to evaluate")
     ap.add_argument("--max-samples", type=int, default=None, help="Cap number of samples per sample-json")
     ap.add_argument("--phrase-query", default=None, help="Override the auto-derived phrase (e.g. 'white cube . plate')")
+    ap.add_argument("--all-task-phrases", action="store_true",
+                    help="Use all derived task noun phrases. Default uses only the primary target object, "
+                         "matching steering/ranking.")
     ap.add_argument("--best-only", action="store_true",
                     help="Only draw/store the single highest-score box per image (matches what steer_grm_heads uses). "
                          "Default draws all detections so detector quality (overlapping boxes, false positives) is visible.")
@@ -127,7 +130,12 @@ def main():
         for sample in samples:
             task = sample["task"]
             task_slug = slugify(task)
-            phrase = args.phrase_query if args.phrase_query is not None else task_to_phrases(task)
+            if args.phrase_query is not None:
+                phrase = args.phrase_query
+            elif args.all_task_phrases:
+                phrase = task_to_phrases(task)
+            else:
+                phrase = task_to_target_phrase(task)
             print(f"[grounding-eval] sample {sample_idx_global} task={task!r} phrase={phrase!r}")
 
             for view in args.views:

@@ -14,7 +14,7 @@ Design (four-group within-sample contrast, Gaze Heads style):
   baseline (no steer)    | —                | —
   candidate + target     | top heads        | GroundingDINO bbox tokens
   candidate + wrong      | top heads        | random off-target tokens
-  random   + target      | random heads     | GroundingDINO bbox tokens
+  random   + target      | low-ranked heads | GroundingDINO bbox tokens
   all      + target      | every head       | GroundingDINO bbox tokens
 
 For each group we run a forward pass that teacher-forces the canonical
@@ -66,10 +66,48 @@ from scan_localization_heads_best import (  # noqa: E402
     load_model_and_processor,
     move_inputs_to_device,
 )
-from grounding import TaskGrounding  # noqa: E402
+from grounding import GroundingBox, TaskGrounding, grounding_box_to_record  # noqa: E402
 
 
 SCORE_RE = re.compile(r"<score>\s*([+-]?\d+(?:\.\d+)?)\s*%\s*</score>", re.IGNORECASE)
+
+
+def target_image_paths_for_samples(samples: Sequence[dict], target_label: str) -> List[Optional[str]]:
+    idx = IMAGE_LABELS.index(target_label)
+    out: List[Optional[str]] = []
+    for sample in samples:
+        images = sample.get("image", [])
+        if idx >= len(images) or not Path(images[idx]).exists():
+            out.append(None)
+        else:
+            out.append(str(images[idx]))
+    return out
+
+
+def build_smoothed_bbox_sequence(
+    grounding: Optional[TaskGrounding],
+    samples: Sequence[dict],
+    target_label: str,
+    write_json: Optional[Path] = None,
+) -> List[Optional[GroundingBox]]:
+    if grounding is None:
+        return [None for _ in samples]
+    paths_all = target_image_paths_for_samples(samples, target_label)
+    image_paths: List[str] = []
+    tasks: List[str] = []
+    index_map: List[int] = []
+    for idx, (sample, path) in enumerate(zip(samples, paths_all)):
+        if path is None:
+            continue
+        image_paths.append(path)
+        tasks.append(sample["task"])
+        index_map.append(idx)
+    selected_full: List[Optional[GroundingBox]] = [None for _ in samples]
+    if image_paths:
+        selected = grounding.ground_best_sequence(image_paths, tasks, write_json=write_json)
+        for idx, box in zip(index_map, selected):
+            selected_full[idx] = box
+    return selected_full
 
 
 @dataclass
@@ -163,6 +201,82 @@ def select_random_heads(num_layers: int, num_heads: int, k: int, rng: random.Ran
     pool = [(l, h) for l in range(num_layers) for h in range(num_heads) if (l, h) not in exclude]
     rng.shuffle(pool)
     return [HeadSpec(layer=l, head=h, label="random") for l, h in pool[:k]]
+
+
+def select_low_ranked_heads(
+    head_json: Path,
+    k: int,
+    rng: random.Random,
+    exclude: Optional[set] = None,
+    ranking: Optional[str] = None,
+    low_rank_fraction: float = 0.25,
+) -> Tuple[List[HeadSpec], dict]:
+    """Sample control heads from the low bbox-mass segment of a stage-2 ranking.
+
+    This mirrors gaze-heads' non-gaze control: the random-target group should be
+    heads that are unlikely to carry target-object attention, not arbitrary
+    heads that may include moderately localizing heads.
+    """
+    data = json.loads(head_json.read_text())
+    rankings = data.get("rankings") or {}
+    ranking_name = ranking or data.get("default_ranking") or "mean"
+    if ranking_name in rankings:
+        rows = rankings[ranking_name]
+        source = f"rankings.{ranking_name}"
+    else:
+        rows = data.get("top_heads") or []
+        source = "top_heads"
+
+    skip = int(data.get("skip_early_layers", 0))
+    exclude = exclude or set()
+    clean_rows = []
+    seen = set()
+    for row in rows:
+        pair = (int(row["layer"]), int(row["head"]))
+        if pair in seen or pair[0] < skip:
+            continue
+        seen.add(pair)
+        clean_rows.append(row)
+    if not clean_rows:
+        raise ValueError(f"{head_json} has no ranking rows available for low-ranked controls")
+
+    frac = max(0.0, min(float(low_rank_fraction), 1.0))
+    low_pool_size = max(int(k), int(math.ceil(len(clean_rows) * frac)))
+    low_rows = list(clean_rows[-low_pool_size:])
+    pool = [r for r in low_rows if (int(r["layer"]), int(r["head"])) not in exclude]
+
+    if len(pool) < k:
+        # If the chosen low segment is too small after exclusions, expand from
+        # the bottom upward before giving up. This preserves the "as low-ranked
+        # as possible" control while keeping head count matched to candidates.
+        pool = [
+            r for r in reversed(clean_rows)
+            if (int(r["layer"]), int(r["head"])) not in exclude
+        ]
+    if len(pool) < k:
+        raise ValueError(
+            f"Only {len(pool)} low-ranked control heads available in {head_json}, "
+            f"but k={k} was requested"
+        )
+
+    rng.shuffle(pool)
+    selected = [
+        HeadSpec(layer=int(r["layer"]), head=int(r["head"]), label="low_rank_control")
+        for r in pool[:k]
+    ]
+    meta = {
+        "type": "low_ranked",
+        "ranking_json": str(head_json),
+        "ranking": ranking_name,
+        "source": source,
+        "skip_early_layers": skip,
+        "low_rank_fraction": frac,
+        "ranked_heads_available": len(clean_rows),
+        "low_pool_size": low_pool_size,
+        "eligible_low_pool_size": len(pool),
+        "selected_heads": [(h.layer, h.head) for h in selected],
+    }
+    return selected, meta
 
 
 def all_heads(num_layers: int, num_heads: int) -> List[HeadSpec]:
@@ -297,12 +411,26 @@ def random_token_positions(span: ImageSpan, n_target: int, rng: random.Random, s
     return [span.start + i for i in rng.sample(range(total), k)]
 
 
+def random_positions_from_pool(positions: Sequence[int], n_target: int, rng: random.Random) -> List[int]:
+    """Pick random token positions from a pre-filtered pool.
+
+    Used for the wrong-region control: the pool is bbox-complement image tokens,
+    so the boosted wrong region cannot overlap the true target bbox.
+    """
+    pool = [int(p) for p in positions]
+    if not pool:
+        return []
+    k = max(1, min(int(n_target), len(pool)))
+    return rng.sample(pool, k)
+
+
 @dataclass
 class SampleContext:
     sample: dict
     inputs: dict
     span_by_label: Dict[str, ImageSpan]
     target_span: Optional[ImageSpan]
+    target_box: Optional[GroundingBox]
     target_positions: List[int]
     other_positions: List[int]
 
@@ -317,6 +445,8 @@ def build_sample_context(
     dtype,
     rng: random.Random,
     spatial_merge_size: int,
+    target_box: Optional[GroundingBox] = None,
+    allow_single_frame_grounding: bool = True,
 ) -> SampleContext:
     image_paths = sample["image"]
     images = [__import__("PIL.Image", fromlist=["Image"]).open(p).convert("RGB") for p in image_paths]
@@ -330,12 +460,14 @@ def build_sample_context(
     inputs = move_inputs_to_device(torch, inputs, device, dtype)
 
     target_span = span_by_label.get(target_label)
+    gbox = target_box
     target_positions: List[int] = []
     other_positions: List[int] = []
 
     if target_span is not None and grounding is not None:
         path = target_span.path
-        gbox = grounding.ground_best(path, sample["task"])
+        if gbox is None and allow_single_frame_grounding:
+            gbox = grounding.ground_best(path, sample["task"])
         if gbox is not None:
             target_positions = bbox_to_token_positions(target_span, gbox.bbox, spatial_merge_size, path)
             other_positions = [
@@ -346,6 +478,7 @@ def build_sample_context(
         inputs=inputs,
         span_by_label=span_by_label,
         target_span=target_span,
+        target_box=gbox,
         target_positions=target_positions,
         other_positions=other_positions,
     )
@@ -390,29 +523,19 @@ def generate_score(model, processor, inputs, torch, max_new_tokens: int = 12) ->
     return parse_score(text)
 
 
-def run_group(
+def _run_with_bias(
     torch,
     model,
     processor,
     ctx: SampleContext,
     heads: Sequence[HeadSpec],
-    bias_target: bool,
+    target_positions: Sequence[int],
+    other_positions: Sequence[int],
     swap_bias: float,
     n_qheads: int,
     device: str,
-    rng: random.Random,
-    spatial_merge_size: int,
 ) -> Optional[float]:
-    """Run one steering condition and return the predicted score."""
-    if bias_target and ctx.target_span is not None and ctx.target_positions:
-        target_positions = ctx.target_positions
-        other_positions = ctx.other_positions
-    else:
-        # wrong-region: random off-target positions, same count as target
-        n_target = len(ctx.target_positions) if ctx.target_positions else 4
-        target_positions = random_token_positions(ctx.target_span, n_target, rng, spatial_merge_size, ctx.target_span.path if ctx.target_span else None)
-        other_positions = [p for p in range(ctx.target_span.start, ctx.target_span.end) if p not in set(target_positions)] if ctx.target_span else []
-
+    """Register steering hooks for the given positions and run one generation."""
     hook_by_layer: Dict[int, object] = {}
     heads_by_layer = group_heads_by_layer(heads)
     for layer_idx, hlist in heads_by_layer.items():
@@ -430,6 +553,63 @@ def run_group(
         return generate_score(model, processor, ctx.inputs, torch)
     finally:
         remove_handles(handles)
+
+
+def run_group(
+    torch,
+    model,
+    processor,
+    ctx: SampleContext,
+    heads: Sequence[HeadSpec],
+    bias_target: bool,
+    swap_bias: float,
+    n_qheads: int,
+    device: str,
+    rng: random.Random,
+    spatial_merge_size: int,
+    wrong_region_samples: int = 1,
+) -> Optional[float]:
+    """Run one steering condition and return the predicted score.
+
+    For bias_target=False (candidate_wrong), wrong_region_samples > 1 draws
+    that many independent wrong regions from the bbox-complement pool and
+    returns the mean score, reducing the noise of a single random draw. Each
+    draw reseeds from the same rng state so the sample set depends only on
+    (seed, step, draw_index), not on unrelated conditions run beforehand.
+    """
+    if bias_target and ctx.target_span is not None and ctx.target_positions:
+        target_positions = ctx.target_positions
+        other_positions = ctx.other_positions
+        return _run_with_bias(
+            torch, model, processor, ctx, heads,
+            target_positions, other_positions,
+            swap_bias, n_qheads, device,
+        )
+
+    # wrong-region control: random bbox-complement positions, same count as target
+    n_target = len(ctx.target_positions) if ctx.target_positions else 4
+    if ctx.target_span is None or not ctx.target_positions or not ctx.other_positions:
+        # No real bbox available (or bbox covers the full span); a strict
+        # off-target control cannot be constructed for this sample.
+        return None
+
+    n_samples = max(1, int(wrong_region_samples))
+    rng_state = rng.getstate()
+    scores: List[float] = []
+    for _ in range(n_samples):
+        wrong_positions = random_positions_from_pool(ctx.other_positions, n_target, rng)
+        other_positions = [p for p in range(ctx.target_span.start, ctx.target_span.end) if p not in set(wrong_positions)]
+        s = _run_with_bias(
+            torch, model, processor, ctx, heads,
+            wrong_positions, other_positions,
+            swap_bias, n_qheads, device,
+        )
+        if s is not None:
+            scores.append(s)
+    rng.setstate(rng_state)
+    if not scores:
+        return None
+    return float(np.mean(scores)) if len(scores) > 1 else scores[0]
 
 
 def aggregate_results(per_sample: List[dict]) -> dict:
@@ -498,16 +678,29 @@ def main():
     ap.add_argument("--target-label", default="after_cam_high", choices=IMAGE_LABELS)
     ap.add_argument("--focus-label", default=None, help="Filter candidate heads by this scan label")
     ap.add_argument("--top-k", type=int, default=8)
-    ap.add_argument("--grounding-model", default="./model/grounding-dino-base")
-    ap.add_argument("--grounding-box-threshold", type=float, default=0.30)
+    ap.add_argument("--random-control", default="low_ranked", choices=["low_ranked", "uniform"],
+                    help="How to choose random_target control heads. low_ranked samples from "
+                         "the bottom segment of the stage-2 bbox-mass ranking, matching "
+                         "gaze-heads' non-gaze control. uniform preserves the old behavior.")
+    ap.add_argument("--low-rank-fraction", type=float, default=0.25,
+                    help="Bottom fraction of the ranking used as the low-ranked control pool.")
+    ap.add_argument("--grounding-model", default="../model/grounding-dino-base")
+    ap.add_argument("--grounding-box-threshold", type=float, default=0.12)
     ap.add_argument("--no-grounding", action="store_true", help="Skip GroundingDINO; steering will use random target regions only")
     ap.add_argument("--swap-bias", type=float, default=4.0)
+    ap.add_argument("--wrong-region-samples", type=int, default=1,
+                    help="For candidate_wrong: number of independent wrong regions drawn "
+                         "from the bbox-complement pool, averaged to reduce single-draw noise.")
     ap.add_argument("--dtype", default="auto")
     ap.add_argument("--device-map", default="none")
     ap.add_argument("--max-pixels", type=int, default=76800, help="Match scan_localization_heads_best default so grid_thw is comparable")
     ap.add_argument("--min-pixels", type=int, default=12544)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--num-samples", type=int, default=None, help="Limit number of samples processed")
+    ap.add_argument("--sample-strategy", default="even", choices=["even", "first"],
+                    help="How to subsample when --num-samples is set. 'even' matches "
+                         "rank_heads_by_bbox.py and covers the whole trajectory; 'first' "
+                         "keeps the old prefix-only behavior.")
     ap.add_argument("--output", default="./results/steer_grm_heads/results.json")
     args = ap.parse_args()
 
@@ -516,7 +709,11 @@ def main():
 
     samples = json.loads(Path(args.sample_json).read_text())
     if args.num_samples:
-        samples = samples[: args.num_samples]
+        if args.sample_strategy == "even":
+            step = max(1, len(samples) // max(1, args.num_samples))
+            samples = samples[::step][: args.num_samples]
+        else:
+            samples = samples[: args.num_samples]
 
     print(f"[steer] loading GRM model ...")
     torch, model, processor, dtype = load_model_and_processor(args)
@@ -538,13 +735,35 @@ def main():
     head_source = "stage-2 (bbox mass)" if args.head_ranking_json else "stage-1 (entropy/mass)"
     print(f"[steer] candidate heads ({len(candidate_heads)}, {head_source}): {[(h.layer, h.head) for h in candidate_heads]}")
     candidate_set = {(h.layer, h.head) for h in candidate_heads}
-    random_heads = select_random_heads(num_layers, n_qheads, len(candidate_heads), rng, exclude=candidate_set)
+    random_control_meta: dict
+    if args.random_control == "low_ranked" and args.head_ranking_json:
+        random_heads, random_control_meta = select_low_ranked_heads(
+            Path(args.head_ranking_json),
+            len(candidate_heads),
+            rng,
+            exclude=candidate_set,
+            ranking=args.ranking,
+            low_rank_fraction=args.low_rank_fraction,
+        )
+    else:
+        random_heads = select_random_heads(num_layers, n_qheads, len(candidate_heads), rng, exclude=candidate_set)
+        random_control_meta = {
+            "type": "uniform",
+            "selected_heads": [(h.layer, h.head) for h in random_heads],
+        }
+    print(f"[steer] random/control heads ({random_control_meta['type']}): {[(h.layer, h.head) for h in random_heads]}")
     all_h = all_heads(num_layers, n_qheads)
 
     grounding = None
     if not args.no_grounding:
         print(f"[steer] loading GroundingDINO ...")
         grounding = TaskGrounding(model_path=args.grounding_model, device=device, box_threshold=args.grounding_box_threshold)
+    bbox_sequence = build_smoothed_bbox_sequence(
+        grounding,
+        samples,
+        args.target_label,
+        write_json=Path(args.output).parent / "bbox_sequence.json" if grounding is not None else None,
+    )
 
     per_sample: List[dict] = []
     for si, sample in enumerate(samples):
@@ -554,6 +773,8 @@ def main():
                 torch, model, processor, sample, grounding,
                 target_label=args.target_label, dtype=dtype, rng=rng,
                 spatial_merge_size=spatial_merge_size,
+                target_box=bbox_sequence[si] if si < len(bbox_sequence) else None,
+                allow_single_frame_grounding=False,
             )
         except Exception as e:
             print(f"    [warn] context build failed: {e}")
@@ -570,7 +791,7 @@ def main():
         # Baseline: no hooks.
         scores["baseline"] = generate_score(model, processor, ctx.inputs, torch)
         scores["candidate_target"] = run_group(torch, model, processor, ctx, candidate_heads, True, args.swap_bias, n_qheads, device, rng, spatial_merge_size)
-        scores["candidate_wrong"] = run_group(torch, model, processor, ctx, candidate_heads, False, args.swap_bias, n_qheads, device, rng, spatial_merge_size)
+        scores["candidate_wrong"] = run_group(torch, model, processor, ctx, candidate_heads, False, args.swap_bias, n_qheads, device, rng, spatial_merge_size, wrong_region_samples=args.wrong_region_samples)
         scores["random_target"] = run_group(torch, model, processor, ctx, random_heads, True, args.swap_bias, n_qheads, device, rng, spatial_merge_size)
         scores["all_target"] = run_group(torch, model, processor, ctx, all_h, True, args.swap_bias, n_qheads, device, rng, spatial_merge_size)
 
@@ -579,8 +800,10 @@ def main():
             "sample_id": sample.get("id"),
             "task": sample.get("task"),
             "target_label": args.target_label,
+            "bbox": grounding_box_to_record(ctx.target_box, ctx.target_span.path if ctx.target_span is not None else ""),
             "n_target_tokens": len(ctx.target_positions),
             "candidate_heads": [(h.layer, h.head) for h in candidate_heads],
+            "random_control_heads": [(h.layer, h.head) for h in random_heads],
             "scores": scores,
         })
 
@@ -592,6 +815,7 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({
         "args": vars(args),
+        "random_control": random_control_meta,
         "summary": summary,
         "per_sample": per_sample,
     }, indent=2))

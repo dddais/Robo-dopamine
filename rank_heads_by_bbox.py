@@ -48,8 +48,44 @@ from scan_localization_heads_best import (  # noqa: E402
     move_inputs_to_device,
     select_query_positions,
 )
-from grounding import TaskGrounding  # noqa: E402
+from grounding import GroundingBox, TaskGrounding, grounding_box_to_record  # noqa: E402
 from steer_grm_heads import bbox_to_token_positions  # noqa: E402
+
+
+def _target_image_path_for_sample(sample: dict, target_label: str) -> Optional[str]:
+    idx = IMAGE_LABELS.index(target_label)
+    if idx >= len(sample.get("image", [])):
+        return None
+    path = sample["image"][idx]
+    return str(path) if Path(path).exists() else None
+
+
+def build_bbox_sequence(
+    grounding: TaskGrounding,
+    samples: Sequence[dict],
+    target_label: str,
+    out_json: Optional[Path] = None,
+) -> List[Optional[GroundingBox]]:
+    image_paths: List[str] = []
+    tasks: List[str] = []
+    index_map: List[int] = []
+    for idx, sample in enumerate(samples):
+        path = _target_image_path_for_sample(sample, target_label)
+        if path is None:
+            continue
+        image_paths.append(path)
+        tasks.append(sample["task"])
+        index_map.append(idx)
+
+    selected_full: List[Optional[GroundingBox]] = [None for _ in samples]
+    if image_paths:
+        seq_json = None
+        if out_json is not None:
+            seq_json = out_json
+        selected = grounding.ground_best_sequence(image_paths, tasks, write_json=seq_json)
+        for idx, box in zip(index_map, selected):
+            selected_full[idx] = box
+    return selected_full
 
 
 def collect_per_head_bbox_mass(
@@ -62,7 +98,9 @@ def collect_per_head_bbox_mass(
     target_label: str,
     grounding: TaskGrounding,
     spatial_merge_size: int,
-) -> Tuple[Optional[np.ndarray], Optional[List[int]], Optional[str]]:
+    target_box: Optional[GroundingBox] = None,
+    allow_single_frame_grounding: bool = True,
+) -> Tuple[Optional[np.ndarray], Optional[List[int]], Optional[GroundingBox]]:
     """Run one forward and return per-head raw attention mass on the bbox tokens.
 
     Returns (mass[L, H], query_positions, box_label) or (None, None, None) if
@@ -86,8 +124,12 @@ def collect_per_head_bbox_mass(
     if target_span is None:
         return None, None, None
 
-    # GroundingDINO box for the target view.
-    gbox = grounding.ground_best(target_span.path, sample["task"])
+    # GroundingDINO box for the target view. Prefer the trajectory-smoothed box
+    # supplied by main(); fall back to stateless single-frame grounding for
+    # backwards-compatible ad hoc calls.
+    gbox = target_box
+    if gbox is None and allow_single_frame_grounding:
+        gbox = grounding.ground_best(target_span.path, sample["task"])
     if gbox is None:
         return None, None, None
     target_positions = bbox_to_token_positions(target_span, gbox.bbox, spatial_merge_size, target_span.path)
@@ -133,7 +175,7 @@ def collect_per_head_bbox_mass(
         per_query_mass = sub[:, :, list(target_positions)].sum(axis=-1)  # [H, |Q|]
         mass[li] = per_query_mass.mean(axis=-1)  # [H]
 
-    return mass, query_positions, gbox.label
+    return mass, query_positions, gbox
 
 
 def aggregate_and_rank(
@@ -188,8 +230,8 @@ def main():
     ap.add_argument("--sample-json", action="append", required=True, help="Can be repeated to mix episodes/tasks")
     ap.add_argument("--target-label", default="after_cam_high", choices=IMAGE_LABELS,
                     help="Which GRM view the bbox is grounded on")
-    ap.add_argument("--grounding-model", default="./model/grounding-dino-base")
-    ap.add_argument("--grounding-box-threshold", type=float, default=0.25)
+    ap.add_argument("--grounding-model", default="../model/grounding-dino-base")
+    ap.add_argument("--grounding-box-threshold", type=float, default=0.12)
     # Query semantics — kept identical to scan_localization_heads_best so the
     # ranking is consistent with whatever attention the downstream analysis uses.
     ap.add_argument("--query-mode", default="last_prompt",
@@ -236,26 +278,33 @@ def main():
     per_sample: List[dict] = []
     sample_idx_global = 0
     for sj_path in args.sample_json:
-        samples = json.loads(Path(sj_path).read_text())
+        samples_all = json.loads(Path(sj_path).read_text())
+        bbox_seq_json = Path(args.output).parent / f"bbox_sequence_{Path(sj_path).parent.name}_{args.target_label}.json"
+        bbox_sequence_all = build_bbox_sequence(grounding, samples_all, args.target_label, bbox_seq_json)
+        indexed = list(enumerate(samples_all))
         if args.num_samples is not None:
-            step = max(1, len(samples) // max(1, args.num_samples))
-            samples = samples[::step][: args.num_samples]
-        for sample in samples:
+            step = max(1, len(indexed) // max(1, args.num_samples))
+            indexed = indexed[::step][: args.num_samples]
+        for original_idx, sample in indexed:
             print(f"[rank-by-bbox] sample {sample_idx_global}: {sample.get('id','')[:60]}")
+            target_box = bbox_sequence_all[original_idx] if bbox_sequence_all else None
             mass, qpos, box_label = collect_per_head_bbox_mass(
                 torch, model, processor, sample, args, dtype,
                 args.target_label, grounding, spatial_merge_size,
+                target_box=target_box,
+                allow_single_frame_grounding=False,
             )
             if mass is None:
                 print(f"    [skip] no grounding box on {args.target_label}")
             else:
-                print(f"    box_label={box_label!r} query_positions={len(qpos) if qpos else 0} "
+                print(f"    box_label={box_label.label!r} query_positions={len(qpos) if qpos else 0} "
                       f"max mass={float(mass.max()):.4f}")
             per_sample.append({
                 "sample_id": sample.get("id"),
                 "task": sample.get("task"),
                 "mass": (mass.tolist() if mass is not None else None),
-                "box_label": box_label,
+                "box_label": (box_label.label if box_label is not None else None),
+                "bbox": grounding_box_to_record(box_label, _target_image_path_for_sample(sample, args.target_label) or ""),
             })
             sample_idx_global += 1
 

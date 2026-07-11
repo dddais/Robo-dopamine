@@ -1309,6 +1309,8 @@ def load_model_and_processor(args: argparse.Namespace):
     model.eval()
     model.config.output_attentions = True
     model.config.use_cache = False
+    if kwargs["device_map"] is None and torch.cuda.is_available():
+        model.to("cuda")
     return torch, model, processor, dtype
 
 

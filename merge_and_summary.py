@@ -10,8 +10,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-OUTPUT_ROOT = "/home/dais/workspace/Robo-Dopamine/results/auto_pick_mismatch"
-OUTPUT_NAME = "summary_mismatch"
+OUTPUT_ROOT = "/home/dais/workspace/Robo-Dopamine/results/auto_pick_3_obj"
+OUTPUT_NAME = "summary_GRM8B_add1"
 INTERVALS = [20]
 
 
@@ -19,8 +19,8 @@ def load_results():
     """加载两个模型的结果"""
     all_results = []
 
-    # file1 = os.path.join(OUTPUT_ROOT, "_intermediate_results.json")
-    file2 = os.path.join(OUTPUT_ROOT, "_intermediate_results_model_mismatch.json")
+    # file1 = os.path.join(OUTPUT_ROOT, "_intermediate_results_model_GRM8B.json")
+    file2 = os.path.join(OUTPUT_ROOT, "_intermediate_results_model_GRM8B_add1.json")
 
     # if os.path.exists(file1):
     #     with open(file1) as f:

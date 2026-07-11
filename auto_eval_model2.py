@@ -21,28 +21,28 @@ from examples.inference import GRMInference
 # 配置（只跑第二个模型）
 # ============================================================
 
-OUT_JSON = "_intermediate_results_model_GRM8B.json"
+OUT_JSON = "_intermediate_results_model_GRM8B_add1.json"
 MODEL_PATH = "./pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview"
 # MODEL_PATH = "/home/dais/workspace/Robo-Dopamine/train/checkpoints/multi_task_finetune"
 
 DATA_DIRS = [
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_1",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_4",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_7",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_11",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_1",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_1",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_4",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_7",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_11",
+    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_1_carrot",
 
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_2_cube",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_5_cube",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_9_cube",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_13_cube",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_4_cube",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_2_cube",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_5_cube",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_9_cube",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_13_cube",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_4_cube",
     
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_3_bottle",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_6_bottle",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_8_bottle",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_12_bottle",
-    "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_3_bottle",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_3_bottle",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_6_bottle",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_8_bottle",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3fail_12_bottle",
+    # "/home/dais/workspace/Robo-Dopamine/aligned_data/pick3suc_3_bottle",
 
 ]
 

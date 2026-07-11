@@ -2,15 +2,15 @@
 
 For each step of a single trajectory's sample.json (one task, one instruction),
 run the model N times with different attention-mask biases and record the
-emitted score. Then accumulate the per-step scores using GRM's incremental
-progress formula and plot the resulting progress curves so a human can
+emitted score. Then convert raw scores to progress using the same mode-specific
+logic as examples/inference.py and plot the resulting curves so a human can
 visually compare conditions.
 
 Conditions (mirrors steer_grm_heads.py):
     baseline          no intervention
     candidate_target  candidate heads steered onto GroundingDINO bbox of after_<cam>
     candidate_wrong   candidate heads steered onto a random off-target region (control)
-    random_target     random non-candidate heads steered onto target region (control)
+    random_target     low-ranked/control heads steered onto target region
     all_target        all heads steered onto target region (upper bound)
 
 Output:
@@ -36,9 +36,10 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import steer_grm_heads as S
+from grounding import grounding_box_to_record
 
-HEAD_RANKING_JSON = "./results/rank_heads_by_bbox/shared_top8.json"
-SAMPLE_JSON = "/home/dais/workspace/Robo-Dopamine/results/auto_pick_3_obj/GRM-2.0-8B/pick3suc_4_cube/blank/inter20/carrot/26-07-07-14-54-15_forward_mode_pick_the_carrot_and_put_it_on_yellow_plate_/sample.json"
+HEAD_RANKING_JSON = "/home/dais/workspace/Robo-Dopamine/results/attention/corresponding_success_20260708/rank_carrot_incremental_last_prompt/head_ranking.json"
+SAMPLE_JSON = "/home/dais/workspace/Robo-Dopamine/results/attention/success_pick3suc_1_carrot_samples/cube/forward_mode_pick_the_white_cube_and_put_it_on_yellow_plate/sample.json"
 
 SAMPLE_ID_RE = re.compile(r"af_(\d+)")
 
@@ -75,6 +76,28 @@ def accumulate_incremental(raw_scores: List[Optional[float]]) -> List[Optional[f
     return out
 
 
+
+
+def infer_eval_mode(samples: List[dict], sample_json: str = "") -> str:
+    """Infer forward/incremental/backward from sample ids or the sample path."""
+    haystack = " ".join([sample_json] + [str(s.get("id", "")) for s in samples[:3]])
+    for mode in ("incremental", "forward", "backward"):
+        if f"{mode}_mode" in haystack or f"{mode}-" in haystack:
+            return mode
+    return "incremental"
+
+
+def scores_to_progress(raw_scores: List[Optional[float]], eval_mode: str) -> List[Optional[float]]:
+    """Convert model raw score fractions to progress for the selected eval mode."""
+    if eval_mode == "incremental":
+        return accumulate_incremental(raw_scores)
+    if eval_mode == "forward":
+        return [None if r is None else r for r in raw_scores]
+    if eval_mode == "backward":
+        return [None if r is None else max(0.0, min(1.0, 1.0 + r)) for r in raw_scores]
+    raise ValueError(f"Unknown eval_mode: {eval_mode}")
+
+
 def trace_curve(
     torch,
     model,
@@ -89,6 +112,8 @@ def trace_curve(
     spatial_merge_size: int,
     rng: random.Random,
     dtype,
+    bbox_sequence: Optional[List] = None,
+    wrong_region_samples: int = 1,
 ) -> Dict[str, List[Optional[float]]]:
     """Run all conditions across all steps. Returns {condition: [score_per_step]}."""
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -97,8 +122,11 @@ def trace_curve(
     scores: Dict[str, List[Optional[float]]] = {c: [] for c in conditions}
 
     for i, sample in enumerate(samples):
+        target_box = bbox_sequence[i] if bbox_sequence is not None and i < len(bbox_sequence) else None
         ctx = S.build_sample_context(
-            torch, model, processor, sample, grounding, target_label, dtype, rng, spatial_merge_size
+            torch, model, processor, sample, grounding, target_label, dtype, rng, spatial_merge_size,
+            target_box=target_box,
+            allow_single_frame_grounding=False,
         )
         if ctx.target_positions:
             tgt_desc = f"bbox@{len(ctx.target_positions)}tok"
@@ -119,7 +147,8 @@ def trace_curve(
         scores["candidate_wrong"].append(
             S.run_group(torch, model, processor, ctx, candidate_heads, bias_target=False,
                         swap_bias=swap_bias, n_qheads=n_qheads, device=device,
-                        rng=rng, spatial_merge_size=spatial_merge_size)
+                        rng=rng, spatial_merge_size=spatial_merge_size,
+                        wrong_region_samples=wrong_region_samples)
         )
         # random non-candidate heads × target region (control: head specificity)
         scores["random_target"].append(
@@ -135,6 +164,19 @@ def trace_curve(
         )
 
     return scores
+
+
+def apply_task_override(samples: List[dict], override_task: Optional[str]) -> List[dict]:
+    """Return samples with task text replaced for cross-instruction inference."""
+    if override_task is None:
+        return samples
+    out: List[dict] = []
+    for sample in samples:
+        copied = dict(sample)
+        copied["original_task"] = sample.get("task")
+        copied["task"] = override_task
+        out.append(copied)
+    return out
 
 
 def plot_curves(
@@ -160,7 +202,7 @@ def plot_curves(
         "baseline":         "Baseline (no steering)",
         "candidate_target": "Candidate heads × target bbox",
         "candidate_wrong":  "Candidate heads × wrong region",
-        "random_target":    "Random heads × target bbox",
+        "random_target":    "Control heads × target bbox",
         "all_target":       "All heads × target bbox",
     }
 
@@ -219,12 +261,25 @@ def main():
                     choices=["mean", "max", "median", "selection_frequency"])
     ap.add_argument("--sample-json", default=SAMPLE_JSON,
                     help="A trajectory's sample.json (multiple steps for one task)")
+    ap.add_argument("--override-task", default=None,
+                    help="Replace sample['task'] at inference time. Useful for running "
+                         "one success trajectory under another instruction; bbox grounding "
+                         "also follows the overridden target object.")
     ap.add_argument("--target-label", default="after_cam_high", choices=S.IMAGE_LABELS)
     ap.add_argument("--top-k", type=int, default=5)
-    ap.add_argument("--grounding-model", default="./model/grounding-dino-base")
-    ap.add_argument("--grounding-box-threshold", type=float, default=0.30)
+    ap.add_argument("--random-control", default="low_ranked", choices=["low_ranked", "uniform"],
+                    help="How to choose random_target control heads. low_ranked samples from "
+                         "the bottom segment of the stage-2 bbox-mass ranking; uniform "
+                         "preserves the old behavior.")
+    ap.add_argument("--low-rank-fraction", type=float, default=0.25,
+                    help="Bottom fraction of the ranking used as the low-ranked control pool.")
+    ap.add_argument("--grounding-model", default="../model/grounding-dino-base")
+    ap.add_argument("--grounding-box-threshold", type=float, default=0.12)
     ap.add_argument("--no-grounding", action="store_true")
     ap.add_argument("--swap-bias", type=float, default=6.0)
+    ap.add_argument("--wrong-region-samples", type=int, default=1,
+                    help="For candidate_wrong: number of independent wrong regions drawn "
+                         "from the bbox-complement pool, averaged to reduce single-draw noise.")
     ap.add_argument("--dtype", default="auto")
     ap.add_argument("--device-map", default="none")
     ap.add_argument("--max-pixels", type=int, default=76800)
@@ -232,8 +287,6 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--num-samples", type=int, default=None,
                     help="Limit number of steps (useful for quick smoke tests)")
-    ap.add_argument("--start", type=int, default=0,
-                    help="Skip the first N steps (trajectory start is usually 0% progress)")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--output-dir", default="./results/steer_progress_curve")
     args = ap.parse_args()
@@ -242,9 +295,13 @@ def main():
     np.random.seed(args.seed)
 
     samples = json.loads(Path(args.sample_json).read_text())
+    original_task = samples[0].get("task") if samples else None
+    samples = apply_task_override(samples, args.override_task)
     if args.num_samples:
         samples = samples[: args.num_samples]
     print(f"[curve] trajectory: {len(samples)} steps, task={samples[0]['task']!r}")
+    if args.override_task is not None:
+        print(f"[curve] original task: {original_task!r}")
 
     print(f"[curve] loading GRM model ...")
     torch, model, processor, dtype = S.load_model_and_processor(args)
@@ -258,13 +315,36 @@ def main():
     candidate_heads = S.parse_heads(Path(args.head_ranking_json), args.top_k, ranking=args.ranking)
     print(f"[curve] candidate heads ({len(candidate_heads)}): {[(h.layer, h.head) for h in candidate_heads]}")
     candidate_set = {(h.layer, h.head) for h in candidate_heads}
-    random_heads = S.select_random_heads(num_layers, n_qheads, len(candidate_heads), rng, exclude=candidate_set)
+    if args.random_control == "low_ranked":
+        random_heads, random_control_meta = S.select_low_ranked_heads(
+            Path(args.head_ranking_json),
+            len(candidate_heads),
+            rng,
+            exclude=candidate_set,
+            ranking=args.ranking,
+            low_rank_fraction=args.low_rank_fraction,
+        )
+    else:
+        random_heads = S.select_random_heads(num_layers, n_qheads, len(candidate_heads), rng, exclude=candidate_set)
+        random_control_meta = {
+            "type": "uniform",
+            "selected_heads": [(h.layer, h.head) for h in random_heads],
+        }
+    print(f"[curve] random/control heads ({random_control_meta['type']}): {[(h.layer, h.head) for h in random_heads]}")
     all_h = S.all_heads(num_layers, n_qheads)
 
     grounding = None
     if not args.no_grounding:
         print(f"[curve] loading GroundingDINO ...")
         grounding = S.TaskGrounding(model_path=args.grounding_model, device=device, box_threshold=args.grounding_box_threshold)
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    bbox_sequence = S.build_smoothed_bbox_sequence(
+        grounding,
+        samples,
+        args.target_label,
+        write_json=out_dir / "bbox_sequence.json" if grounding is not None else None,
+    )
 
     print(f"[curve] tracing {len(samples)} steps × 5 conditions ...")
     raw_scores = trace_curve(
@@ -272,13 +352,13 @@ def main():
         candidate_heads, random_heads, all_h,
         target_label=args.target_label, swap_bias=args.swap_bias,
         spatial_merge_size=spatial_merge_size, rng=rng, dtype=dtype,
+        bbox_sequence=bbox_sequence,
+        wrong_region_samples=args.wrong_region_samples,
     )
 
-    progress: Dict[str, List[Optional[float]]] = {c: accumulate_incremental(raw_scores[c]) for c in raw_scores}
+    eval_mode = infer_eval_mode(samples, args.sample_json)
+    progress: Dict[str, List[Optional[float]]] = {c: scores_to_progress(raw_scores[c], eval_mode) for c in raw_scores}
     frames = [parse_after_frame(s["id"]) or (i * 20) for i, s in enumerate(samples)]
-
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     # CSV
     csv_path = out_dir / "curve.csv"
@@ -297,8 +377,20 @@ def main():
     json_path = out_dir / "curve.json"
     json_path.write_text(json.dumps({
         "args": vars(args),
-        "candidate_heads": [list(h)[:2] for h in [(c.layer, c.head) for c in candidate_heads]],
+        "original_task": original_task,
+        "inference_task": samples[0].get("task") if samples else None,
+        "eval_mode": eval_mode,
+        "candidate_heads": [[c.layer, c.head] for c in candidate_heads],
+        "random_control": random_control_meta,
+        "random_control_heads": [[h.layer, h.head] for h in random_heads],
         "frames": frames,
+        "bbox_sequence": [
+            grounding_box_to_record(
+                box,
+                S.target_image_paths_for_samples(samples, args.target_label)[i] or "",
+            )
+            for i, box in enumerate(bbox_sequence)
+        ],
         "raw_scores": raw_scores,
         "progress": progress,
         "final_progress_pct": {c: (progress[c][-1] * 100 if progress[c] and progress[c][-1] is not None else None) for c in progress},
