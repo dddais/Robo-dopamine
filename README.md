@@ -1,5 +1,8 @@
 # Robo-Dopamine: General Process Reward Modeling for High-Precision Robotic Manipulation
 
+> RoboRewardBench 测评代码、连续值到序数标签的指标协议及实验记录见
+> [`roborewardbench/README.md`](roborewardbench/README.md)。
+
 ### Joy is dopamine’s handiwork—whether in humans or in robotics.
 
          
@@ -533,4 +536,3 @@ If you find our work helpful, feel free to cite it:
   year={2025}
 }
 ```
-

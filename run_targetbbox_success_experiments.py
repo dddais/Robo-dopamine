@@ -32,10 +32,11 @@ DEFAULT_SOURCE_ROOTS = {
     "bottle": "results/auto_pick_3_obj/GRM-2.0-8B/pick3suc_3_bottle/blank/inter20",
     "cube": "results/auto_pick_3_obj/GRM-2.0-8B/pick3suc_4_cube/blank/inter20",
 }
-MODES = ("forward", "incremental", "backward")
+# MODES = ("forward", "incremental", "backward")
+MODES = ("forward",)
 # QUERIES = ("last_prompt", "decode")
-QUERIES = ("decode",)
-TOP_KS = (8, 32, 64)
+QUERIES = ("last_prompt",)
+TOP_KS = (8, 64)
 VALID_QUERIES = {"last_prompt", "decode"}
 CURVE_MODE = ["forward"]
 
@@ -433,7 +434,7 @@ def run_analysis(args: argparse.Namespace, out_root: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Run target-only bbox Stage-2/Stage-3 success experiments")
-    ap.add_argument("--output-root", default="results/attention/3data_3instruction_decode_20260710")
+    ap.add_argument("--output-root", default="results/attention/3data_3instruction_prompt_20260720")
     ap.add_argument(
         "--source-root",
         default=None,

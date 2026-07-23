@@ -208,6 +208,7 @@ __marimo__/
 
 # EXPconda 
 results/
+/outputs/roborewardbench/
 checkpoints/
 myrun.py
 
@@ -218,3 +219,5 @@ dataset/
 model/
 eval_results/
 eval/
+
+roborewardbench/dopamine_eval/outputs

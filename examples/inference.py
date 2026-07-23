@@ -19,11 +19,6 @@ from vllm import LLM, SamplingParams
 from transformers import AutoProcessor
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
-# Global Environment Settings
-os.environ['LOCAL_RANK'] = '0'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
-
 # -----------------------------
 # Configuration & Prompt
 # -----------------------------
