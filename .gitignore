@@ -221,3 +221,11 @@ eval_results/
 eval/
 
 roborewardbench/dopamine_eval/outputs
+
+# Clean-room RoboRewardBench run artifacts (source/config/docs/tests remain tracked)
+rewardbench/**/outputs/
+rewardbench/**/.cache/
+rewardbench/**/frames/
+rewardbench/**/runs/
+rewardbench/**/*.jsonl.tmp
+

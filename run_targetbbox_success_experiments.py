@@ -39,6 +39,8 @@ QUERIES = ("last_prompt",)
 TOP_KS = (8, 64)
 VALID_QUERIES = {"last_prompt", "decode"}
 CURVE_MODE = ["forward"]
+DEFAULT_OUTPUT_ROOT = "results/attention/3data_3instruction_prompt_20260720"
+COMIC_GAZE_OUTPUT_ROOT = "results/attention/3data_3instruction_comic_gaze"
 
 @dataclass(frozen=True)
 class Job:
@@ -229,11 +231,58 @@ def query_args(query: str) -> list[str]:
     raise ValueError(f"Unknown query preset {query!r}; expected one of {sorted(VALID_QUERIES)}")
 
 
+def comic_gaze_rank_path(out_root: Path) -> Path:
+    """One task-independent comic ranking reused by every steering job."""
+    return out_root / "rank_comics_last_prompt_comic_gaze" / "head_ranking.json"
+
+
 def rank_jobs(args: argparse.Namespace, out_root: Path, logs: Path) -> list[Job]:
     jobs: list[Job] = []
     gpus = [int(x) for x in args.gpus.split(",") if x.strip()]
     n = 0
     py = python_cmd(args)
+    if args.ranking_method == "comic-gaze":
+        out = comic_gaze_rank_path(out_root)
+        log = logs / "rank_comics_last_prompt_comic_gaze.log"
+        comics_root = resolve_source_root(args.comics_root)
+        gaze_heads_root = resolve_source_root(args.gaze_heads_root)
+        cmd = py + [
+            "rank_grm_heads_by_comics.py",
+            "--gaze-heads-root", str(gaze_heads_root),
+            "--comics-root", str(comics_root),
+            "--n-samples", str(args.comic_num_samples),
+            "--n-panels", str(args.comic_n_panels),
+            "--target-height", str(args.comic_target_height),
+            "--gap", str(args.comic_gap),
+            "--seed", str(args.comic_seed),
+            "--skip-early-layers", str(args.comic_skip_early_layers),
+            "--top-k", "100",
+            "--output", str(out),
+        ]
+        if args.comic_max_pixels is not None:
+            cmd.extend(["--max-pixels", str(args.comic_max_pixels)])
+        if args.comic_min_pixels is not None:
+            cmd.extend(["--min-pixels", str(args.comic_min_pixels)])
+        if args.comic_use_raw:
+            cmd.append("--use-raw")
+        return [
+            Job(
+                "rank_comics_last_prompt_comic_gaze",
+                cmd,
+                out,
+                log,
+                gpus[0],
+                provenance={
+                    "args.ranking_method": "comic-gaze",
+                    "args.gaze_heads_root": str(gaze_heads_root),
+                    "args.comics_root": str(comics_root),
+                    "args.use_raw": str(args.comic_use_raw),
+                    "args.n_samples": str(args.comic_num_samples),
+                    "args.seed": str(args.comic_seed),
+                },
+            )
+        ]
+
     for task in TASKS:
         src_root = source_root_for_task(args, task)
         for mode in MODES:
@@ -278,7 +327,10 @@ def curve_jobs(args: argparse.Namespace, out_root: Path, logs: Path) -> list[Job
             sample_json = sample_path_for(src_root, dataset_task, curve_mode)
             for inference_task, instruction in TASKS.items():
                 for query in QUERIES:
-                    rank = out_root / f"rank_{inference_task}_{curve_mode}_{query}" / "head_ranking.json"
+                    if args.ranking_method == "comic-gaze":
+                        rank = comic_gaze_rank_path(out_root)
+                    else:
+                        rank = out_root / f"rank_{inference_task}_{curve_mode}_{query}" / "head_ranking.json"
                     for top_k in args.top_ks:
                         out_dir = out_root / (
                             f"curve_data-{dataset_task}_instr-{inference_task}_"
@@ -312,6 +364,8 @@ def curve_jobs(args: argparse.Namespace, out_root: Path, logs: Path) -> list[Job
                                 "args.sample_json": str(sample_json),
                                 "args.head_ranking_json": str(rank),
                                 "args.override_task": instruction,
+                                "args.swap_bias": str(args.swap_bias),
+                                "args.wrong_region_samples": str(args.wrong_region_samples),
                             },
                         ))
                         n += 1
@@ -337,7 +391,10 @@ def video_jobs(args: argparse.Namespace, out_root: Path, logs: Path) -> list[Job
                 )
             src_root = source_root_for_task(args, dataset_task)
             sample_json = sample_path_for(src_root, dataset_task, "incremental")
-            rank = out_root / f"rank_{inference_task}_incremental_{query}" / "head_ranking.json"
+            if args.ranking_method == "comic-gaze":
+                rank = comic_gaze_rank_path(out_root)
+            else:
+                rank = out_root / f"rank_{inference_task}_incremental_{query}" / "head_ranking.json"
             out_dir = out_root / f"video_data-{dataset_task}_instr-{inference_task}_{query}_top64_8frames"
             out = out_dir / "attention_video_manifest.json"
             log = logs / f"video_data-{dataset_task}_instr-{inference_task}_{query}_top64.log"
@@ -364,6 +421,7 @@ def video_jobs(args: argparse.Namespace, out_root: Path, logs: Path) -> list[Job
                     "args.sample_json": str(sample_json),
                     "args.head_ranking_json": str(rank),
                     "args.override_task": TASKS[inference_task],
+                    "args.swap_bias": str(args.swap_bias),
                 },
             ))
             n += 1
@@ -434,7 +492,11 @@ def run_analysis(args: argparse.Namespace, out_root: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Run target-only bbox Stage-2/Stage-3 success experiments")
-    ap.add_argument("--output-root", default="results/attention/3data_3instruction_prompt_20260720")
+    ap.add_argument(
+        "--output-root",
+        default=None,
+        help="Experiment root. comic-gaze gets a separate default root so it cannot overwrite bbox rankings.",
+    )
     ap.add_argument(
         "--source-root",
         default=None,
@@ -455,6 +517,45 @@ def main() -> None:
     ap.add_argument("--max-parallel", type=int, default=4)
     ap.add_argument("--target-label", default="after_cam_high")
     ap.add_argument("--grounding-box-threshold", type=float, default=0.12)
+    ap.add_argument(
+        "--ranking-method",
+        default="bbox_mass",
+        choices=["bbox_mass", "comic-gaze"],
+        help=(
+            "bbox_mass keeps the task-specific GroundingDINO ranking. "
+            "comic-gaze discovers one task-independent global ranking from "
+            "six-panel comics and reuses it for every curve/video job."
+        ),
+    )
+    ap.add_argument(
+        "--gaze-heads-root",
+        default="/home/dais/workspace/gaze-heads",
+        help="Reference gaze-heads checkout used by --ranking-method comic-gaze.",
+    )
+    ap.add_argument(
+        "--comics-root",
+        default="/home/dais/workspace/data/comics_raw/raw_panel_images",
+        help="Panel-folder comics, or the raw COMICS root with --comic-use-raw.",
+    )
+    ap.add_argument("--comic-use-raw", action="store_true")
+    ap.add_argument("--comic-num-samples", type=int, default=500)
+    ap.add_argument("--comic-n-panels", type=int, default=6)
+    ap.add_argument("--comic-target-height", type=int, default=256)
+    ap.add_argument("--comic-gap", type=int, default=6)
+    ap.add_argument("--comic-seed", type=int, default=42)
+    ap.add_argument("--comic-skip-early-layers", type=int, default=2)
+    ap.add_argument(
+        "--comic-max-pixels",
+        type=int,
+        default=None,
+        help="Optional GRM processor cap for comics. Unset matches gaze-heads/model defaults.",
+    )
+    ap.add_argument(
+        "--comic-min-pixels",
+        type=int,
+        default=None,
+        help="Optional GRM processor floor for comics. Unset matches gaze-heads/model defaults.",
+    )
     ap.add_argument("--rank-num-samples", type=int, default=12)
     ap.add_argument("--top-ks", type=int, nargs="+", default=list(TOP_KS))
     ap.add_argument(
@@ -475,6 +576,13 @@ def main() -> None:
     ap.add_argument("--stage", choices=["rank", "analysis", "curve", "video", "all"], default="all")
     args = ap.parse_args()
 
+    if args.output_root is None:
+        args.output_root = (
+            COMIC_GAZE_OUTPUT_ROOT
+            if args.ranking_method == "comic-gaze"
+            else DEFAULT_OUTPUT_ROOT
+        )
+
     out_root = Path(args.output_root)
     logs = out_root / "logs"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -487,7 +595,14 @@ def main() -> None:
     if args.stage in {"rank", "all"}:
         all_results.extend(run_jobs(rank_jobs(args, out_root, logs), args.max_parallel, args.skip_existing))
     if args.stage in {"analysis", "all"}:
-        run_analysis(args, out_root)
+        if args.ranking_method == "comic-gaze":
+            print(
+                "[runner] skip top-100 overlap analysis: comic-gaze has one "
+                "global ranking rather than task-specific rankings",
+                flush=True,
+            )
+        else:
+            run_analysis(args, out_root)
     if args.stage in {"curve", "all"}:
         all_results.extend(run_jobs(curve_jobs(args, out_root, logs), args.max_parallel, args.skip_existing))
     if args.stage in {"video", "all"}:

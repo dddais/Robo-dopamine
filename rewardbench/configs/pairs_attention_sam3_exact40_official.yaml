@@ -1,0 +1,50 @@
+# Exact-paired non-destructive test candidate cohort.  The 40 pairs are frozen
+# from SAM3-audited reward=1 samples.  The reward=5 instruction is grounded and
+# audited independently; the eventual analyzable pair count may be below 40.
+grounding:
+  pair_manifest: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/pairs_sam3_exact40/paired_reward1_reward5_exact40.jsonl
+  output_dir: /home/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/pairs_attention_sam3_exact40_official
+  parser_model_path: /home/dais/workspace/model/Qwen3-4B-Instruct-2507
+  use_parser_model: true
+
+sam3:
+  model_path: /home/dais/workspace/model/sam3
+  checkpoint_path: /home/dais/workspace/model/sam3/sam3.pt
+  device: cuda
+  threshold: 0.30
+  mask_threshold: 0.50
+  top_n: 10
+
+attention_eval:
+  pair_manifest: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/pairs_sam3_exact40/paired_reward1_reward5_exact40.jsonl
+  output_dir: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/pairs_attention_sam3_exact40_official
+  grounding_run: /home/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/pairs_attention_sam3_exact40_official/sam3
+  model_path: /home/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  prompt_mode: official
+
+  # Reuse the frozen consensus; do not rank or tune on these paired samples.
+  ranking_path: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/counterfactual_reward1_sam3_consensus/consensus_ranking.json
+  steering_partition: all_eligible
+  run_paired: true
+
+  seed: 20260724
+  discovery_fraction: 0.3333333333333333
+  top_k: 8
+  swap_bias: 6
+  intervention_location: after_cam_high
+  num_layers: 36
+  num_heads: 32
+  skip_early_layers: 2
+  query_mode: last_prompt
+  top_k_sensitivity: [8, 64]
+  bias_sensitivity: [0, 2, 4, 6]
+  video_episode_count: 12
+  bootstrap_samples: 10000
+  # Frozen before paired inference; used only by the post-hoc metrics stage.
+  non_inferiority_margin: -0.05
+  dtype: bfloat16
+  device_map: auto
+  min_pixels: 12544
+  max_pixels: 76800
+  max_new_tokens: 16

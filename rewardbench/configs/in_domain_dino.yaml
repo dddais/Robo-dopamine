@@ -1,0 +1,28 @@
+attention_eval:
+  dataset_root: /home/dais/workspace/data/RoboRewardBench
+  counterfactual_dataset_root: /home/dais/workspace/data/RoboRewardBench_counterfactual_reward1
+  split: test
+  output_dir: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/replication_dino_in_domain
+  grounding_run: /home/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/full/grounding_dino
+  model_path: /home/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  ranking_path: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/replication_dino_in_domain/in_domain_ranking.json
+  seed: 20260724
+  discovery_fraction: 0.3333333333333333
+  num_layers: 36
+  num_heads: 32
+  skip_early_layers: 2
+  query_mode: last_prompt
+  top_k: 8
+  swap_bias: 6
+  intervention_location: after_cam_high
+  top_k_sensitivity: [8, 64]
+  bias_sensitivity: [0, 2, 4, 6]
+  video_episode_count: 12
+  run_paired: true
+  bootstrap_samples: 10000
+  dtype: bfloat16
+  device_map: auto
+  min_pixels: 12544
+  max_pixels: 76800
+  max_new_tokens: 16

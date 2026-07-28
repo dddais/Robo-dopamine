@@ -1,0 +1,45 @@
+# Query-scope ablation on the already audited SAM3 reward=1 population.
+# This writes to a new output directory and reuses the frozen consensus heads;
+# it does not modify or resume the existing formal steering run.
+attention_eval:
+  dataset_root: /home/dais/workspace/data/RoboRewardBench_counterfactual_reward1
+  split: test
+  output_dir: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/counterfactual_reward1_sam3_query_scope_ablation
+  grounding_run: /home/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/counterfactual_reward1_sam3/sam3
+  model_path: /home/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  prompt_mode: official
+
+  # Reuse the previously frozen cross-domain consensus ranking. Do not run rank.
+  ranking_path: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/counterfactual_reward1_sam3_consensus/consensus_ranking.json
+  steering_partition: evaluation
+  run_paired: false
+
+  seed: 20260724
+  discovery_fraction: 0.3333333333333333
+  top_k: 8
+  swap_bias: 6
+  intervention_location: after_cam_high
+  num_layers: 36
+  num_heads: 32
+  skip_early_layers: 2
+  query_mode: last_prompt
+
+  # ``all`` is the historical behavior and remains the primary/default scope.
+  # The sensitivity records reuse its primary conditions exactly, then add the
+  # other three scopes with target, spatial, and head-specific controls.
+  steering_query_scope: all
+  query_scope_sensitivity: [all, prefill, last_prompt, decode]
+  query_scope_sensitivity_conditions:
+    [candidate_target, candidate_wrong, low_rank_target]
+
+  # Avoid mixing the query-scope experiment with top-k/bias sweeps.
+  top_k_sensitivity: []
+  bias_sensitivity: []
+  run_duplicate_location_sensitivity: false
+  bootstrap_samples: 10000
+  dtype: bfloat16
+  device_map: auto
+  min_pixels: 12544
+  max_pixels: 76800
+  max_new_tokens: 16

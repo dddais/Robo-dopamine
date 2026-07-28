@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "rewardbench/attention/1.0.0",
+  "type": "object",
+  "required": ["schema_version", "example_id", "video_sha256", "ranking_source", "heads", "bias", "condition", "raw_output", "signed_score", "bbox_positions", "hook_diagnostics", "status"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "example_id": {"type": "string", "minLength": 1},
+    "video_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ranking_source": {"type": "string", "minLength": 1},
+    "heads": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": {"type": "integer", "minimum": 0},
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "bias": {"type": "number"},
+    "condition": {"type": "string"},
+    "raw_output": {"type": "string"},
+    "signed_score": {"type": ["number", "null"], "minimum": -1, "maximum": 1},
+    "bbox_positions": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+    "hook_diagnostics": {"type": "object"},
+    "status": {"type": "string"}
+  }
+}

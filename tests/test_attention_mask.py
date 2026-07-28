@@ -5,634 +5,484 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
-try:
-    import torch
-except ImportError:  # Lightweight repository-test environments may omit torch.
-    torch = None
+import torch
 
-from roborewardbench.attention_mask.dataset import (
-    build_audit_holdout_split,
-    build_evaluation_only_split,
-    load_attention_examples,
-    load_split_partition,
-)
-from roborewardbench.attention_mask.curve import build_curve_rows
-from roborewardbench.attention_mask.io import initialize_manifest
-from roborewardbench.attention_mask.masking import (
-    IMAGE_LABELS,
-    ROLE_LABELS,
+from rewardbench.attention_eval.dataset import _formal_ids, grouped_stratified_split
+from rewardbench.attention_eval.experiment import metrics as attention_metrics
+from rewardbench.attention_eval.experiment import steer
+from rewardbench.attention_eval.masking import (
     Head,
     ImageSpan,
     bbox_to_token_positions,
     make_attention_mask_hook,
     matched_wrong_position_set,
-    target_position_set,
+    select_low_ranked_heads,
 )
-from roborewardbench.attention_mask.metrics import analyze_records
-from roborewardbench.attention_mask.rank_heads import (
-    aggregate_rankings,
-    bbox_ranking_score,
-)
-from roborewardbench.attention_mask.run_experiment import (
-    validate_ranking_linkage,
-    validate_ranking_model,
-)
-from roborewardbench.attention_mask.visualize import aggregate_head_grid
-from roborewardbench.dopamine_eval.audit import grounding_result_fingerprint
+from rewardbench.attention_eval.ranking import aggregate_in_domain, consensus_ranking
+from rewardbench.attention_eval.stats import holm, paired_cluster_bootstrap
 
 
-def write_jsonl(path: Path, rows: list[dict]) -> None:
-    path.write_text(
-        "".join(json.dumps(row, allow_nan=False) + "\n" for row in rows),
-        encoding="utf-8",
-    )
+class MappingAndControlTests(unittest.TestCase):
+    def test_cell_intersection_and_grid_length_validation(self) -> None:
+        span = ImageSpan("after_cam_high", "x", 10, 26, (1, 8, 8))
+        positions = bbox_to_token_positions(span, [0, 0, 50, 50], (100, 100), 2)
+        self.assertEqual(positions, [10, 11, 14, 15])
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            bbox_to_token_positions(
+                ImageSpan("x", "x", 0, 15, (1, 8, 8)),
+                [0, 0, 10, 10],
+                (100, 100),
+                2,
+            )
+
+    def test_wrong_region_matches_and_does_not_overlap(self) -> None:
+        span = ImageSpan("after_cam_high", "x", 10, 26, (1, 8, 8))
+        target = [10, 11, 14, 15]
+        wrong = matched_wrong_position_set(span, target, spatial_merge_size=2)
+        self.assertIsNotNone(wrong)
+        self.assertEqual(len(wrong), len(target))
+        self.assertFalse(set(wrong) & set(target))
+        self.assertIsNone(
+            matched_wrong_position_set(
+                ImageSpan("x", "x", 0, 4, (1, 4, 4)),
+                [0, 1, 2, 3],
+                spatial_merge_size=2,
+            )
+        )
+
+    def test_low_rank_control_never_overlaps_candidates(self) -> None:
+        ranking = [{"layer": 0, "head": index} for index in range(8)]
+        candidate = [Head(0, 0), Head(0, 1)]
+        low = select_low_ranked_heads(ranking, 2, candidate)
+        self.assertFalse(set(low) & set(candidate))
 
 
-def grounding_row(example_id: str, image: Path, *, steering_ready: bool) -> dict:
-    endpoint = {
-        "image_path": str(image),
-        "image_size": [10, 10],
-        "selected": {"bbox": [0.0, 0.0, 5.0, 10.0], "score": 0.8, "label": "block"},
-    }
-    return {
-        "example_id": example_id,
-        "task": "pick the block",
-        "subset": "toy",
-        "selected_parse": {"target_phrase": "block"},
-        "grounding_queries": ["block"],
-        "before": endpoint,
-        "after": endpoint,
-        "pair_consistency": {"consistent": True},
-        "steering_ready": steering_ready,
-        "status": "accepted_both",
-        "visualization_file": "audit.jpg",
-    }
+class HookTests(unittest.TestCase):
+    def test_hook_only_modifies_selected_heads_and_new_text_keys_are_zero(self) -> None:
+        diagnostics = {}
+        hook = make_attention_mask_hook([1], [2], [3], 3, 6, diagnostics)
+        mask = torch.zeros((1, 1, 4, 6))
+        _, output = hook(None, (), {"attention_mask": mask})
+        changed = output["attention_mask"]
+        self.assertTrue(torch.equal(changed[:, 0], mask[:, 0]))
+        self.assertEqual(changed[0, 1, 0, 2], 6)
+        self.assertEqual(changed[0, 1, 0, 3], -6)
+        self.assertEqual(changed[0, 1, 0, 5], 0)
+        self.assertEqual(diagnostics["prefill_calls"], 1)
+
+        decode_mask = torch.zeros((1, 1, 1, 8))
+        _, decoded = hook(None, (), {"attention_mask": decode_mask})
+        self.assertTrue(torch.equal(decoded["attention_mask"][..., 6:], torch.zeros(1, 3, 1, 2)))
+        self.assertEqual(diagnostics["decode_calls"], 1)
+
+    def test_zero_bias_is_numerically_identical(self) -> None:
+        hook = make_attention_mask_hook([1], [2], [3], 3, 0)
+        mask = torch.randn((1, 1, 4, 6))
+        _, output = hook(None, (), {"attention_mask": mask})
+        self.assertTrue(torch.equal(output["attention_mask"], mask.expand(1, 3, 4, 6)))
+
+    def test_positive_bias_increases_selected_head_bbox_mass(self) -> None:
+        logits = torch.zeros((1, 3, 1, 6))
+        baseline = torch.softmax(logits, dim=-1)[0, 1, 0, 2]
+        hook = make_attention_mask_hook([1], [2], [3, 4], 3, 6)
+        _, output = hook(None, (), {"attention_mask": torch.zeros((1, 1, 1, 6))})
+        steered = torch.softmax(logits + output["attention_mask"], dim=-1)[0, 1, 0, 2]
+        self.assertGreater(steered, baseline)
+
+    def test_query_scopes_separate_prefill_last_prompt_and_decode(self) -> None:
+        prefill_mask = torch.zeros((1, 1, 4, 6))
+        decode_mask = torch.zeros((1, 1, 1, 6))
+
+        prefill_diagnostics = {}
+        prefill = make_attention_mask_hook(
+            [1],
+            [2],
+            [3],
+            3,
+            6,
+            prefill_diagnostics,
+            query_scope="prefill",
+        )
+        _, prefill_output = prefill(None, (), {"attention_mask": prefill_mask})
+        self.assertTrue(torch.all(prefill_output["attention_mask"][0, 1, :, 2] == 6))
+        self.assertIsNone(prefill(None, (), {"attention_mask": decode_mask}))
+        self.assertEqual(prefill_diagnostics["prefill_applied_calls"], 1)
+        self.assertEqual(prefill_diagnostics["decode_applied_calls"], 0)
+
+        last_diagnostics = {}
+        last_prompt = make_attention_mask_hook(
+            [1],
+            [2],
+            [3],
+            3,
+            6,
+            last_diagnostics,
+            query_scope="last_prompt",
+        )
+        _, last_output = last_prompt(None, (), {"attention_mask": prefill_mask})
+        changed = last_output["attention_mask"]
+        self.assertTrue(torch.all(changed[0, 1, :-1, 2] == 0))
+        self.assertEqual(changed[0, 1, -1, 2], 6)
+        self.assertEqual(changed[0, 1, -1, 3], -6)
+        self.assertIsNone(last_prompt(None, (), {"attention_mask": decode_mask}))
+        self.assertEqual(last_diagnostics["applied_query_rows"], 1)
+
+        decode_diagnostics = {}
+        decode = make_attention_mask_hook(
+            [1],
+            [2],
+            [3],
+            3,
+            6,
+            decode_diagnostics,
+            query_scope="decode",
+        )
+        self.assertIsNone(decode(None, (), {"attention_mask": prefill_mask}))
+        _, decode_output = decode(None, (), {"attention_mask": decode_mask})
+        self.assertEqual(decode_output["attention_mask"][0, 1, 0, 2], 6)
+        self.assertEqual(decode_diagnostics["prefill_applied_calls"], 0)
+        self.assertEqual(decode_diagnostics["decode_applied_calls"], 1)
+
+    def test_query_scope_rejects_unknown_value(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown query_scope"):
+            make_attention_mask_hook(
+                [1], [2], [3], 3, 6, query_scope="score_token"
+            )
 
 
-class DatasetTests(unittest.TestCase):
-    def test_manual_selection_checks_fingerprint_and_never_exposes_reward(self) -> None:
+class SplitAndRankingTests(unittest.TestCase):
+    def test_auto_grounding_eligibility_requires_two_latest_ok_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            image = root / "frame.png"
-            image.write_bytes(b"not decoded by this test")
-            row = grounding_row("toy/example.mp4", image, steering_ready=True)
-            write_jsonl(root / "grounding_results.jsonl", [row])
-            write_jsonl(
-                root / "frame_manifest.jsonl",
-                [{
-                    "example_id": row["example_id"],
-                    "before": {"image_path": str(image)},
-                    "after": {"image_path": str(image)},
-                }],
-            )
-            write_jsonl(
-                root / "manual_audit.jsonl",
-                [{
-                    "example_id": row["example_id"],
-                    "manual_label": "correct",
-                    "grounding_fingerprint": grounding_result_fingerprint(row),
-                }],
-            )
-            examples = load_attention_examples(
-                root, selection_mode="manual_correct_ready", require_images=False
-            )
-            self.assertEqual(len(examples), 1)
-            item = examples[0].model_item(root / "blank.png")
-            self.assertNotIn("reward", item)
-            self.assertEqual(item["image"][2:5], [str(image.resolve())] * 3)
-            self.assertEqual(item["image"][5:8], [str(image.resolve())] * 3)
-
-            audit = json.loads((root / "manual_audit.jsonl").read_text().splitlines()[0])
-            audit["grounding_fingerprint"] = "stale"
-            write_jsonl(root / "manual_audit.jsonl", [audit])
-            with self.assertRaisesRegex(ValueError, "changed after manual review"):
-                load_attention_examples(
-                    root, selection_mode="manual_correct_ready", require_images=False
-                )
-
-    def test_audit_holdout_is_disjoint(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            image = root / "frame.png"
-            image.write_bytes(b"x")
+            run_dir = Path(directory)
             rows = [
-                grounding_row("toy/discovery.mp4", image, steering_ready=False),
-                grounding_row("toy/evaluation.mp4", image, steering_ready=True),
+                {"example_id": "good", "frame": "first", "status": "ok"},
+                {"example_id": "good", "frame": "last", "status": "ok"},
+                {"example_id": "partial", "frame": "first", "status": "ok"},
+                {"example_id": "retried", "frame": "first", "status": "ok"},
+                {"example_id": "retried", "frame": "last", "status": "ok"},
+                {"example_id": "retried", "frame": "last", "status": "invalid"},
             ]
-            write_jsonl(root / "grounding_results.jsonl", rows)
-            write_jsonl(
-                root / "frame_manifest.jsonl",
-                [
-                    {
-                        "example_id": row["example_id"],
-                        "before": {"image_path": str(image)},
-                        "after": {"image_path": str(image)},
-                    }
-                    for row in rows
-                ],
+            (run_dir / "grounding.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
             )
-            write_jsonl(
-                root / "manual_audit.jsonl",
-                [
-                    {
-                        "example_id": row["example_id"],
-                        "manual_label": "correct",
-                        "grounding_fingerprint": grounding_result_fingerprint(row),
-                    }
-                    for row in rows
-                ],
+            self.assertEqual(
+                _formal_ids(run_dir, "auto_valid_grounding"), {"good"}
             )
-            destination = root / "split.json"
-            manifest = build_audit_holdout_split(root, destination)
-            self.assertEqual(manifest["discovery"]["count"], 1)
-            self.assertEqual(manifest["evaluation"]["count"], 1)
-            discovery, _ = load_split_partition(destination, "discovery")
-            evaluation, _ = load_split_partition(destination, "evaluation")
-            self.assertFalse(set(discovery) & set(evaluation))
+            with self.assertRaises(FileNotFoundError):
+                _formal_ids(run_dir)
+            with self.assertRaisesRegex(ValueError, "eligibility_mode"):
+                _formal_ids(run_dir, "not-a-mode")
 
-    def test_auto_detected_requires_both_endpoint_boxes_and_freezes_evaluation(self) -> None:
+    def test_video_hash_split_has_no_leakage(self) -> None:
+        rows = [
+            {
+                "example_id": f"x{i}",
+                "video_sha256": f"h{i // 2}",
+                "subset": "s",
+                "target_type": "object",
+            }
+            for i in range(10)
+        ]
+        split = grouped_stratified_split(rows)
+        self.assertFalse(
+            set(split["discovery_video_sha256"]) & set(split["evaluation_video_sha256"])
+        )
+
+    def test_consensus_validates_complete_rankings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            image = root / "frame.png"
-            image.write_bytes(b"x")
-            detected = grounding_row(
-                "toy/detected.mp4", image, steering_ready=False
-            )
-            missing_after = json.loads(
-                json.dumps(
-                    grounding_row(
-                        "toy/missing-after.mp4", image, steering_ready=False
+            paths = []
+            for source in range(3):
+                path = Path(directory) / f"{source}.json"
+                rows = [
+                    {"layer": layer, "head": head, "score": 1}
+                    for layer in range(2)
+                    for head in range(2)
+                ]
+                if source == 1:
+                    rows.reverse()
+                path.write_text(
+                    json.dumps(
+                        {"num_layers": 2, "num_heads": 2, "rankings": {"mean": rows}}
                     )
                 )
+                paths.append(path)
+            result = consensus_ranking(paths, expected_layers=2, expected_heads=2)
+            self.assertEqual(len(result["ranking"]), 4)
+            self.assertIn("fingerprint", result)
+            filtered = consensus_ranking(
+                paths, expected_layers=2, expected_heads=2, skip_early_layers=1
             )
-            missing_after["after"]["selected"] = None
-            rows = [detected, missing_after]
-            write_jsonl(root / "grounding_results.jsonl", rows)
-            write_jsonl(
-                root / "frame_manifest.jsonl",
-                [
-                    {
-                        "example_id": row["example_id"],
-                        "before": {"image_path": str(image)},
-                        "after": {"image_path": str(image)},
-                    }
-                    for row in rows
-                ],
-            )
-            write_jsonl(
-                root / "manual_audit.jsonl",
-                [
-                    {
-                        "example_id": detected["example_id"],
-                        "manual_label": "incorrect",
-                        "grounding_fingerprint": "intentionally-stale",
-                    }
-                ],
-            )
-            examples = load_attention_examples(
-                root, selection_mode="auto_detected", require_images=False
-            )
-            self.assertEqual(
-                [example.example_id for example in examples],
-                ["toy/detected.mp4"],
-            )
-            self.assertIsNone(examples[0].manual_label)
-            destination = root / "auto-split.json"
-            manifest = build_evaluation_only_split(
-                root,
-                destination,
-                selection_mode="auto_detected",
-            )
-            self.assertEqual(manifest["strategy"], "evaluation_only")
-            self.assertEqual(manifest["discovery"]["count"], 0)
-            self.assertEqual(manifest["evaluation"]["count"], 1)
-            evaluation, _ = load_split_partition(destination, "evaluation")
-            self.assertEqual(evaluation, ["toy/detected.mp4"])
+            self.assertEqual(len(filtered["ranking"]), 2)
+            self.assertEqual(filtered["skip_early_layers"], 1)
+            self.assertTrue(all(row["layer"] >= 1 for row in filtered["ranking"]))
 
-
-class MaskingTests(unittest.TestCase):
-    @staticmethod
-    def spans() -> list[ImageSpan]:
-        return [
-            ImageSpan(label=label, path=f"{label}.png", start=index * 4, end=index * 4 + 4, grid_thw=(1, 4, 4))
-            for index, label in enumerate(IMAGE_LABELS)
-        ]
-
-    def test_bbox_is_copied_to_three_before_and_three_after_spans(self) -> None:
-        positions = target_position_set(
-            self.spans(),
-            before_bbox=(0, 0, 5, 10),
-            after_bbox=(5, 0, 10, 10),
-            before_image_size=(10, 10),
-            after_image_size=(10, 10),
-            spatial_merge_size=2,
-            target_role="both",
-        )
-        self.assertEqual(len(positions.per_span_target), 6)
-        self.assertEqual(len(positions.target), 12)
-        self.assertEqual(len(positions.other_image), 12)
-        for label, span_positions in positions.per_span_target.items():
-            self.assertEqual(len(span_positions), 2, label)
-
-    def test_role_positions_partition_only_requested_endpoint_images(self) -> None:
-        spans = self.spans()
-        span_by_label = {span.label: span for span in spans}
-        reference_positions = {
-            position
-            for label in IMAGE_LABELS[:2]
-            for position in range(span_by_label[label].start, span_by_label[label].end)
-        }
-        for role in ("before", "after", "both", "after_high"):
-            positions = target_position_set(
-                spans,
-                before_bbox=(0, 0, 5, 10),
-                after_bbox=(5, 0, 10, 10),
-                before_image_size=(10, 10),
-                after_image_size=(10, 10),
-                spatial_merge_size=2,
-                target_role=role,
-            )
-            expected = {
-                position
-                for label in ROLE_LABELS[role]
-                for position in range(
-                    span_by_label[label].start,
-                    span_by_label[label].end,
-                )
-            }
-            self.assertEqual(set(positions.per_span_target), set(ROLE_LABELS[role]))
-            self.assertFalse(set(positions.target) & set(positions.other_image))
-            self.assertEqual(
-                set(positions.target) | set(positions.other_image),
-                expected,
-            )
-            self.assertFalse(
-                (set(positions.target) | set(positions.other_image))
-                & reference_positions
-            )
-
-    def test_span_protocol_rejects_duplicate_and_unexpected_labels(self) -> None:
-        kwargs = {
-            "before_bbox": (0, 0, 5, 10),
-            "after_bbox": (5, 0, 10, 10),
-            "before_image_size": (10, 10),
-            "after_image_size": (10, 10),
-            "spatial_merge_size": 2,
-            "target_role": "both",
-        }
-        spans = self.spans()
-        with self.assertRaisesRegex(ValueError, "Duplicate"):
-            target_position_set(spans + [spans[-1]], **kwargs)
-        unexpected = list(spans)
-        unexpected[-1] = ImageSpan(
-            label="unexpected",
-            path=unexpected[-1].path,
-            start=unexpected[-1].start,
-            end=unexpected[-1].end,
-            grid_thw=unexpected[-1].grid_thw,
-        )
-        with self.assertRaisesRegex(ValueError, "eight-image protocol"):
-            target_position_set(unexpected, **kwargs)
-
-    def test_small_bbox_uses_cell_intersection(self) -> None:
-        span = self.spans()[0]
-        positions = bbox_to_token_positions(
-            span,
-            (4.9, 4.9, 5.1, 5.1),
-            (10, 10),
-            2,
-            method="intersection",
-        )
-        self.assertEqual(len(positions), 4)
-
-    def test_wrong_region_is_disjoint_and_token_count_matched(self) -> None:
-        spans = self.spans()
-        target = target_position_set(
-            spans,
-            before_bbox=(0, 0, 5, 10),
-            after_bbox=(0, 0, 5, 10),
-            before_image_size=(10, 10),
-            after_image_size=(10, 10),
-            spatial_merge_size=2,
-            target_role="both",
-        )
-        wrong = matched_wrong_position_set(
-            spans, target, spatial_merge_size=2, seed=7
-        )
-        self.assertEqual(len(target.target), len(wrong.target))
-        self.assertFalse(set(target.target) & set(wrong.target))
-        for label in target.per_span_target:
-            self.assertEqual(
-                len(target.per_span_target[label]),
-                len(wrong.per_span_target[label]),
-            )
-            self.assertFalse(
-                set(target.per_span_target[label])
-                & set(wrong.per_span_target[label])
-            )
-
-    @unittest.skipUnless(torch is not None, "torch is required for hook tensor checks")
-    def test_hook_changes_only_selected_head_for_prefill_and_decode(self) -> None:
-        hook = make_attention_mask_hook(
-            head_indices=[1],
-            suppress_positions=[2, 3],
-            boost_positions=[4],
-            num_query_heads=4,
-            swap_bias=2.0,
-            decode_only=False,
-        )
-        _, kwargs = hook(
-            None,
-            (),
-            {"attention_mask": torch.zeros((1, 1, 3, 6), dtype=torch.float32)},
-        )
-        updated = kwargs["attention_mask"]
-        self.assertEqual(tuple(updated.shape), (1, 4, 3, 6))
-        self.assertTrue(torch.all(updated[:, 0] == 0))
-        self.assertTrue(torch.all(updated[:, 2:] == 0))
-        self.assertTrue(torch.all(updated[:, 1, :, 2:4] == -2))
-        self.assertTrue(torch.all(updated[:, 1, :, 4] == 2))
-
-        decode_only = make_attention_mask_hook(
-            head_indices=[1],
-            suppress_positions=[],
-            boost_positions=[4],
-            num_query_heads=4,
-            swap_bias=2.0,
-            decode_only=True,
-        )
-        self.assertIsNone(
-            decode_only(
-                None,
-                (),
-                {"attention_mask": torch.zeros((1, 1, 3, 6))},
-            )
-        )
-        self.assertIsNotNone(
-            decode_only(
-                None,
-                (),
-                {"attention_mask": torch.zeros((1, 1, 1, 6))},
-            )
-        )
-
-    @unittest.skipUnless(torch is not None, "torch is required for hook tensor checks")
-    def test_hook_preserves_offsets_across_short_exact_and_extended_key_lengths(self) -> None:
-        hook = make_attention_mask_hook(
-            head_indices=[1, 3],
-            suppress_positions=[2],
-            boost_positions=[4],
-            num_query_heads=4,
-            swap_bias=1.5,
-            decode_only=False,
-        )
-        for key_length in (3, 5, 8):
-            original = torch.full((2, 1, 2, key_length), -7.0)
-            _, kwargs = hook(None, (), {"attention_mask": original})
-            updated = kwargs["attention_mask"]
-            self.assertEqual(tuple(updated.shape), (2, 4, 2, key_length))
-            self.assertTrue(torch.all(updated[:, 0] == -7.0))
-            self.assertTrue(torch.all(updated[:, 2] == -7.0))
-            self.assertTrue(torch.all(updated[:, [1, 3], :, 2] == -8.5))
-            if key_length > 4:
-                self.assertTrue(torch.all(updated[:, [1, 3], :, 4] == -5.5))
-            if key_length > 5:
-                self.assertTrue(torch.all(updated[:, [1, 3], :, 5:] == -7.0))
-
-    @unittest.skipUnless(torch is not None, "torch is required for hook tensor checks")
-    def test_hook_rejects_nonbroadcastable_head_dimension(self) -> None:
-        hook = make_attention_mask_hook(
-            head_indices=[1],
-            suppress_positions=[2],
-            boost_positions=[4],
-            num_query_heads=4,
-            swap_bias=1.0,
-        )
-        with self.assertRaisesRegex(RuntimeError, "mask head dimension"):
-            hook(
-                None,
-                (),
-                {"attention_mask": torch.zeros((1, 2, 3, 5))},
-            )
-
-    @unittest.skipUnless(torch is not None, "torch is required for hook tensor checks")
-    def test_aggregate_heatmap_uses_requested_layer_head_and_absolute_span(self) -> None:
-        attentions = [
-            torch.zeros((1, 2, 6, 12), dtype=torch.float32),
-            torch.zeros((1, 2, 6, 12), dtype=torch.float32),
-        ]
-        span = ImageSpan(
-            label="after_cam_high",
-            path="frame.png",
-            start=4,
-            end=8,
-            grid_thw=(1, 4, 4),
-        )
-        attentions[0][0, 1, 5, 4:8] = torch.tensor([0.1, 0.2, 0.3, 0.4])
-        attentions[1][0, 0, 5, 4:8] = torch.tensor([0.5, 0.6, 0.7, 0.8])
-        grid, metrics = aggregate_head_grid(
-            attentions,
-            heads=[Head(0, 1), Head(1, 0)],
-            query_position=5,
-            span=span,
-            spatial_merge_size=2,
-            target_positions=[4, 6],
-        )
-        np.testing.assert_allclose(
-            grid,
-            np.array([[0.3, 0.4], [0.5, 0.6]]),
-            rtol=1e-6,
-        )
-        self.assertAlmostEqual(metrics["span_mass"], 1.8)
-        self.assertAlmostEqual(metrics["bbox_mass"], 0.8)
-        self.assertEqual(metrics["target_token_count_in_span"], 2)
-
-
-class RankingAndMetricsTests(unittest.TestCase):
-    def test_external_fixed_ranking_skips_discovery_linkage_but_checks_dimensions(self) -> None:
-        old_style = {
-            "default_ranking": "mean",
-            "rankings": {
-                "mean": [
-                    {"layer": 1, "head": 0, "score": 1.0},
-                    {"layer": 0, "head": 1, "score": 0.5},
-                ]
-            },
-            "skip_early_layers": 0,
-            "num_layers": 2,
-            "num_heads": 2,
-        }
-        validate_ranking_linkage(
-            old_style,
-            evaluation_ids=["toy/eval.mp4"],
-            split_sha256="split",
-            target_role="after",
-            external_fixed_ranking=True,
-            allow_incomplete_ranking=False,
-        )
-        with self.assertRaisesRegex(ValueError, "complete discovery"):
-            validate_ranking_linkage(
-                old_style,
-                evaluation_ids=["toy/eval.mp4"],
-                split_sha256="split",
-                target_role="after",
-                external_fixed_ranking=False,
-                allow_incomplete_ranking=False,
-            )
-        validate_ranking_model(
-            old_style,
-            current_model_identity={},
-            num_layers=2,
-            num_heads=2,
-            external_fixed_ranking=True,
-        )
-        with self.assertRaisesRegex(ValueError, "num_layers"):
-            validate_ranking_model(
-                old_style,
-                current_model_identity={},
-                num_layers=3,
-                num_heads=2,
-                external_fixed_ranking=True,
-            )
-
-    def test_aggregate_ranking_orders_largest_mass_first(self) -> None:
-        rankings = aggregate_rankings(
-            [
-                np.array([[0.1, 0.9], [0.3, 0.2]]),
-                np.array([[0.2, 0.8], [0.4, 0.1]]),
-            ]
-        )
-        self.assertEqual(
-            (rankings["mean"][0]["layer"], rankings["mean"][0]["head"]),
-            (0, 1),
-        )
-
-    def test_excess_mass_removes_bbox_area_baseline(self) -> None:
-        target = np.array([[0.4, 0.2]])
-        image = np.array([[0.8, 0.4]])
-        corrected = bbox_ranking_score(
-            target,
-            image,
-            target_token_count=5,
-            role_image_token_count=10,
-            score_mode="excess_mass",
-        )
-        np.testing.assert_allclose(corrected, np.zeros_like(corrected))
-        full_frame = bbox_ranking_score(
-            image,
-            image,
-            target_token_count=10,
-            role_image_token_count=10,
-            score_mode="excess_mass",
-        )
-        np.testing.assert_allclose(full_frame, np.zeros_like(full_frame))
-
-    def test_paired_metrics_use_common_examples(self) -> None:
-        rows = []
-        scores = {
-            "a": {"baseline": 0.1, "candidate_target": 0.3, "candidate_wrong": 0.1, "low_rank_target": 0.15, "all_target": 0.2},
-            "b": {"baseline": 0.2, "candidate_target": 0.4, "candidate_wrong": 0.2, "low_rank_target": 0.25, "all_target": 0.3},
-        }
-        for example_id, conditions in scores.items():
-            for condition, score in conditions.items():
-                rows.append({
-                    "run_family_signature": "family",
-                    "run_signature": "shard",
-                    "example_id": example_id,
-                    "subset": "s1" if example_id == "a" else "s2",
-                    "condition": condition,
-                    "top_k": 8 if condition not in {"baseline", "all_target"} else None,
-                    "swap_bias": 2.0 if condition != "baseline" else 0.0,
-                    "intervention": "boost_suppress",
-                    "target_role": "both",
-                    "score": score,
-                    "status": "ok",
-                })
-        result = analyze_records(
-            rows,
-            bootstrap_samples=100,
-            bootstrap_seed=0,
-            shard_completions=[{
-                "run_family_signature": "family",
-                "run_signature": "shard",
-                "shard_index": 0,
-                "num_shards": 1,
-                "complete_shard": True,
-                "selected_ids": ["a", "b"],
-                "result_record_count": len(rows),
-                "_observed_result_record_count": len(rows),
-                "_observed_run_signatures": ["shard"],
-                "_observed_example_ids": ["a", "b"],
-            }],
-        )
-        self.assertTrue(result["input_completeness"]["complete"])
-        candidate_name = (
-            "candidate_target|top_k=8|bias=2|boost_suppress|role=both"
-        )
-        shift = result["configurations"][candidate_name][
-            "paired_score_shift_vs_baseline"
-        ]
-        self.assertAlmostEqual(shift["micro_mean"], 0.2)
-        wrong_contrast = next(
-            value
-            for key, value in result["paired_control_contrasts"].items()
-            if candidate_name in key and key.endswith("wrong_region")
-        )
-        self.assertEqual(wrong_contrast["paired_ids"], 2)
-        self.assertAlmostEqual(
-            wrong_contrast["signed_difference_of_shifts"]["micro_mean"], 0.2
-        )
-
-    def test_curve_is_bias_dose_response_with_paired_example_shifts(self) -> None:
-        rows = []
-        for example_id, baseline in (("a", 0.1), ("b", 0.3)):
-            rows.append(
-                {
-                    "run_family_signature": "family",
-                    "example_id": example_id,
-                    "condition": "baseline",
-                    "top_k": None,
-                    "swap_bias": 0.0,
-                    "intervention": "boost_suppress",
-                    "target_role": "both",
-                    "score": baseline,
-                    "status": "ok",
-                }
-            )
-            for bias, shift in ((0.0, 0.0), (2.0, -0.1)):
-                rows.append(
-                    {
-                        "run_family_signature": "family",
-                        "example_id": example_id,
-                        "condition": "candidate_target",
-                        "top_k": 8,
-                        "swap_bias": bias,
-                        "intervention": "boost_suppress",
-                        "target_role": "both",
-                        "score": baseline + shift,
-                        "status": "ok",
-                    }
-                )
-        curve, summary = build_curve_rows(
-            rows,
-            bootstrap_samples=100,
-            bootstrap_seed=0,
-        )
-        self.assertEqual(summary["num_examples"], 2)
-        by_bias = {row["swap_bias"]: row for row in curve}
-        self.assertAlmostEqual(by_bias[0.0]["mean_paired_shift"], 0.0)
-        self.assertAlmostEqual(by_bias[2.0]["mean_paired_shift"], -0.1)
-        self.assertEqual(by_bias[2.0]["num_paired"], 2)
-
-    def test_resume_manifest_rejects_signature_change(self) -> None:
+    def test_consensus_excludes_early_layers_before_borda_normalization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "manifest.json"
-            first = initialize_manifest(path, {"parameter": 1, "created_at": "first"})
-            second = initialize_manifest(path, {"parameter": 1, "created_at": "later"})
-            self.assertEqual(first["run_signature"], second["run_signature"])
-            with self.assertRaisesRegex(ValueError, "does not match"):
-                initialize_manifest(path, {"parameter": 2})
+            paths = []
+            # Both source rankings put an excluded layer-0 head first.  The
+            # eligible head with the best *post-filter* rank must still win.
+            for source in range(2):
+                path = Path(directory) / f"{source}.json"
+                rows = [
+                    {"layer": 0, "head": 0},
+                    {"layer": 1, "head": 1},
+                    {"layer": 1, "head": 0},
+                    {"layer": 0, "head": 1},
+                ]
+                path.write_text(
+                    json.dumps(
+                        {"num_layers": 2, "num_heads": 2, "rankings": {"mean": rows}}
+                    )
+                )
+                paths.append(path)
+            result = consensus_ranking(
+                paths, expected_layers=2, expected_heads=2, skip_early_layers=1
+            )
+            self.assertEqual(
+                [(row["layer"], row["head"]) for row in result["ranking"]],
+                [(1, 1), (1, 0)],
+            )
+
+    def test_in_domain_ranks_excess_and_skips_early_layers(self) -> None:
+        raw = [[[0, 0], [0.1, 0.2], [0.3, 0.1]]]
+        excess = [[[0, 0], [0.0, 0.1], [0.4, 0.2]]]
+        result = aggregate_in_domain(
+            [{"example_id": "x", "status": "ok", "raw_mass": raw[0], "excess_mass": excess[0]}],
+            num_layers=3,
+            num_heads=2,
+            skip_layers=1,
+        )
+        self.assertEqual((result["ranking"][0]["layer"], result["ranking"][0]["head"]), (2, 0))
+        self.assertNotIn(0, {row["layer"] for row in result["ranking"]})
+
+    def test_cluster_bootstrap_and_holm(self) -> None:
+        rows = [
+            {"video_sha256": "a", "effect": 1.0},
+            {"video_sha256": "a", "effect": 1.0},
+            {"video_sha256": "b", "effect": 1.0},
+        ]
+        result = paired_cluster_bootstrap(rows, "effect", samples=50)
+        self.assertEqual(result["ci95"], [1.0, 1.0])
+        adjusted = holm({"a": 0.01, "b": 0.04})
+        self.assertEqual(adjusted, {"a": 0.02, "b": 0.04})
+
+
+class QueryScopeMetricsTests(unittest.TestCase):
+    def test_dry_run_can_disable_expensive_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            ranking_path = run_dir / "ranking.json"
+            ranking_path.write_text(
+                json.dumps(
+                    {
+                        "ranking_source": "frozen_cross_domain_consensus",
+                        "fingerprint": "ranking",
+                        "ranking": [
+                            {"layer": layer, "head": head}
+                            for layer in range(2)
+                            for head in range(2)
+                        ],
+                    }
+                )
+            )
+            (run_dir / "eligible.jsonl").write_text(
+                json.dumps({"example_id": "x", "video_sha256": "0" * 64}) + "\n"
+            )
+            (run_dir / "split.json").write_text(
+                json.dumps({"discovery": [], "evaluation": ["x"], "fingerprint": "split"})
+            )
+            output = steer(
+                {
+                    "attention_eval": {
+                        "output_dir": str(run_dir),
+                        "ranking_path": str(ranking_path),
+                        "model_path": str(run_dir / "missing-model"),
+                        "grounding_run": str(run_dir / "sam3"),
+                        "num_layers": 2,
+                        "num_heads": 2,
+                        "top_k": 1,
+                        "swap_bias": 6,
+                        "include_all_heads_control": False,
+                        "run_sensitivity": False,
+                        "run_duplicate_location_sensitivity": False,
+                        "run_paired": False,
+                        "steering_query_scope": "last_prompt",
+                        "query_scope_sensitivity": [],
+                    }
+                },
+                dry_run=True,
+            )
+            rows = [json.loads(line) for line in output.read_text().splitlines()]
+            self.assertEqual(
+                [row["condition"] for row in rows],
+                [
+                    "baseline",
+                    "candidate_target",
+                    "candidate_wrong",
+                    "low_rank_target",
+                ],
+            )
+
+    def test_dry_run_materializes_all_scope_control_conditions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            ranking_path = run_dir / "ranking.json"
+            ranking_path.write_text(
+                json.dumps(
+                    {
+                        "ranking_source": "frozen_cross_domain_consensus",
+                        "fingerprint": "ranking",
+                        "ranking": [
+                            {"layer": layer, "head": head}
+                            for layer in range(2)
+                            for head in range(2)
+                        ],
+                    }
+                )
+            )
+            (run_dir / "eligible.jsonl").write_text(
+                json.dumps({"example_id": "x", "video_sha256": "0" * 64}) + "\n"
+            )
+            (run_dir / "split.json").write_text(
+                json.dumps(
+                    {
+                        "discovery": [],
+                        "evaluation": ["x"],
+                        "fingerprint": "split",
+                    }
+                )
+            )
+            config = {
+                "attention_eval": {
+                    "output_dir": str(run_dir),
+                    "ranking_path": str(ranking_path),
+                    "model_path": str(run_dir / "missing-model"),
+                    "grounding_run": str(run_dir / "sam3"),
+                    "num_layers": 2,
+                    "num_heads": 2,
+                    "top_k": 1,
+                    "swap_bias": 6,
+                    "top_k_sensitivity": [],
+                    "bias_sensitivity": [],
+                    "run_duplicate_location_sensitivity": False,
+                    "run_paired": False,
+                    "steering_query_scope": "all",
+                    "query_scope_sensitivity": [
+                        "all",
+                        "prefill",
+                        "last_prompt",
+                        "decode",
+                    ],
+                    "query_scope_sensitivity_conditions": [
+                        "candidate_target",
+                        "candidate_wrong",
+                        "low_rank_target",
+                    ],
+                }
+            }
+            output = steer(config, dry_run=True)
+            records = [json.loads(line) for line in output.read_text().splitlines()]
+            by_condition = {row["condition"]: row for row in records}
+            self.assertEqual(len(records), 17)
+            for scope in ("all", "prefill", "last_prompt", "decode"):
+                for condition in (
+                    "candidate_target",
+                    "candidate_wrong",
+                    "low_rank_target",
+                ):
+                    name = f"query_scope_{scope}_{condition}"
+                    self.assertEqual(by_condition[name]["query_scope"], scope)
+            self.assertTrue(
+                by_condition["query_scope_all_candidate_target"]["hook_diagnostics"][
+                    "exact_primary_condition_reuse"
+                ]
+            )
+
+    def test_metrics_reports_scope_effects_and_legacy_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            base = {
+                "example_id": "x",
+                "video_sha256": "video",
+                "status": "ok",
+            }
+            records = [
+                {
+                    **base,
+                    "condition": "baseline",
+                    "signed_score": 0.0,
+                    "hook_diagnostics": {"bbox_attention_mass": 0.1},
+                },
+                {
+                    **base,
+                    "condition": "candidate_target",
+                    "signed_score": -0.1,
+                    "hook_diagnostics": {"bbox_attention_mass": 0.8},
+                },
+                {
+                    **base,
+                    "condition": "candidate_wrong",
+                    "signed_score": 0.0,
+                    "hook_diagnostics": {},
+                },
+                {
+                    **base,
+                    "condition": "low_rank_target",
+                    "signed_score": 0.0,
+                    "hook_diagnostics": {},
+                },
+            ]
+            scope_scores = {
+                "all": -0.1,
+                "prefill": -0.07,
+                "last_prompt": -0.05,
+                "decode": -0.02,
+            }
+            for scope, score in scope_scores.items():
+                records.extend(
+                    [
+                        {
+                            **base,
+                            "condition": f"query_scope_{scope}_candidate_target",
+                            "signed_score": score,
+                            "hook_diagnostics": {"bbox_attention_mass": 0.8},
+                        },
+                        {
+                            **base,
+                            "condition": f"query_scope_{scope}_candidate_wrong",
+                            "signed_score": 0.0,
+                            "hook_diagnostics": {},
+                        },
+                        {
+                            **base,
+                            "condition": f"query_scope_{scope}_low_rank_target",
+                            "signed_score": 0.0,
+                            "hook_diagnostics": {},
+                        },
+                    ]
+                )
+            (run_dir / "steering.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in records)
+            )
+            (run_dir / "eligible.jsonl").write_text(
+                json.dumps({"example_id": "x", "subset": "subset"}) + "\n"
+            )
+            result = attention_metrics(
+                run_dir,
+                {
+                    "attention_eval": {
+                        "bootstrap_samples": 50,
+                        "query_scope_sensitivity": list(scope_scores),
+                    }
+                },
+            )
+            scopes = result["query_scope_ablation"]["scopes"]
+            self.assertEqual(scopes["last_prompt"]["estimands"]["target_shift"]["mean"], -0.05)
+            self.assertAlmostEqual(
+                scopes["decode"]["estimands"]["candidate_score_minus_all_scope"]["mean"],
+                0.08,
+            )
+            self.assertEqual(scopes["all"]["bbox_mass_increase_rate"], 1.0)
 
 
 if __name__ == "__main__":
