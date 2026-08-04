@@ -1,0 +1,51 @@
+{
+  "attention_video_max_frames": 8,
+  "command": [
+    "rewardbench/run_roboreward_attention.py",
+    "steer",
+    "--config",
+    "rewardbench/configs/attention_roboreward_8b_native_reward1_rawmean12.yaml"
+  ],
+  "conditions": [
+    "baseline",
+    "candidate_target",
+    "candidate_wrong",
+    "low_rank_target"
+  ],
+  "config": {
+    "_config_path": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/configs/attention_roboreward_8b_native_reward1_rawmean12.yaml",
+    "attention_steer": {
+      "attention_video_max_frames": 8,
+      "dataset_root": "/home/dais/workspace/data/RoboRewardBench_counterfactual_reward1",
+      "device_map": "auto",
+      "example_ids_file": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/cohorts/outputs/reward1_sam3_formal111/example_ids.json",
+      "grounding_run": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/counterfactual_reward1_sam3/sam3",
+      "max_new_tokens": 5000,
+      "model_path": "/mnt/public1/dais/workspace/model/RoboReward-8B",
+      "output_dir": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/roboreward_eval/attention_outputs/roboreward_8b_checkpoint_native_rawmean12/reward1_sam3_formal111",
+      "protocol": "roborewardbench_native",
+      "ranking_path": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/roboreward_eval/attention_outputs/roboreward_8b_checkpoint_native_rawmean12/consensus_ranking.json",
+      "split": "test",
+      "steering_query_scope": "all",
+      "swap_bias": 6,
+      "top_k": 8,
+      "torch_dtype": "bfloat16"
+    }
+  },
+  "config_fingerprint": "a168683888f36e7150ece76a85fb42a09b66dfecefe62ea89bb6faa022bf9cbe",
+  "created_at": "2026-07-31T06:06:12.191470+00:00",
+  "git_revision": "6e3b64a9a819a96e7f083047de1f485c255ea756",
+  "gpu": [
+    "NVIDIA A100-SXM4-80GB, GPU-3a66385a-8de4-1cee-0842-9f0e7269244c, 580.82.07",
+    "NVIDIA A100-SXM4-80GB, GPU-20d09401-f5b6-1b70-0120-14a05cbb3e11, 580.82.07",
+    "NVIDIA A100-SXM4-80GB, GPU-68c4281e-027d-ed3c-55d0-64bd20f555bf, 580.82.07",
+    "NVIDIA A100-SXM4-80GB, GPU-70c3e13f-bc88-9b53-8dee-84330058f35d, 580.82.07"
+  ],
+  "labels_model_facing": false,
+  "model_fingerprint": "e9bd763c94d7077b6b38fc986e89d0ad9e1ea0b1dae4b904fcf93762da383821",
+  "platform": "Linux-5.15.0-116-generic-x86_64-with-glibc2.35",
+  "protocol": "roborewardbench_native",
+  "python": "3.10.20 (main, Mar 11 2026, 17:46:40) [GCC 14.3.0]",
+  "ranking_path": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/roboreward_eval/attention_outputs/roboreward_8b_checkpoint_native_rawmean12/consensus_ranking.json",
+  "ranking_sha256": "1f19bebbad638efda2830f06c47b5969af93b05da7314d528427a2b563001554"
+}

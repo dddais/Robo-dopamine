@@ -1,0 +1,96 @@
+{
+  "adapter_metric": false,
+  "by_condition": {
+    "baseline": {
+      "exact_accuracy": 0.36936936936936937,
+      "mae": 1.027027027027027,
+      "mean_signed_error": 1.027027027027027,
+      "n": 111,
+      "prediction_counts": {
+        "1": 41,
+        "2": 41,
+        "3": 21,
+        "4": 1,
+        "5": 7
+      },
+      "within_one_accuracy": 0.7387387387387387
+    },
+    "candidate_target": {
+      "exact_accuracy": 0.42342342342342343,
+      "mae": 0.8558558558558559,
+      "mean_signed_error": 0.8558558558558559,
+      "n": 111,
+      "prediction_counts": {
+        "1": 47,
+        "2": 45,
+        "3": 13,
+        "5": 6
+      },
+      "within_one_accuracy": 0.8288288288288288
+    },
+    "candidate_wrong": {
+      "exact_accuracy": 0.36036036036036034,
+      "mae": 1.063063063063063,
+      "mean_signed_error": 1.063063063063063,
+      "n": 111,
+      "prediction_counts": {
+        "1": 40,
+        "2": 41,
+        "3": 21,
+        "4": 1,
+        "5": 8
+      },
+      "within_one_accuracy": 0.7297297297297297
+    },
+    "low_rank_target": {
+      "exact_accuracy": 0.38738738738738737,
+      "mae": 0.9819819819819819,
+      "mean_signed_error": 0.9819819819819819,
+      "n": 111,
+      "prediction_counts": {
+        "1": 43,
+        "2": 42,
+        "3": 18,
+        "4": 1,
+        "5": 7
+      },
+      "within_one_accuracy": 0.7657657657657657
+    }
+  },
+  "completion": {
+    "condition_counts": {
+      "baseline": 111,
+      "candidate_target": 111,
+      "candidate_wrong": 111,
+      "low_rank_target": 111
+    },
+    "expected_count": 111,
+    "formal_scoring_ready": true,
+    "invalid_count": 0
+  },
+  "official_native_discrete_output": true,
+  "paired_vs_baseline": {
+    "candidate_target": {
+      "decreased_count": 18,
+      "increased_count": 3,
+      "mean_score_delta_vs_baseline": -0.17117117117117117,
+      "n": 111,
+      "unchanged_count": 90
+    },
+    "candidate_wrong": {
+      "decreased_count": 5,
+      "increased_count": 8,
+      "mean_score_delta_vs_baseline": 0.036036036036036036,
+      "n": 111,
+      "unchanged_count": 98
+    },
+    "low_rank_target": {
+      "decreased_count": 7,
+      "increased_count": 2,
+      "mean_score_delta_vs_baseline": -0.04504504504504504,
+      "n": 111,
+      "unchanged_count": 102
+    }
+  },
+  "protocol": "roborewardbench_native"
+}

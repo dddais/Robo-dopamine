@@ -1,0 +1,27 @@
+my_dataset_exploratory_matrix:
+  variant_id: grm_official_eight_image
+  model_family: grm
+  model_path: /mnt/public1/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+  ranking_manifest: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/ranking_cohort_v1/grm/ordered_max20.jsonl
+  evaluation_manifest: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/attention_inputs_assumed_v2/grm/all.jsonl
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/outputs/my_dataset/ljx_lfz_cf_v1/exploratory_matrix/grm_official_eight_image
+  protocol: grm_official_eight_image
+  content_order: not_applicable_eight_image
+  attention_video_max_frames: 8
+  ranking_prefix_sizes: [5, 10, 20]
+  steering_top_k: [8, 32, 64]
+  ranking_score_kind: excess_mass
+  skip_early_layers: 8
+  swap_bias: 6
+  steering_query_scope: all
+  expected_ranking_count: 20
+  expected_evaluation_count: 755
+  capture_generation_attentions: false
+  blank_goal: /mnt/public1/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  prompt_mode: official
+  intervention_location: after_cam_high
+  dtype: bfloat16
+  device_map: auto
+  min_pixels: 12544
+  max_pixels: 76800
+  max_new_tokens: 16

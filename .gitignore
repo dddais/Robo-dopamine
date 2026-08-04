@@ -228,4 +228,8 @@ rewardbench/**/.cache/
 rewardbench/**/frames/
 rewardbench/**/runs/
 rewardbench/**/*.jsonl.tmp
-
+mydata_bench/**/outputs/
+mydata_bench/**/.cache/
+mydata_bench/**/frames/
+mydata_bench/**/runs/
+mydata_bench/**/*.jsonl.tmp

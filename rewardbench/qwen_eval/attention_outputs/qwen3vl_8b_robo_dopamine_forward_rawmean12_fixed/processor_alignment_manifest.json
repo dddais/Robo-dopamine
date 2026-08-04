@@ -1,0 +1,8 @@
+{
+  "all_valid": true,
+  "attention_video_max_frames": null,
+  "fingerprint": "12b4f7a00d396860ae830de0f7fab4de1310b4c1647968cd16e51d3c898067f7",
+  "processor_model_path": "/mnt/public1/dais/workspace/model/Qwen3-VL-8B-Instruct",
+  "protocol": "robo_dopamine_forward",
+  "sample_count": 36
+}

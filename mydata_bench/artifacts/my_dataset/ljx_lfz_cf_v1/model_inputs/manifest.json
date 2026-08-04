@@ -1,0 +1,38 @@
+{
+  "dataset_name": "ljx_lfz_cf_v1",
+  "evaluation_split": "external_test",
+  "inputs_sha256": "730a7c8792f7d918ddbd2a9146cd2dedc4e0a7f424055a45597c73811a642463",
+  "label_file_not_required_for_inference": true,
+  "model_fields": [
+    "dataset_name",
+    "evaluation_split",
+    "example_id",
+    "group_id",
+    "group_media_sha256",
+    "instruction",
+    "schema_version",
+    "task_family",
+    "task_id",
+    "video_paths",
+    "view_sha256"
+  ],
+  "num_examples": 755,
+  "num_groups": 169,
+  "schema_version": "my_dataset.counterfactual.v1",
+  "task_counts": {
+    "task1_1": 48,
+    "task1_3": 96,
+    "task2_1": 64,
+    "task2_2": 36,
+    "task2_3": 16,
+    "task3_1": 27,
+    "task3_2": 64,
+    "task3_3": 12,
+    "task4_1": 16,
+    "task4_2": 12,
+    "task4_3": 12,
+    "task5_1": 96,
+    "task5_2": 128,
+    "task5_3": 128
+  }
+}

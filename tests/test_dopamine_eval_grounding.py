@@ -7,7 +7,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from rewardbench.grounding.audit import grounding_fingerprint, wilson_interval
+from rewardbench.grounding.audit import adjudicate, grounding_fingerprint, wilson_interval
+from rewardbench.io import read_jsonl, write_jsonl
 from rewardbench.grounding.base import Grounder, mask_to_bbox
 from rewardbench.grounding.parser import (
     build_queries,
@@ -107,6 +108,77 @@ class GrounderSchemaTests(unittest.TestCase):
         low, high = wilson_interval(19, 23)
         self.assertLess(low, 19 / 23)
         self.assertGreater(high, 19 / 23)
+
+    def test_single_reviewer_adjudication_records_honest_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            rows = [
+                {
+                    "example_id": "toy/x.mp4",
+                    "video_sha256": "a" * 64,
+                    "frame": frame,
+                    "status": "ok",
+                    "bbox": [0, 0, 1, 1],
+                    "score": 1,
+                    "backend": "sam3",
+                    "provenance": {},
+                }
+                for frame in ("first", "last")
+            ]
+            fingerprint = grounding_fingerprint(rows)
+            write_jsonl(
+                run_dir / "reviewer1.jsonl",
+                [
+                    {
+                        "example_id": "toy/x.mp4",
+                        "reviewer_id": "reviewer1",
+                        "grounding_fingerprint": fingerprint,
+                        "first_label": "correct",
+                        "last_label": "correct",
+                        "error_categories": [],
+                        "reason": "visible",
+                    }
+                ],
+            )
+            summary = adjudicate(run_dir, rows)
+            self.assertEqual(summary["status"], "complete")
+            self.assertEqual(summary["review_mode"], "single_reviewer")
+            self.assertEqual(summary["reviewer_ids"], ["reviewer1"])
+            self.assertEqual(summary["independent_review_count"], 1)
+            final = list(read_jsonl(run_dir / "audit_final.jsonl"))
+            self.assertEqual(final[0]["source"], "single_reviewer")
+            self.assertTrue(final[0]["formal_eligible"])
+
+    def test_reviewer_file_identity_must_match_requested_reviewer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            rows = [
+                {
+                    "example_id": "toy/x.mp4",
+                    "video_sha256": "a" * 64,
+                    "frame": frame,
+                    "status": "ok",
+                    "bbox": [0, 0, 1, 1],
+                    "score": 1,
+                    "backend": "sam3",
+                    "provenance": {},
+                }
+                for frame in ("first", "last")
+            ]
+            write_jsonl(
+                run_dir / "reviewer1.jsonl",
+                [
+                    {
+                        "example_id": "toy/x.mp4",
+                        "reviewer_id": "reviewer2",
+                        "grounding_fingerprint": grounding_fingerprint(rows),
+                        "first_label": "correct",
+                        "last_label": "correct",
+                    }
+                ],
+            )
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                adjudicate(run_dir, rows)
 
 
 if __name__ == "__main__":

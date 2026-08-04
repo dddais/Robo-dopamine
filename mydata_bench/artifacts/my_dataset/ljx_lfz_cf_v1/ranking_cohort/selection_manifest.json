@@ -1,0 +1,838 @@
+{
+  "attention_inputs": {
+    "grm": {
+      "count": 755,
+      "fingerprint": "fe3d198d608527f9f54262f24d2d84451d789b58720e87f491e0e52e46ab92da",
+      "path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/attention_assumed/grm/all.jsonl",
+      "sha256": "813a9766f9dfc7fb6facfab912c88caa2d1b5048848974b5ec2badd4032b9f15"
+    },
+    "qwen": {
+      "count": 755,
+      "fingerprint": "01af8e22f18090501d0c99fa6f37827f2e6d7edc77a372ac92604e3f468cbe7b",
+      "path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/attention_assumed/qwen/all.jsonl",
+      "sha256": "9d84b6f75c07dbece423b21bd2aa1f19bfc05b613571fb18331032da3a4263ed"
+    },
+    "roboreward": {
+      "count": 755,
+      "fingerprint": "3aa4a629187167db0be6a7883c95e9aac87712e750ae53e452df8a82438d46df",
+      "path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/attention_assumed/roboreward/all.jsonl",
+      "sha256": "d7d668bb776dcb89f6d6fd47b28ba33372761731ed5980a334c209d3cb17bdec"
+    }
+  },
+  "claim_status": "exploratory",
+  "cohort_group_overlap": {
+    "10": {
+      "10": 10,
+      "20": 10,
+      "5": 5
+    },
+    "20": {
+      "10": 10,
+      "20": 20,
+      "5": 5
+    },
+    "5": {
+      "10": 5,
+      "20": 5,
+      "5": 5
+    }
+  },
+  "cohort_role": "external_ranking",
+  "cohorts": {
+    "10": {
+      "example_ids": [
+        "ljx_lfz_cf_v1-e-9c5ea4135e09a5feea01",
+        "ljx_lfz_cf_v1-e-8f37c7de3507f97bc714",
+        "ljx_lfz_cf_v1-e-38e52999d7389ec1bc1a",
+        "ljx_lfz_cf_v1-e-16d2e44da1010dd52bff",
+        "ljx_lfz_cf_v1-e-bc7346c13c9369a128d0",
+        "ljx_lfz_cf_v1-e-e0378fc7dfd683cd9c18",
+        "ljx_lfz_cf_v1-e-c7d454788f042d61cc9d",
+        "ljx_lfz_cf_v1-e-1a10bfd9d94b33a07136",
+        "ljx_lfz_cf_v1-e-7dfa85c0bdff376f8c66",
+        "ljx_lfz_cf_v1-e-f727f7a0561bccaec17a"
+      ],
+      "fingerprint": "733ecf2310874fe3641a5b0a43e5ae289aa8cd228bf4d1c809d4297fae9a43be",
+      "group_ids": [
+        "ljx_lfz_cf_v1-g-42e57f2155597bbfd5b6",
+        "ljx_lfz_cf_v1-g-95c1303ad3cdccf29214",
+        "ljx_lfz_cf_v1-g-04a6e7d029695923cf75",
+        "ljx_lfz_cf_v1-g-78a26b924e203bf6f2a2",
+        "ljx_lfz_cf_v1-g-287d64fab18cebc2c838",
+        "ljx_lfz_cf_v1-g-bac3b5f9292cea6e4a23",
+        "ljx_lfz_cf_v1-g-3d8d5f2e513346f9e3af",
+        "ljx_lfz_cf_v1-g-809115b6e1476a110225",
+        "ljx_lfz_cf_v1-g-3c4fcaa65d9c0d83d3cd",
+        "ljx_lfz_cf_v1-g-d9c6fbfcb7a823f65cd9"
+      ],
+      "is_prefix_of_max20": true,
+      "size": 10,
+      "source_record_ids": [
+        "suc/ljx_lfz_task_1_1/2",
+        "suc/ljx_lfz_task_1_3/1",
+        "suc/ljx_lfz_task_2_1/1",
+        "suc/ljx_lfz_task_2_2/2",
+        "suc/ljx_lfz_task_2_3/2",
+        "suc/ljx_lfz_task_1_1/3",
+        "suc/ljx_lfz_task_1_3/4",
+        "suc/ljx_lfz_task_2_1/4",
+        "suc/ljx_lfz_task_2_2/3",
+        "suc/ljx_lfz_task_2_3/1"
+      ],
+      "target_phrase_counts": {
+        "black pen": 1,
+        "blue block": 1,
+        "carrot": 1,
+        "cup": 1,
+        "orange cup": 1,
+        "pen": 1,
+        "red block": 1,
+        "red pen": 1,
+        "yellow block": 1,
+        "yellow cup": 1
+      },
+      "task_counts": {
+        "task1_1": 2,
+        "task1_3": 2,
+        "task2_1": 2,
+        "task2_2": 2,
+        "task2_3": 2
+      },
+      "unique_target_phrases": 10,
+      "whitebox_partition_counts": {
+        "discovery": 1,
+        "test": 5,
+        "validation": 4
+      }
+    },
+    "20": {
+      "example_ids": [
+        "ljx_lfz_cf_v1-e-9c5ea4135e09a5feea01",
+        "ljx_lfz_cf_v1-e-8f37c7de3507f97bc714",
+        "ljx_lfz_cf_v1-e-38e52999d7389ec1bc1a",
+        "ljx_lfz_cf_v1-e-16d2e44da1010dd52bff",
+        "ljx_lfz_cf_v1-e-bc7346c13c9369a128d0",
+        "ljx_lfz_cf_v1-e-e0378fc7dfd683cd9c18",
+        "ljx_lfz_cf_v1-e-c7d454788f042d61cc9d",
+        "ljx_lfz_cf_v1-e-1a10bfd9d94b33a07136",
+        "ljx_lfz_cf_v1-e-7dfa85c0bdff376f8c66",
+        "ljx_lfz_cf_v1-e-f727f7a0561bccaec17a",
+        "ljx_lfz_cf_v1-e-4de6de256b9bff248078",
+        "ljx_lfz_cf_v1-e-a0bc3ca98bce85612a88",
+        "ljx_lfz_cf_v1-e-b1dcce0e554c316ac835",
+        "ljx_lfz_cf_v1-e-95265ec67b4dd4061ae2",
+        "ljx_lfz_cf_v1-e-6b172f7d4da79f1b1826",
+        "ljx_lfz_cf_v1-e-fcfd457f4e021355cced",
+        "ljx_lfz_cf_v1-e-110bdcebeab4eb460637",
+        "ljx_lfz_cf_v1-e-f2f65f09f5b41bfa1b40",
+        "ljx_lfz_cf_v1-e-7dae613e0de36e81af17",
+        "ljx_lfz_cf_v1-e-955af1b8c9ef25ddb1d5"
+      ],
+      "fingerprint": "242bc9c8ef79406decfa0fff587aecd7cdae09f19f315045a67395769ef4eaf0",
+      "group_ids": [
+        "ljx_lfz_cf_v1-g-42e57f2155597bbfd5b6",
+        "ljx_lfz_cf_v1-g-95c1303ad3cdccf29214",
+        "ljx_lfz_cf_v1-g-04a6e7d029695923cf75",
+        "ljx_lfz_cf_v1-g-78a26b924e203bf6f2a2",
+        "ljx_lfz_cf_v1-g-287d64fab18cebc2c838",
+        "ljx_lfz_cf_v1-g-bac3b5f9292cea6e4a23",
+        "ljx_lfz_cf_v1-g-3d8d5f2e513346f9e3af",
+        "ljx_lfz_cf_v1-g-809115b6e1476a110225",
+        "ljx_lfz_cf_v1-g-3c4fcaa65d9c0d83d3cd",
+        "ljx_lfz_cf_v1-g-d9c6fbfcb7a823f65cd9",
+        "ljx_lfz_cf_v1-g-49da0180bbbe35681c33",
+        "ljx_lfz_cf_v1-g-21a4dd102f5e20662e9e",
+        "ljx_lfz_cf_v1-g-b380ec3fe734f5a58a23",
+        "ljx_lfz_cf_v1-g-3c75d1b85b89feaae7df",
+        "ljx_lfz_cf_v1-g-c18a5598eb036dbde982",
+        "ljx_lfz_cf_v1-g-449d14dc9f251307f469",
+        "ljx_lfz_cf_v1-g-9954393892a100a1f023",
+        "ljx_lfz_cf_v1-g-8871caa1e47fb48ba761",
+        "ljx_lfz_cf_v1-g-a7af52e0073cbaca211d",
+        "ljx_lfz_cf_v1-g-42f299d362d8572b5556"
+      ],
+      "is_prefix_of_max20": true,
+      "size": 20,
+      "source_record_ids": [
+        "suc/ljx_lfz_task_1_1/2",
+        "suc/ljx_lfz_task_1_3/1",
+        "suc/ljx_lfz_task_2_1/1",
+        "suc/ljx_lfz_task_2_2/2",
+        "suc/ljx_lfz_task_2_3/2",
+        "suc/ljx_lfz_task_1_1/3",
+        "suc/ljx_lfz_task_1_3/4",
+        "suc/ljx_lfz_task_2_1/4",
+        "suc/ljx_lfz_task_2_2/3",
+        "suc/ljx_lfz_task_2_3/1",
+        "suc/ljx_lfz_task_1_1/1",
+        "suc/ljx_lfz_task_1_3/22",
+        "suc/ljx_lfz_task_2_1/3",
+        "suc/ljx_lfz_task_2_2/1",
+        "suc/ljx_lfz_task_1_1/9",
+        "suc/ljx_lfz_task_1_3/3",
+        "suc/ljx_lfz_task_2_1/2",
+        "suc/ljx_lfz_task_1_1/10",
+        "suc/ljx_lfz_task_1_3/21",
+        "suc/ljx_lfz_task_2_1/13"
+      ],
+      "target_phrase_counts": {
+        "black pen": 1,
+        "blue block": 5,
+        "blue cup": 1,
+        "carrot": 1,
+        "cup": 3,
+        "orange cup": 1,
+        "pen": 2,
+        "purple cup": 1,
+        "red block": 1,
+        "red pen": 1,
+        "yellow block": 1,
+        "yellow cup": 2
+      },
+      "task_counts": {
+        "task1_1": 5,
+        "task1_3": 5,
+        "task2_1": 5,
+        "task2_2": 3,
+        "task2_3": 2
+      },
+      "unique_target_phrases": 12,
+      "whitebox_partition_counts": {
+        "discovery": 2,
+        "test": 14,
+        "validation": 4
+      }
+    },
+    "5": {
+      "example_ids": [
+        "ljx_lfz_cf_v1-e-9c5ea4135e09a5feea01",
+        "ljx_lfz_cf_v1-e-8f37c7de3507f97bc714",
+        "ljx_lfz_cf_v1-e-38e52999d7389ec1bc1a",
+        "ljx_lfz_cf_v1-e-16d2e44da1010dd52bff",
+        "ljx_lfz_cf_v1-e-bc7346c13c9369a128d0"
+      ],
+      "fingerprint": "da26e3d39cd03fac0d82dae5f8e2c2b2b57324be010dc4ed5584eb1326775e18",
+      "group_ids": [
+        "ljx_lfz_cf_v1-g-42e57f2155597bbfd5b6",
+        "ljx_lfz_cf_v1-g-95c1303ad3cdccf29214",
+        "ljx_lfz_cf_v1-g-04a6e7d029695923cf75",
+        "ljx_lfz_cf_v1-g-78a26b924e203bf6f2a2",
+        "ljx_lfz_cf_v1-g-287d64fab18cebc2c838"
+      ],
+      "is_prefix_of_max20": true,
+      "size": 5,
+      "source_record_ids": [
+        "suc/ljx_lfz_task_1_1/2",
+        "suc/ljx_lfz_task_1_3/1",
+        "suc/ljx_lfz_task_2_1/1",
+        "suc/ljx_lfz_task_2_2/2",
+        "suc/ljx_lfz_task_2_3/2"
+      ],
+      "target_phrase_counts": {
+        "black pen": 1,
+        "blue block": 1,
+        "cup": 1,
+        "yellow block": 1,
+        "yellow cup": 1
+      },
+      "task_counts": {
+        "task1_1": 1,
+        "task1_3": 1,
+        "task2_1": 1,
+        "task2_2": 1,
+        "task2_3": 1
+      },
+      "unique_target_phrases": 5,
+      "whitebox_partition_counts": {
+        "discovery": 1,
+        "test": 2,
+        "validation": 2
+      }
+    }
+  },
+  "evaluation_cohorts": {
+    "all": {
+      "example_count": 755,
+      "group_count": 169,
+      "partition_example_counts": {
+        "discovery": 145,
+        "test": 465,
+        "validation": 145
+      },
+      "partition_group_counts": {
+        "discovery": 33,
+        "test": 103,
+        "validation": 33
+      },
+      "task_example_counts": {
+        "task1_1": 48,
+        "task1_3": 96,
+        "task2_1": 64,
+        "task2_2": 36,
+        "task2_3": 16,
+        "task3_1": 27,
+        "task3_2": 64,
+        "task3_3": 12,
+        "task4_1": 16,
+        "task4_2": 12,
+        "task4_3": 12,
+        "task5_1": 96,
+        "task5_2": 128,
+        "task5_3": 128
+      }
+    },
+    "by_ranking_size": {
+      "10": {
+        "n_specific_unseen": {
+          "example_count": 721,
+          "group_count": 159,
+          "partition_example_counts": {
+            "discovery": 141,
+            "test": 449,
+            "validation": 131
+          },
+          "partition_group_counts": {
+            "discovery": 32,
+            "test": 98,
+            "validation": 29
+          },
+          "task_example_counts": {
+            "task1_1": 40,
+            "task1_3": 88,
+            "task2_1": 56,
+            "task2_2": 30,
+            "task2_3": 12,
+            "task3_1": 27,
+            "task3_2": 64,
+            "task3_3": 12,
+            "task4_1": 16,
+            "task4_2": 12,
+            "task4_3": 12,
+            "task5_1": 96,
+            "task5_2": 128,
+            "task5_3": 128
+          }
+        },
+        "ranking_source_only": {
+          "example_count": 34,
+          "group_count": 10,
+          "partition_example_counts": {
+            "discovery": 4,
+            "test": 16,
+            "validation": 14
+          },
+          "partition_group_counts": {
+            "discovery": 1,
+            "test": 5,
+            "validation": 4
+          },
+          "task_example_counts": {
+            "task1_1": 8,
+            "task1_3": 8,
+            "task2_1": 8,
+            "task2_2": 6,
+            "task2_3": 4
+          }
+        }
+      },
+      "20": {
+        "n_specific_unseen": {
+          "example_count": 682,
+          "group_count": 149,
+          "partition_example_counts": {
+            "discovery": 137,
+            "test": 414,
+            "validation": 131
+          },
+          "partition_group_counts": {
+            "discovery": 31,
+            "test": 89,
+            "validation": 29
+          },
+          "task_example_counts": {
+            "task1_1": 28,
+            "task1_3": 76,
+            "task2_1": 44,
+            "task2_2": 27,
+            "task2_3": 12,
+            "task3_1": 27,
+            "task3_2": 64,
+            "task3_3": 12,
+            "task4_1": 16,
+            "task4_2": 12,
+            "task4_3": 12,
+            "task5_1": 96,
+            "task5_2": 128,
+            "task5_3": 128
+          }
+        },
+        "ranking_source_only": {
+          "example_count": 73,
+          "group_count": 20,
+          "partition_example_counts": {
+            "discovery": 8,
+            "test": 51,
+            "validation": 14
+          },
+          "partition_group_counts": {
+            "discovery": 2,
+            "test": 14,
+            "validation": 4
+          },
+          "task_example_counts": {
+            "task1_1": 20,
+            "task1_3": 20,
+            "task2_1": 20,
+            "task2_2": 9,
+            "task2_3": 4
+          }
+        }
+      },
+      "5": {
+        "n_specific_unseen": {
+          "example_count": 738,
+          "group_count": 164,
+          "partition_example_counts": {
+            "discovery": 141,
+            "test": 458,
+            "validation": 139
+          },
+          "partition_group_counts": {
+            "discovery": 32,
+            "test": 101,
+            "validation": 31
+          },
+          "task_example_counts": {
+            "task1_1": 44,
+            "task1_3": 92,
+            "task2_1": 60,
+            "task2_2": 33,
+            "task2_3": 14,
+            "task3_1": 27,
+            "task3_2": 64,
+            "task3_3": 12,
+            "task4_1": 16,
+            "task4_2": 12,
+            "task4_3": 12,
+            "task5_1": 96,
+            "task5_2": 128,
+            "task5_3": 128
+          }
+        },
+        "ranking_source_only": {
+          "example_count": 17,
+          "group_count": 5,
+          "partition_example_counts": {
+            "discovery": 4,
+            "test": 7,
+            "validation": 6
+          },
+          "partition_group_counts": {
+            "discovery": 1,
+            "test": 2,
+            "validation": 2
+          },
+          "task_example_counts": {
+            "task1_1": 4,
+            "task1_3": 4,
+            "task2_1": 4,
+            "task2_2": 3,
+            "task2_3": 2
+          }
+        }
+      }
+    },
+    "common_unseen_s20": {
+      "example_count": 682,
+      "group_count": 149,
+      "partition_example_counts": {
+        "discovery": 137,
+        "test": 414,
+        "validation": 131
+      },
+      "partition_group_counts": {
+        "discovery": 31,
+        "test": 89,
+        "validation": 29
+      },
+      "task_example_counts": {
+        "task1_1": 28,
+        "task1_3": 76,
+        "task2_1": 44,
+        "task2_2": 27,
+        "task2_3": 12,
+        "task3_1": 27,
+        "task3_2": 64,
+        "task3_3": 12,
+        "task4_1": 16,
+        "task4_2": 12,
+        "task4_3": 12,
+        "task5_1": 96,
+        "task5_2": 128,
+        "task5_3": 128
+      }
+    },
+    "ranking_source_only_s20": {
+      "example_count": 73,
+      "group_count": 20,
+      "partition_example_counts": {
+        "discovery": 8,
+        "test": 51,
+        "validation": 14
+      },
+      "partition_group_counts": {
+        "discovery": 2,
+        "test": 14,
+        "validation": 4
+      },
+      "task_example_counts": {
+        "task1_1": 20,
+        "task1_3": 20,
+        "task2_1": 20,
+        "task2_2": 9,
+        "task2_3": 4
+      }
+    }
+  },
+  "fingerprint": "096bbbe220df15ee2a9e21dc2592bff8f8011d9599d068e419a7bf625eeff614",
+  "model_outputs": {
+    "grm": {
+      "count": 20,
+      "fingerprint": "f8812cfce70195302d5f49aa5beb071bff47b124c6b353db3d019b1663767bc5",
+      "ordered_example_ids": [
+        "ljx_lfz_cf_v1-e-9c5ea4135e09a5feea01",
+        "ljx_lfz_cf_v1-e-8f37c7de3507f97bc714",
+        "ljx_lfz_cf_v1-e-38e52999d7389ec1bc1a",
+        "ljx_lfz_cf_v1-e-16d2e44da1010dd52bff",
+        "ljx_lfz_cf_v1-e-bc7346c13c9369a128d0",
+        "ljx_lfz_cf_v1-e-e0378fc7dfd683cd9c18",
+        "ljx_lfz_cf_v1-e-c7d454788f042d61cc9d",
+        "ljx_lfz_cf_v1-e-1a10bfd9d94b33a07136",
+        "ljx_lfz_cf_v1-e-7dfa85c0bdff376f8c66",
+        "ljx_lfz_cf_v1-e-f727f7a0561bccaec17a",
+        "ljx_lfz_cf_v1-e-4de6de256b9bff248078",
+        "ljx_lfz_cf_v1-e-a0bc3ca98bce85612a88",
+        "ljx_lfz_cf_v1-e-b1dcce0e554c316ac835",
+        "ljx_lfz_cf_v1-e-95265ec67b4dd4061ae2",
+        "ljx_lfz_cf_v1-e-6b172f7d4da79f1b1826",
+        "ljx_lfz_cf_v1-e-fcfd457f4e021355cced",
+        "ljx_lfz_cf_v1-e-110bdcebeab4eb460637",
+        "ljx_lfz_cf_v1-e-f2f65f09f5b41bfa1b40",
+        "ljx_lfz_cf_v1-e-7dae613e0de36e81af17",
+        "ljx_lfz_cf_v1-e-955af1b8c9ef25ddb1d5"
+      ],
+      "path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/ranking_cohort/grm/ordered_max20.jsonl",
+      "sha256": "a4655f0b21c1c8d303158d65affb2df0067a6534703208ab4582536a1ef6b0f3"
+    },
+    "qwen": {
+      "count": 20,
+      "fingerprint": "9ee4af86355b2c243725abe4e6d361b8a3039334f5c9867932c69ca68485973c",
+      "ordered_example_ids": [
+        "ljx_lfz_cf_v1-e-9c5ea4135e09a5feea01",
+        "ljx_lfz_cf_v1-e-8f37c7de3507f97bc714",
+        "ljx_lfz_cf_v1-e-38e52999d7389ec1bc1a",
+        "ljx_lfz_cf_v1-e-16d2e44da1010dd52bff",
+        "ljx_lfz_cf_v1-e-bc7346c13c9369a128d0",
+        "ljx_lfz_cf_v1-e-e0378fc7dfd683cd9c18",
+        "ljx_lfz_cf_v1-e-c7d454788f042d61cc9d",
+        "ljx_lfz_cf_v1-e-1a10bfd9d94b33a07136",
+        "ljx_lfz_cf_v1-e-7dfa85c0bdff376f8c66",
+        "ljx_lfz_cf_v1-e-f727f7a0561bccaec17a",
+        "ljx_lfz_cf_v1-e-4de6de256b9bff248078",
+        "ljx_lfz_cf_v1-e-a0bc3ca98bce85612a88",
+        "ljx_lfz_cf_v1-e-b1dcce0e554c316ac835",
+        "ljx_lfz_cf_v1-e-95265ec67b4dd4061ae2",
+        "ljx_lfz_cf_v1-e-6b172f7d4da79f1b1826",
+        "ljx_lfz_cf_v1-e-fcfd457f4e021355cced",
+        "ljx_lfz_cf_v1-e-110bdcebeab4eb460637",
+        "ljx_lfz_cf_v1-e-f2f65f09f5b41bfa1b40",
+        "ljx_lfz_cf_v1-e-7dae613e0de36e81af17",
+        "ljx_lfz_cf_v1-e-955af1b8c9ef25ddb1d5"
+      ],
+      "path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/ranking_cohort/qwen/ordered_max20.jsonl",
+      "sha256": "f2e9a98d894977e13c0fc306f5f4a5680751183da13325e10a40cf94cea76111"
+    },
+    "roboreward": {
+      "count": 20,
+      "fingerprint": "b842cd526101fc27512bb17656374d41789916cdf104b1b6034949e4013d3574",
+      "ordered_example_ids": [
+        "ljx_lfz_cf_v1-e-9c5ea4135e09a5feea01",
+        "ljx_lfz_cf_v1-e-8f37c7de3507f97bc714",
+        "ljx_lfz_cf_v1-e-38e52999d7389ec1bc1a",
+        "ljx_lfz_cf_v1-e-16d2e44da1010dd52bff",
+        "ljx_lfz_cf_v1-e-bc7346c13c9369a128d0",
+        "ljx_lfz_cf_v1-e-e0378fc7dfd683cd9c18",
+        "ljx_lfz_cf_v1-e-c7d454788f042d61cc9d",
+        "ljx_lfz_cf_v1-e-1a10bfd9d94b33a07136",
+        "ljx_lfz_cf_v1-e-7dfa85c0bdff376f8c66",
+        "ljx_lfz_cf_v1-e-f727f7a0561bccaec17a",
+        "ljx_lfz_cf_v1-e-4de6de256b9bff248078",
+        "ljx_lfz_cf_v1-e-a0bc3ca98bce85612a88",
+        "ljx_lfz_cf_v1-e-b1dcce0e554c316ac835",
+        "ljx_lfz_cf_v1-e-95265ec67b4dd4061ae2",
+        "ljx_lfz_cf_v1-e-6b172f7d4da79f1b1826",
+        "ljx_lfz_cf_v1-e-fcfd457f4e021355cced",
+        "ljx_lfz_cf_v1-e-110bdcebeab4eb460637",
+        "ljx_lfz_cf_v1-e-f2f65f09f5b41bfa1b40",
+        "ljx_lfz_cf_v1-e-7dae613e0de36e81af17",
+        "ljx_lfz_cf_v1-e-955af1b8c9ef25ddb1d5"
+      ],
+      "path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/ranking_cohort/roboreward/ordered_max20.jsonl",
+      "sha256": "14337f24c53d3713aa836d21f2ab178ea550f27beeb569a3dbe7324bd050bf2b"
+    }
+  },
+  "prepared_inputs": {
+    "count": 755,
+    "fingerprint": "c3b6a54d6a023583c35766c26ef3a8ad8b081e103471073d675b084968e288b7",
+    "path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/model_inputs/inputs.jsonl",
+    "sha256": "730a7c8792f7d918ddbd2a9146cd2dedc4e0a7f424055a45597c73811a642463"
+  },
+  "schema_version": "my_dataset.external_ranking_cohort.v1",
+  "selection": {
+    "fingerprint": "8934b36b0561e86fb73c6be1d4a982ddb980ef38b17c63810edafc6f42fe4a13",
+    "labels_used_for_selection": false,
+    "method": "task_sorted_round_robin_source_id_sha256_prefer_new_instruction_target",
+    "nested_sizes": [
+      5,
+      10,
+      20
+    ],
+    "ordered_max20": [
+      {
+        "example_id": "ljx_lfz_cf_v1-e-9c5ea4135e09a5feea01",
+        "group_id": "ljx_lfz_cf_v1-g-42e57f2155597bbfd5b6",
+        "instruction": "Pick up the cup and place it in the plate.",
+        "normalized_target_phrase": "cup",
+        "ranking_order": 1,
+        "source_record_id": "suc/ljx_lfz_task_1_1/2",
+        "task_id": "task1_1",
+        "whitebox_partition": "validation"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-8f37c7de3507f97bc714",
+        "group_id": "ljx_lfz_cf_v1-g-95c1303ad3cdccf29214",
+        "instruction": "Pick up the blue block and place it in the plate.",
+        "normalized_target_phrase": "blue block",
+        "ranking_order": 2,
+        "source_record_id": "suc/ljx_lfz_task_1_3/1",
+        "task_id": "task1_3",
+        "whitebox_partition": "discovery"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-38e52999d7389ec1bc1a",
+        "group_id": "ljx_lfz_cf_v1-g-04a6e7d029695923cf75",
+        "instruction": "Pick up the yellow cup and place it in the plate.",
+        "normalized_target_phrase": "yellow cup",
+        "ranking_order": 3,
+        "source_record_id": "suc/ljx_lfz_task_2_1/1",
+        "task_id": "task2_1",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-16d2e44da1010dd52bff",
+        "group_id": "ljx_lfz_cf_v1-g-78a26b924e203bf6f2a2",
+        "instruction": "Pick up the yellow block and place it in the plate.",
+        "normalized_target_phrase": "yellow block",
+        "ranking_order": 4,
+        "source_record_id": "suc/ljx_lfz_task_2_2/2",
+        "task_id": "task2_2",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-bc7346c13c9369a128d0",
+        "group_id": "ljx_lfz_cf_v1-g-287d64fab18cebc2c838",
+        "instruction": "Pick up the black pen and place it in the plate.",
+        "normalized_target_phrase": "black pen",
+        "ranking_order": 5,
+        "source_record_id": "suc/ljx_lfz_task_2_3/2",
+        "task_id": "task2_3",
+        "whitebox_partition": "validation"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-e0378fc7dfd683cd9c18",
+        "group_id": "ljx_lfz_cf_v1-g-bac3b5f9292cea6e4a23",
+        "instruction": "Pick up the pen and place it in the plate.",
+        "normalized_target_phrase": "pen",
+        "ranking_order": 6,
+        "source_record_id": "suc/ljx_lfz_task_1_1/3",
+        "task_id": "task1_1",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-c7d454788f042d61cc9d",
+        "group_id": "ljx_lfz_cf_v1-g-3d8d5f2e513346f9e3af",
+        "instruction": "Pick up the carrot and place it in the plate.",
+        "normalized_target_phrase": "carrot",
+        "ranking_order": 7,
+        "source_record_id": "suc/ljx_lfz_task_1_3/4",
+        "task_id": "task1_3",
+        "whitebox_partition": "validation"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-1a10bfd9d94b33a07136",
+        "group_id": "ljx_lfz_cf_v1-g-809115b6e1476a110225",
+        "instruction": "Pick up the orange cup and place it in the plate.",
+        "normalized_target_phrase": "orange cup",
+        "ranking_order": 8,
+        "source_record_id": "suc/ljx_lfz_task_2_1/4",
+        "task_id": "task2_1",
+        "whitebox_partition": "validation"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-7dfa85c0bdff376f8c66",
+        "group_id": "ljx_lfz_cf_v1-g-3c4fcaa65d9c0d83d3cd",
+        "instruction": "Pick up the red block and place it in the plate.",
+        "normalized_target_phrase": "red block",
+        "ranking_order": 9,
+        "source_record_id": "suc/ljx_lfz_task_2_2/3",
+        "task_id": "task2_2",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-f727f7a0561bccaec17a",
+        "group_id": "ljx_lfz_cf_v1-g-d9c6fbfcb7a823f65cd9",
+        "instruction": "Pick up the red pen and place it in the plate.",
+        "normalized_target_phrase": "red pen",
+        "ranking_order": 10,
+        "source_record_id": "suc/ljx_lfz_task_2_3/1",
+        "task_id": "task2_3",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-4de6de256b9bff248078",
+        "group_id": "ljx_lfz_cf_v1-g-49da0180bbbe35681c33",
+        "instruction": "Pick up the blue block and place it in the plate.",
+        "normalized_target_phrase": "blue block",
+        "ranking_order": 11,
+        "source_record_id": "suc/ljx_lfz_task_1_1/1",
+        "task_id": "task1_1",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-a0bc3ca98bce85612a88",
+        "group_id": "ljx_lfz_cf_v1-g-21a4dd102f5e20662e9e",
+        "instruction": "Pick up the cup and place it in the plate.",
+        "normalized_target_phrase": "cup",
+        "ranking_order": 12,
+        "source_record_id": "suc/ljx_lfz_task_1_3/22",
+        "task_id": "task1_3",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-b1dcce0e554c316ac835",
+        "group_id": "ljx_lfz_cf_v1-g-b380ec3fe734f5a58a23",
+        "instruction": "Pick up the purple cup and place it in the plate.",
+        "normalized_target_phrase": "purple cup",
+        "ranking_order": 13,
+        "source_record_id": "suc/ljx_lfz_task_2_1/3",
+        "task_id": "task2_1",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-95265ec67b4dd4061ae2",
+        "group_id": "ljx_lfz_cf_v1-g-3c75d1b85b89feaae7df",
+        "instruction": "Pick up the blue block and place it in the plate.",
+        "normalized_target_phrase": "blue block",
+        "ranking_order": 14,
+        "source_record_id": "suc/ljx_lfz_task_2_2/1",
+        "task_id": "task2_2",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-6b172f7d4da79f1b1826",
+        "group_id": "ljx_lfz_cf_v1-g-c18a5598eb036dbde982",
+        "instruction": "Pick up the blue block and place it in the plate.",
+        "normalized_target_phrase": "blue block",
+        "ranking_order": 15,
+        "source_record_id": "suc/ljx_lfz_task_1_1/9",
+        "task_id": "task1_1",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-fcfd457f4e021355cced",
+        "group_id": "ljx_lfz_cf_v1-g-449d14dc9f251307f469",
+        "instruction": "Pick up the pen and place it in the plate.",
+        "normalized_target_phrase": "pen",
+        "ranking_order": 16,
+        "source_record_id": "suc/ljx_lfz_task_1_3/3",
+        "task_id": "task1_3",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-110bdcebeab4eb460637",
+        "group_id": "ljx_lfz_cf_v1-g-9954393892a100a1f023",
+        "instruction": "Pick up the blue cup and place it in the plate.",
+        "normalized_target_phrase": "blue cup",
+        "ranking_order": 17,
+        "source_record_id": "suc/ljx_lfz_task_2_1/2",
+        "task_id": "task2_1",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-f2f65f09f5b41bfa1b40",
+        "group_id": "ljx_lfz_cf_v1-g-8871caa1e47fb48ba761",
+        "instruction": "Pick up the cup and place it in the plate.",
+        "normalized_target_phrase": "cup",
+        "ranking_order": 18,
+        "source_record_id": "suc/ljx_lfz_task_1_1/10",
+        "task_id": "task1_1",
+        "whitebox_partition": "discovery"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-7dae613e0de36e81af17",
+        "group_id": "ljx_lfz_cf_v1-g-a7af52e0073cbaca211d",
+        "instruction": "Pick up the blue block and place it in the plate.",
+        "normalized_target_phrase": "blue block",
+        "ranking_order": 19,
+        "source_record_id": "suc/ljx_lfz_task_1_3/21",
+        "task_id": "task1_3",
+        "whitebox_partition": "test"
+      },
+      {
+        "example_id": "ljx_lfz_cf_v1-e-955af1b8c9ef25ddb1d5",
+        "group_id": "ljx_lfz_cf_v1-g-42f299d362d8572b5556",
+        "instruction": "Pick up the yellow cup and place it in the plate.",
+        "normalized_target_phrase": "yellow cup",
+        "ranking_order": 20,
+        "source_record_id": "suc/ljx_lfz_task_2_1/13",
+        "task_id": "task2_1",
+        "whitebox_partition": "test"
+      }
+    ],
+    "seed": "ljx_lfz-ranking-v1",
+    "target_phrase_source": "instruction_parser_only",
+    "within_task_order": "sha256(seed + NUL + source_record_id)"
+  },
+  "source": {
+    "integrity_checks": {
+      "all_id_equals_source_suc_id": true,
+      "all_instruction_video_match": true,
+      "all_split_suc": true,
+      "all_target_equals_correct_target": true
+    },
+    "label_free_candidate_fingerprint": "0b0f9fe4694908464602f9d806bb64f27df39dccdca23ed5fdeb1ab6df51473a",
+    "path": "/mnt/public1/dais/workspace/data/ljx_lfz_task/new/ranking_data.jsonl",
+    "row_count": 30,
+    "sha256": "b4f3d09a063e5a7f5f88b818a73197f7e36028facf541bd4138058e6b4885c32"
+  },
+  "strict_audit": {
+    "anonymous_ids_unique": true,
+    "expected_attention_count_per_model": 755,
+    "expected_prepared_count": 755,
+    "expected_source_count": 30,
+    "frozen_s20_reference_enforced": true,
+    "frozen_s20_reference_match": true,
+    "model_outputs_label_free": true,
+    "nested_prefixes": true,
+    "prepared_split_ids_identical": true,
+    "source_ids_unique": true,
+    "source_suc_media_paths_opened": false,
+    "three_model_input_ids_identical": true,
+    "three_model_output_order_identical": true
+  },
+  "whitebox_split": {
+    "fingerprint": "bb217ccefbfb9b8f1e0bf76e15077ac28c0a33a394c25bc4910473e17a38461c",
+    "path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/whitebox_split/split.json",
+    "sha256": "f6424b0256fd97fb4092b1d9f076756be02e107f5f7c9e974938a064e8416be3"
+  }
+}

@@ -1,0 +1,28 @@
+my_dataset_protocol:
+  inputs_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/model_inputs/inputs.jsonl
+  split_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/whitebox_split/split.json
+  roles_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/roles/roles.jsonl
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/protocol
+  models:
+    roboreward:
+      config_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/configs/my_dataset/roboreward_8b_model_card_native_front.yaml
+    qwen:
+      config_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/configs/my_dataset/qwen3vl_8b_model_card_native_front_attention8.yaml
+    grm:
+      config_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/configs/my_dataset/grm_8b_multiview_endpoints.yaml
+  primary:
+    ranking_query: last_prompt
+    spatial_scope: terminal_frame_after_cam_high
+    skip_early_layers: 8
+    top_k: 8
+    steering_query_scope: all
+    validation_biases: [2, 4, 6]
+    validation_top_k: [4, 8, 16]
+    primary_metrics:
+      - pairwise_accuracy
+      - fail_correction_rate
+      - suc_harm_rate
+      - balanced_net_correction
+      - spatial_specificity
+      - head_specificity
+  claim_boundary: exploratory；当前仅14个task subsets，且只有counterfactual reward 1/5

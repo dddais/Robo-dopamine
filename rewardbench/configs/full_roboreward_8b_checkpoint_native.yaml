@@ -1,0 +1,25 @@
+# Checkpoint-native reproduction attempt for RoboReward-8B.
+#
+# Unlike the prior custom 1-FPS and uniform-8 JPEG-list experiments, this
+# passes the untouched MP4 to AutoProcessor in the public HELM media order
+# (text then video).  The checkpoint processor then applies its temporal
+# policy (fps=2, min_frames=4, max_frames=8).  This run is intentionally
+# separate and does not overwrite either earlier output directory.
+roboreward_eval:
+  dataset_root: /mnt/public1/dais/workspace/data/RoboRewardBench
+  split: test
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/roboreward_eval/outputs/full_8b_checkpoint_native_new
+  model_path: /mnt/public1/dais/workspace/model/RoboReward-8B
+  counterfactual_dataset_root_for_metrics_only: /mnt/public1/dais/workspace/data/RoboRewardBench_counterfactual_reward1
+  video_sampling_mode: checkpoint_native_video
+  preprocessor_mode: checkpoint_default
+  # HELM's public request serializes the rubric/task before the video media
+  # object. This changes Qwen's multimodal token sequence, so it is explicit.
+  content_order: text_then_video
+  # HELM's public RoboReward-8B run uses temperature=0 and max_tokens=5000.
+  do_sample: false
+  max_new_tokens: 5000
+  torch_dtype: bfloat16
+  device_map: auto
+  shard_id: 0
+  num_shards: 1

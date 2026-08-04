@@ -1,0 +1,15 @@
+# Base Qwen3-VL-8B under the RoboRewardBench discrete-video contract.
+qwen_eval:
+  dataset_root: /home/dais/workspace/data/RoboRewardBench
+  split: test
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/qwen_eval/outputs/full_qwen3vl_8b_roborewardbench_native
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+
+  # Original MP4, task/rubric text followed by video, then ANSWER: <1-5>.
+  protocol: roborewardbench_native
+  do_sample: false
+  max_new_tokens: 32
+  torch_dtype: bfloat16
+  device_map: auto
+  shard_id: 0
+  num_shards: 1

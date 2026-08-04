@@ -1,0 +1,26 @@
+{
+  "auto_accepted": false,
+  "backend_fingerprint": "76d536d22b208996314b0e1f9e17e6c002b361082c22452db7691e47d18ccdd3",
+  "fingerprint": "3a472575f614b5508f6808daadb8aed4ff4c81dcb5a689dc8dcb5333f6336890",
+  "labels_opened": false,
+  "output_path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_auto_v2_low015_top40/supplement_proposals_per_query.jsonl",
+  "output_sha256": "c214837175fb6ec51cad67029c610d4ed6fc46fcab71b0b408312e9c09a9e1ad",
+  "row_count": 864,
+  "sam3_config": {
+    "device": "cuda",
+    "mask_threshold": 0.5,
+    "model_path": "/mnt/public1/dais/workspace/model/sam3",
+    "threshold": 0.15,
+    "top_n": 30
+  },
+  "schema_version": "my_dataset.grounding_supplement.v1",
+  "source_proposals": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_auto_v2_low015_top40/proposals.jsonl",
+  "source_proposals_sha256": "0f92ef98a486c1a152aaf38129caa7f9cf56ea509b15bfccad50cb3ba26e5db9",
+  "source_requests": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_auto_v2_low015_top40/requests.jsonl",
+  "source_requests_sha256": "b07b284aed78b3a078b093d6ddcf3b55296b291b19bf5585da16cf1470c18977",
+  "status_counts": {
+    "no_candidate": 864,
+    "ok": 0
+  },
+  "unique_image_query_calls": 152
+}

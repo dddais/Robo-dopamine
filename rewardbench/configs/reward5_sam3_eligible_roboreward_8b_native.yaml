@@ -1,0 +1,17 @@
+roboreward_eval:
+  # The frozen 111-ID cohort is the SAM3 two-reviewer-agreement eligible
+  # object/object-part population used by the Robo-Dopamine all-eligible run.
+  dataset_root: /home/dais/workspace/data/RoboRewardBench
+  split: test
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/rewardbench/cohorts/outputs/reward5_sam3_formal112/example_ids.json
+  
+  output_dir: /home/dais/workspace/Robo-Dopamine/rewardbench/roboreward_eval/outputs/reward5_sam3_formal112_8b_checkpoint_native
+  model_path: /mnt/public1/dais/workspace/model/RoboReward-8B
+
+  video_sampling_mode: checkpoint_native_video
+  content_order: text_then_video
+  preprocessor_mode: checkpoint_default
+  do_sample: false
+  max_new_tokens: 5000
+  torch_dtype: bfloat16
+  device_map: auto

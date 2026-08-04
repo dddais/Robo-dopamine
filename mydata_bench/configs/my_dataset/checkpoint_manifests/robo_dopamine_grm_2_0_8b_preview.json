@@ -1,0 +1,91 @@
+{
+  "content_fingerprint": "c5f0dd90db13d18d6e0e272e80d8edee8c5c74293614f2f19e7aa86976e6fe4d",
+  "excluded_path_prefixes": [
+    ".cache/"
+  ],
+  "file_count": 15,
+  "file_scope": "all_regular_checkpoint_files_except_declared_volatile_cache",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "sha256": "2509a96154033d8100430e0bf79c853dfd0ed43b628e61e64102403cedd1cc9e",
+      "size": 2429
+    },
+    {
+      "path": "README.md",
+      "sha256": "3b15200d42f796c1e13d9f0d88391e874004ac494b7c255133fe33560ec7261b",
+      "size": 6545
+    },
+    {
+      "path": "chat_template.json",
+      "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+      "size": 5499
+    },
+    {
+      "path": "config.json",
+      "sha256": "5cd452860dc1e9c29dd71cc3cef7f39b338b7a40793f7a260655c2d3568f3661",
+      "size": 1474
+    },
+    {
+      "path": "configuration.json",
+      "sha256": "f888421726665e8a84b738eed42a64875aed79de8be7daade851ac8bf4c0cef9",
+      "size": 73
+    },
+    {
+      "path": "generation_config.json",
+      "sha256": "8469742d1fce0de951c8909b26a2c0c0d8490837ce476efb114da9e0cefc4d44",
+      "size": 269
+    },
+    {
+      "path": "merges.txt",
+      "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+      "size": 1671839
+    },
+    {
+      "path": "model-00001-of-00002.safetensors",
+      "sha256": "ddcbb8b2c0edd0f7707b5c459c9981ef9c842293e5d520324dddc8c66996fba9",
+      "size": 9914019048
+    },
+    {
+      "path": "model-00002-of-00002.safetensors",
+      "sha256": "374a816964fc361fece15f7f8f661521a367181bdd3a5d6f75f59fa0b0c328b5",
+      "size": 7620320504
+    },
+    {
+      "path": "model.safetensors.index.json",
+      "sha256": "765bab88ce308d515a6e02df460b9aae77a28171a7abca349c922322625aeb75",
+      "size": 67759
+    },
+    {
+      "path": "preprocessor_config.json",
+      "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+      "size": 390
+    },
+    {
+      "path": "tokenizer.json",
+      "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+      "size": 7032403
+    },
+    {
+      "path": "tokenizer_config.json",
+      "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399",
+      "size": 10868
+    },
+    {
+      "path": "video_preprocessor_config.json",
+      "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+      "size": 385
+    },
+    {
+      "path": "vocab.json",
+      "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+      "size": 2776833
+    }
+  ],
+  "fingerprint": "0d477b716ae420e3f02f27bd1868649fda1ae07c415bd3b2243a0306b1ac2473",
+  "hash_algorithm": "sha256",
+  "model_path": "/mnt/public1/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview",
+  "path_kind": "directory",
+  "schema_version": "my_dataset.checkpoint_content_manifest.v1",
+  "total_size_bytes": 17545916318
+}

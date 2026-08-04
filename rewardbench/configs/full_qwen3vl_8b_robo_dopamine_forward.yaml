@@ -1,0 +1,20 @@
+# Optional base-Qwen ablation using the Robo-Dopamine forward I/O contract.
+# This is not an official native discrete baseline: it uses eight endpoint
+# images and a signed <score> output, which is subsequently adapted to 1--5.
+qwen_eval:
+  dataset_root: /home/dais/workspace/data/RoboRewardBench
+  split: test
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/qwen_eval/outputs/full_qwen3vl_8b_robo_dopamine_forward
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+
+  protocol: robo_dopamine_forward
+  prompt_mode: official
+  min_pixels: 12544
+  max_pixels: 76800
+  do_sample: false
+  max_new_tokens: 32
+  torch_dtype: bfloat16
+  device_map: auto
+  shard_id: 0
+  num_shards: 1

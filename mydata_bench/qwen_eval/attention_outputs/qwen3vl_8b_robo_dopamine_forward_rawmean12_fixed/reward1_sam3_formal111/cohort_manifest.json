@@ -1,0 +1,8 @@
+{
+  "example_ids_file": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/cohorts/outputs/reward1_sam3_formal111/example_ids.json",
+  "example_ids_sha256": "5dd0e1304206920116f13ba9a1aa10aed7982f23d47f88d6b973f91d809f9a06",
+  "expected_count": 111,
+  "fingerprint": "42fe74a56e49b98c8580158773ae5fbccda3525a74f0b015fbbaed9b98dacfd7",
+  "grounding_audit": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/counterfactual_reward1_sam3/sam3/audit_final.jsonl",
+  "model_facing_labels_omitted": true
+}

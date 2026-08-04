@@ -1,0 +1,15 @@
+{
+  "baseline_runs": {
+    "grm": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/outputs/my_dataset/ljx_lfz_cf_v1/grm_8b_multiview_endpoints",
+    "qwen": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/outputs/my_dataset/ljx_lfz_cf_v1/qwen3vl_8b_model_card_native_front_attention8",
+    "roboreward": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/outputs/my_dataset/ljx_lfz_cf_v1/roboreward_8b_model_card_native_front"
+  },
+  "group_count": 169,
+  "inputs_sha256": "730a7c8792f7d918ddbd2a9146cd2dedc4e0a7f424055a45597c73811a642463",
+  "labels_opened": false,
+  "request_count": 755,
+  "request_fingerprint": "c265bfb6bceedb55f3a655c9e3f4fbcc72f8c9e8d89fffe436290286d4367949",
+  "roles_sha256": "783ad9a805d6c5e8eadffa8e7f7b4a93697ecb06ff9c29a8f65404e4b11465ed",
+  "schema_version": "my_dataset.grounding_request.v1",
+  "split_sha256": "f6424b0256fd97fb4092b1d9f076756be02e107f5f7c9e974938a064e8416be3"
+}

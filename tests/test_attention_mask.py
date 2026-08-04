@@ -19,7 +19,12 @@ from rewardbench.attention_eval.masking import (
     select_low_ranked_heads,
 )
 from rewardbench.attention_eval.ranking import aggregate_in_domain, consensus_ranking
-from rewardbench.attention_eval.stats import holm, paired_cluster_bootstrap
+from rewardbench.attention_eval.stats import (
+    exact_mcnemar_pvalue,
+    holm,
+    paired_cluster_bootstrap,
+    paired_sign_flip_pvalue,
+)
 
 
 class MappingAndControlTests(unittest.TestCase):
@@ -263,8 +268,47 @@ class SplitAndRankingTests(unittest.TestCase):
         ]
         result = paired_cluster_bootstrap(rows, "effect", samples=50)
         self.assertEqual(result["ci95"], [1.0, 1.0])
+        self.assertEqual(result["n_records"], 3)
+        self.assertEqual(result["n_clusters"], 2)
+        self.assertEqual(result["strata_cluster_counts"], {"__all__": 2})
         adjusted = holm({"a": 0.01, "b": 0.04})
         self.assertEqual(adjusted, {"a": 0.02, "b": 0.04})
+
+    def test_cluster_inference_is_video_level_and_subset_stratified(self) -> None:
+        unique = [
+            {"video_sha256": "a", "subset": "s1", "effect": 1.0},
+            {"video_sha256": "b", "subset": "s1", "effect": -0.5},
+            {"video_sha256": "c", "subset": "s2", "effect": 0.25},
+        ]
+        duplicated = [unique[0], dict(unique[0]), *unique[1:]]
+        self.assertEqual(
+            paired_sign_flip_pvalue(unique, "effect", samples=200, seed=7),
+            paired_sign_flip_pvalue(duplicated, "effect", samples=200, seed=7),
+        )
+        result = paired_cluster_bootstrap(duplicated, "effect", samples=50, seed=7)
+        self.assertEqual(result["n_records"], 4)
+        self.assertEqual(result["n_clusters"], 3)
+        self.assertEqual(result["n_strata"], 2)
+        self.assertEqual(result["strata_cluster_counts"], {"s1": 2, "s2": 1})
+
+    def test_cluster_cannot_cross_subsets(self) -> None:
+        rows = [
+            {"video_sha256": "a", "subset": "s1", "effect": 1.0},
+            {"video_sha256": "a", "subset": "s2", "effect": 1.0},
+        ]
+        with self.assertRaisesRegex(ValueError, "multiple subsets"):
+            paired_cluster_bootstrap(rows, "effect", samples=10)
+
+    def test_exact_mcnemar_uses_only_discordant_correctness_pairs(self) -> None:
+        rows = (
+            [{"base": False, "candidate": True}] * 5
+            + [{"base": True, "candidate": False}]
+            + [{"base": True, "candidate": True}] * 20
+        )
+        self.assertAlmostEqual(
+            exact_mcnemar_pvalue(rows, "base", "candidate"),
+            0.21875,
+        )
 
 
 class QueryScopeMetricsTests(unittest.TestCase):

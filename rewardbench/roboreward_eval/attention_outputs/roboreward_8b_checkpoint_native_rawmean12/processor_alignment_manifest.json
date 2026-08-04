@@ -1,0 +1,8 @@
+{
+  "all_valid": true,
+  "attention_video_max_frames": 8,
+  "fingerprint": "a81835f9809008740b6373864799e9c220b742da614705e3d524526675ff1c53",
+  "processor_model_path": "/mnt/public1/dais/workspace/model/RoboReward-8B",
+  "protocol": "roborewardbench_native",
+  "sample_count": 36
+}

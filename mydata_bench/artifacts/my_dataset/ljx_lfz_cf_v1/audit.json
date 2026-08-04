@@ -1,0 +1,14 @@
+{
+  "inputs_path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/model_inputs/inputs.jsonl",
+  "invalid_group_labels": {},
+  "label_coded_model_paths": [],
+  "labels_path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/scoring/labels.jsonl",
+  "labels_without_inputs": [],
+  "missing_label_ids": [],
+  "model_label_fields_found": 0,
+  "num_groups": 169,
+  "num_labels": 755,
+  "num_model_inputs": 755,
+  "passed": true,
+  "schema_version": "my_dataset.counterfactual.v1"
+}

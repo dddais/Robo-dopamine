@@ -1,0 +1,50 @@
+{
+  "attention_video_max_frames": null,
+  "command": [
+    "rewardbench/run_qwen_attention.py",
+    "steer",
+    "--config",
+    "rewardbench/configs/attention_qwen3vl_8b_native_reward1_rawmean12_official.yaml"
+  ],
+  "conditions": [
+    "baseline",
+    "candidate_target",
+    "candidate_wrong",
+    "low_rank_target"
+  ],
+  "config": {
+    "_config_path": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/configs/attention_qwen3vl_8b_native_reward1_rawmean12_official.yaml",
+    "attention_steer": {
+      "dataset_root": "/home/dais/workspace/data/RoboRewardBench_counterfactual_reward1",
+      "device_map": "auto",
+      "example_ids_file": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/cohorts/outputs/reward1_sam3_formal111/example_ids.json",
+      "grounding_run": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/counterfactual_reward1_sam3/sam3",
+      "max_new_tokens": 5000,
+      "model_path": "/home/dais/workspace/model/Qwen3-VL-8B-Instruct",
+      "output_dir": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/qwen_eval/attention_outputs/qwen3vl_8b_native_rawmean12_official/reward1_sam3_formal111",
+      "protocol": "roborewardbench_native",
+      "ranking_path": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/qwen_eval/attention_outputs/qwen3vl_8b_native_rawmean12_official/consensus_ranking.json",
+      "split": "test",
+      "steering_query_scope": "all",
+      "swap_bias": 6,
+      "top_k": 8,
+      "torch_dtype": "bfloat16"
+    }
+  },
+  "config_fingerprint": "e9486998fbd9d85af5538cfe1c0ec9073d2a62a35b0b61223624a645d9c003e8",
+  "created_at": "2026-07-31T06:10:04.743834+00:00",
+  "git_revision": "6e3b64a9a819a96e7f083047de1f485c255ea756",
+  "gpu": [
+    "NVIDIA A100-SXM4-80GB, GPU-3a66385a-8de4-1cee-0842-9f0e7269244c, 580.82.07",
+    "NVIDIA A100-SXM4-80GB, GPU-20d09401-f5b6-1b70-0120-14a05cbb3e11, 580.82.07",
+    "NVIDIA A100-SXM4-80GB, GPU-68c4281e-027d-ed3c-55d0-64bd20f555bf, 580.82.07",
+    "NVIDIA A100-SXM4-80GB, GPU-70c3e13f-bc88-9b53-8dee-84330058f35d, 580.82.07"
+  ],
+  "labels_model_facing": false,
+  "model_fingerprint": "5c5bf5cf3464b484b0e89d13923f269c1730cb9e38c9995f9f5d70f481553b57",
+  "platform": "Linux-5.15.0-116-generic-x86_64-with-glibc2.35",
+  "protocol": "roborewardbench_native",
+  "python": "3.10.20 (main, Mar 11 2026, 17:46:40) [GCC 14.3.0]",
+  "ranking_path": "/mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/qwen_eval/attention_outputs/qwen3vl_8b_native_rawmean12_official/consensus_ranking.json",
+  "ranking_sha256": "cffb0c1e58b761a70ac439234254244d51bc82fe82beaefeef31165dce664cb6"
+}

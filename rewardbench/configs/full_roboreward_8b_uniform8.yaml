@@ -1,0 +1,26 @@
+# Checkpoint-aligned fixed-frame re-evaluation.  This is intentionally a new
+# run: it never overwrites the earlier custom full_1fps result.
+#
+# The RoboReward-8B video preprocessor declares max_frames: 8.  We therefore
+# select exactly eight uniform frames, including the true final decoded frame,
+# before Qwen receives the video frame list.
+roboreward_eval:
+  dataset_root: /mnt/public1/dais/workspace/data/RoboRewardBench
+  split: test
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/roboreward_eval/outputs/full_8b_uniform8
+  model_path: /mnt/public1/dais/workspace/model/RoboReward-8B
+  counterfactual_dataset_root_for_metrics_only: /mnt/public1/dais/workspace/data/RoboRewardBench_counterfactual_reward1
+  video_sampling_mode: uniform_fixed_frames
+  num_frames: 8
+  preprocessor_mode: checkpoint_default
+  # Keep decoding fixed relative to the prior run so this measures the frame
+  # protocol alone. A separate decoding ablation remains necessary for a fully
+  # exact paper reproduction because the model card does not state it.
+  max_new_tokens: 128
+  do_sample: false
+  torch_dtype: bfloat16
+  device_map: auto
+  min_pixels: 784
+  max_pixels: 50176
+  shard_id: 0
+  num_shards: 1

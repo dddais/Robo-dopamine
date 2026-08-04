@@ -1,0 +1,19 @@
+# Reward=5 screening input.  This is runnable now: it consumes the frozen,
+# label-free 527-ID cohort and writes a separate SAM3 directory for review.
+# After the human audit, use its audit_final.jsonl to freeze the final eligible
+# IDs before launching any reward=5 model comparison.
+grounding:
+  dataset_root: /home/dais/workspace/data/RoboRewardBench
+  split: test
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/rewardbench/cohorts/outputs/reward5_full_527/example_ids.json
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/reward5_full_sam3
+  parser_model_path: /home/dais/workspace/model/Qwen3-4B-Instruct-2507
+  use_parser_model: true
+
+sam3:
+  model_path: /home/dais/workspace/model/sam3
+  checkpoint_path: /home/dais/workspace/model/sam3/sam3.pt
+  device: cuda
+  threshold: 0.30
+  mask_threshold: 0.50
+  top_n: 10

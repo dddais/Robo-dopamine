@@ -1,0 +1,7 @@
+my_dataset_assumed_grounding:
+  requests_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_per_query_v2/requests.jsonl
+  proposals_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_per_query_v2/proposals.jsonl
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_per_query_v2
+  expected_count: 755
+  iou_threshold: 0.80
+  require_all_valid: true

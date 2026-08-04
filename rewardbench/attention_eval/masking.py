@@ -174,8 +174,12 @@ def make_attention_mask_hook(
             "decode_applied_calls": 0,
             "applied_query_rows": 0,
             "selected_heads": heads,
-            "selected_positions": selected,
-            "other_visual_positions": other,
+            # Per-record outputs retain the selected/visual token positions.
+            # Keep only compact evidence here because this dictionary is
+            # replicated once for every steered layer and every cohort sample.
+            "selected_token_count": len(selected),
+            "other_visual_token_count": len(other),
+            "selected_other_disjoint": not bool(set(selected) & set(other)),
             "swap_bias": float(swap_bias),
             "query_scope": query_scope,
             "new_text_keys_zero_bias": True,

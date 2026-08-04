@@ -1,0 +1,102 @@
+{
+  "all_valid": true,
+  "allow_exploratory_fallbacks": true,
+  "bbox_clipped_example_count": 29,
+  "bbox_clipped_model_target_count": 87,
+  "claim_status": "exploratory",
+  "expected_count": 755,
+  "fallback_example_count": 302,
+  "fallback_method_counts": {
+    "destination_proxy_for_missing_target": 48,
+    "highest_score_target_without_reference": 816,
+    "nearest_target_without_requested_side": 30,
+    "ordinal_clamped_to_available_candidates": 12
+  },
+  "fallback_model_target_count": 906,
+  "fingerprint": "d0e580b8f4b8ccf35a65b93a85bba1f3bc7edfcbc89fd747ffa0f5ea9f144c8b",
+  "grounding_status": "mixed_auto_assumed_and_proxy_unreviewed",
+  "human_reviewed": false,
+  "invalid_example_count": 0,
+  "invalid_examples": [],
+  "invalid_reason_counts": {},
+  "iou_threshold": 0.8,
+  "labels_opened": false,
+  "model_fallback_counts": {
+    "grm": 302,
+    "qwen": 302,
+    "roboreward": 302
+  },
+  "model_invalid_reason_counts": {
+    "grm": {},
+    "qwen": {},
+    "roboreward": {}
+  },
+  "model_valid_counts": {
+    "grm": 755,
+    "qwen": 755,
+    "roboreward": 755
+  },
+  "object_fingerprints": {
+    "proposal_sources": "c0ef2a007e09e37ac590db47097a7054a5cbccb770e7a16915eab81f5327814c",
+    "requests": "c9dcd6252d1dbc4fddc0f6f0852407dfe3045616ce060b885a82543ff6c50c7d",
+    "reviews": "5938ce5504287c987f7289420622bcc586ac6b962c9037725a8ef5627abc344b"
+  },
+  "passed": true,
+  "proposal_count": 2265,
+  "proposal_sources": [
+    {
+      "candidate_count": 8661,
+      "path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_auto_v2_low015_top40/proposals.jsonl",
+      "row_count": 2265,
+      "sha256": "0f92ef98a486c1a152aaf38129caa7f9cf56ea509b15bfccad50cb3ba26e5db9",
+      "source_role": "primary",
+      "status_counts": {
+        "ok": 2265
+      }
+    },
+    {
+      "candidate_count": 0,
+      "path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_auto_v2_low015_top40/supplement_proposals_per_query.jsonl",
+      "row_count": 864,
+      "sha256": "c214837175fb6ec51cad67029c610d4ed6fc46fcab71b0b408312e9c09a9e1ad",
+      "source_role": "supplemental",
+      "status_counts": {
+        "no_candidate": 864
+      }
+    }
+  ],
+  "proposals_path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_auto_v2_low015_top40/proposals.jsonl",
+  "proposals_sha256": "0f92ef98a486c1a152aaf38129caa7f9cf56ea509b15bfccad50cb3ba26e5db9",
+  "proxy_example_count": 302,
+  "request_count": 755,
+  "requests_path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_auto_v2_low015_top40/requests.jsonl",
+  "requests_sha256": "b07b284aed78b3a078b093d6ddcf3b55296b291b19bf5585da16cf1470c18977",
+  "review_count": 755,
+  "reviews_path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_assumed/reviews_assumed.jsonl",
+  "reviews_sha256": "b93bb58a1d1b0b5073b5e55e466ea5512005fd6e9495ac70a5a73bdf34a9ef09",
+  "schema_version": "my_dataset.assumed_grounding.v1",
+  "source_sha256s": {
+    "primary_proposals": "0f92ef98a486c1a152aaf38129caa7f9cf56ea509b15bfccad50cb3ba26e5db9",
+    "requests": "b07b284aed78b3a078b093d6ddcf3b55296b291b19bf5585da16cf1470c18977",
+    "supplemental_proposals": [
+      "c214837175fb6ec51cad67029c610d4ed6fc46fcab71b0b408312e9c09a9e1ad"
+    ]
+  },
+  "status_counts": {
+    "assumed_proxy": 302,
+    "assumed_valid": 453
+  },
+  "strategy_counts": {
+    "attribute_color": 116,
+    "distance_relation": 352,
+    "left_right_relation": 40,
+    "object_identity": 144,
+    "ordinal_position": 103
+  },
+  "strict_example_count": 453,
+  "structurally_complete": true,
+  "supplemental_proposal_count": 864,
+  "supplemental_proposals_paths": [
+    "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_auto_v2_low015_top40/supplement_proposals_per_query.jsonl"
+  ]
+}
