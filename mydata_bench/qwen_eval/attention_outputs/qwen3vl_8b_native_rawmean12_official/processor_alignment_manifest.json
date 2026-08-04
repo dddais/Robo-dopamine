@@ -1,8 +1,0 @@
-{
-  "all_valid": true,
-  "attention_video_max_frames": null,
-  "fingerprint": "96eeea558581a31516125bca1b9281fc0f54badf740c7b053a0046dcf25e6ad0",
-  "processor_model_path": "/mnt/public1/dais/workspace/model/Qwen3-VL-8B-Instruct",
-  "protocol": "roborewardbench_native",
-  "sample_count": 36
-}
