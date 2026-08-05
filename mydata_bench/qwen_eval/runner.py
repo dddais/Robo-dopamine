@@ -26,12 +26,10 @@ from .protocols import (
     ROBOREWARDBENCH_NATIVE,
     dopamine_forward_messages,
     dopamine_forward_payload,
-    native_video_message,
     native_video_payload,
     parse_protocol_output,
     protocol_descriptor,
     validate_protocol,
-    validate_content_order,
 )
 
 
@@ -67,17 +65,8 @@ class Qwen3VLBaseline:
             ) from exc
         self.torch = torch
         self.protocol = validate_protocol(protocol)
-        self.content_order = validate_content_order(
-            str(config.get("content_order", "text_then_video"))
-        )
         processor_kwargs: dict[str, Any] = {"trust_remote_code": True}
         self.processor = AutoProcessor.from_pretrained(config["model_path"], **processor_kwargs)
-        video_processor = getattr(self.processor, "video_processor", None)
-        if video_processor is not None and config.get("video_max_frames") is not None:
-            maximum = int(config["video_max_frames"])
-            if maximum < 2:
-                raise ValueError("video_max_frames must be >= 2")
-            video_processor.max_frames = maximum
         image_processor = getattr(self.processor, "image_processor", None)
         if image_processor is not None:
             if "min_pixels" in config:
@@ -128,14 +117,15 @@ class Qwen3VLBaseline:
         )[0].strip()
 
     def _infer_native_video(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        content_order = validate_content_order(
-            str(payload.get("content_order", self.content_order))
-        )
-        message = native_video_message(
-            str(payload["task"]),
-            str(payload["video_path"]),
-            content_order=content_order,
-        )
+        message = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": payload["prompt"]},
+                    {"type": "video", "video": payload["video_path"]},
+                ],
+            }
+        ]
         inputs = self.processor.apply_chat_template(
             message,
             tokenize=True,
@@ -167,13 +157,6 @@ class Qwen3VLBaseline:
             "video_grid_thw": grid.detach().cpu().tolist() if grid is not None else None,
             "video_token_count": int((inputs["input_ids"] == video_token_id).sum()),
             "video_metadata": metadata_record,
-            "configured_video_max_frames": (
-                int(getattr(self.processor.video_processor, "max_frames"))
-                if getattr(self.processor, "video_processor", None) is not None
-                else None
-            ),
-            "content_order": content_order,
-            "media_order": [item["type"] for item in message[0]["content"]],
         }
 
     def _infer_endpoint_images(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -209,9 +192,6 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
     output_dir.mkdir(parents=True, exist_ok=True)
     protocol = validate_protocol(str(evaluation.get("protocol", ROBOREWARDBENCH_NATIVE)))
     prompt_mode = str(evaluation.get("prompt_mode", "official"))
-    content_order = validate_content_order(
-        str(evaluation.get("content_order", "text_then_video"))
-    )
     requested_ids = requested_example_ids(evaluation)
     shard_id = int(evaluation.get("shard_id", 0))
     num_shards = int(evaluation.get("num_shards", 1))
@@ -229,11 +209,7 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
             "shard_id": shard_id,
             "num_shards": num_shards,
             "qwen_protocol": {
-                **protocol_descriptor(
-                    protocol,
-                    prompt_mode=prompt_mode,
-                    content_order=content_order,
-                ),
+                **protocol_descriptor(protocol, prompt_mode=prompt_mode),
                 "frozen_id_cohort": {
                     "requested_id_count": len(requested_ids) if requested_ids else None,
                     "requested_ids_fingerprint": (
@@ -299,9 +275,7 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
                 raise AssertionError("Label leakage into Qwen model payload")
             frame_record = None
             if protocol == ROBOREWARDBENCH_NATIVE:
-                payload = native_video_payload(
-                    episode, content_order=content_order
-                )
+                payload = native_video_payload(episode)
             else:
                 frame_record = extract_endpoints(
                     episode.example_id,

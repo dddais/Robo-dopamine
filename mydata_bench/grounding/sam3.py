@@ -40,14 +40,7 @@ class SAM3Grounder(Grounder):
         self._load()
         image = Image.open(image_path).convert("RGB")
         rows = []
-        configured_per_query = self.config.get("top_n_per_query")
-        top_n_per_query = (
-            int(configured_per_query) if configured_per_query is not None else None
-        )
-        if top_n_per_query is not None and top_n_per_query < 1:
-            raise ValueError("top_n_per_query must be positive")
         for priority, query in enumerate(queries):
-            query_rows = []
             inputs = self._processor(images=image, text=query, return_tensors="pt").to(
                 self._device
             )
@@ -70,7 +63,7 @@ class SAM3Grounder(Grounder):
                 )
                 if bbox is None:
                     continue
-                query_rows.append(
+                rows.append(
                     {
                         "bbox": bbox,
                         "score": float(score.detach().cpu()),
@@ -80,27 +73,8 @@ class SAM3Grounder(Grounder):
                         "_mask": mask_array,
                     }
                 )
-            if top_n_per_query is not None:
-                query_rows.sort(
-                    key=lambda row: (
-                        -row["score"],
-                        tuple(row["bbox"]),
-                        row["query_priority"],
-                    )
-                )
-                query_rows = query_rows[:top_n_per_query]
-            rows.extend(query_rows)
-        if top_n_per_query is None:
-            rows.sort(key=lambda row: (-row["score"], row["query_priority"]))
-            return rows[: int(self.config.get("top_n", 10))]
-        rows.sort(
-            key=lambda row: (
-                -row["score"],
-                row["query_priority"],
-                tuple(row["bbox"]),
-            )
-        )
-        return rows
+        rows.sort(key=lambda row: (-row["score"], row["query_priority"]))
+        return rows[: int(self.config.get("top_n", 10))]
 
     def track(
         self, video_path: str, query: str, anchor_indices: list[int]

@@ -26,7 +26,6 @@ from PIL import Image
 
 from ..attention_eval.masking import (
     QUERY_SCOPES,
-    VISUAL_SCOPES,
     Head,
     ImageSpan,
     bbox_to_token_positions,
@@ -34,28 +33,28 @@ from ..attention_eval.masking import (
     matched_wrong_position_set,
 )
 from ..attention_eval.runtime import find_contiguous_spans
-from ..io import sha256_file
-from ..protocol import IMAGE_LABELS
-from ..roboreward_eval.runner import parse_native_score
+from ..protocol import IMAGE_LABELS, progress
+from ..roboreward_eval.runner import ROBOREWARD_PROMPT, parse_native_score
 from .protocols import (
     ROBO_DOPAMINE_FORWARD,
     ROBOREWARDBENCH_NATIVE,
     dopamine_forward_messages,
-    native_video_message,
     parse_protocol_output,
-    validate_content_order,
     validate_protocol,
 )
 
 
-def _native_video_message(
-    task: str,
-    video_path: str,
-    *,
-    content_order: str = "text_then_video",
-) -> list[dict[str, Any]]:
-    """Backward-compatible alias for the shared native-video message builder."""
-    return native_video_message(task, video_path, content_order=content_order)
+def _native_video_message(task: str, video_path: str) -> list[dict[str, Any]]:
+    """Build the exact text-then-video native request used by evaluation."""
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": ROBOREWARD_PROMPT.format(task=task)},
+                {"type": "video", "video": str(Path(video_path).resolve())},
+            ],
+        }
+    ]
 
 
 def _move_inputs(torch, model, inputs: Any, dtype: Any) -> dict[str, Any]:
@@ -78,44 +77,6 @@ def _spatial_merge_size(config: Any) -> int:
     return int(value if value is not None else 2)
 
 
-def temporal_source_frame_groups(
-    frame_indices: Sequence[int],
-    *,
-    temporal_patch_size: int,
-    temporal_grid_size: int,
-) -> list[list[int]]:
-    """Reproduce Qwen3-VL's consecutive temporal patching and final padding."""
-
-    if temporal_patch_size < 1 or temporal_grid_size < 1:
-        raise ValueError("Temporal patch/grid sizes must be positive")
-    if not frame_indices:
-        raise ValueError("Processor returned no source frame indices")
-    normalized: list[int] = []
-    for value in frame_indices:
-        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
-            raise ValueError("Processor source frame index is not an integer")
-        normalized.append(int(value))
-    if normalized != sorted(set(normalized)):
-        raise ValueError("Processor source frame indices must be sorted and unique")
-    expected_temporal = (
-        len(normalized) + temporal_patch_size - 1
-    ) // temporal_patch_size
-    if expected_temporal != temporal_grid_size:
-        raise ValueError(
-            "Processor temporal grid does not match sampled-frame patching: "
-            f"frames={len(normalized)}, patch={temporal_patch_size}, grid={temporal_grid_size}"
-        )
-    padded = list(normalized)
-    padded.extend(
-        normalized[-1]
-        for _ in range(temporal_grid_size * temporal_patch_size - len(normalized))
-    )
-    return [
-        padded[offset : offset + temporal_patch_size]
-        for offset in range(0, len(padded), temporal_patch_size)
-    ]
-
-
 @dataclass(frozen=True)
 class PreparedAttentionInput:
     inputs: dict[str, Any]
@@ -124,7 +85,6 @@ class PreparedAttentionInput:
     target_image_path: str
     visual_positions: list[int]
     protocol: str
-    target_source_frame_indices: tuple[int, ...] = ()
     video_metadata: dict[str, Any] | None = None
 
 
@@ -163,75 +123,6 @@ def build_forward_image_spans(
     ]
 
 
-def build_native_video_spans(
-    video_path: str,
-    token_spans: Sequence[tuple[int, int]],
-    grid_thw: tuple[int, int, int],
-    *,
-    spatial_merge_size: int,
-) -> list[ImageSpan]:
-    """Bind official Qwen3-VL video-token runs to temporal patches.
-
-    The current Qwen3-VL processor inserts a timestamp and vision delimiters
-    around every temporal patch. The current model correspondingly expands
-    ``video_grid_thw`` to one ``t=1`` row per such run when constructing RoPE
-    positions. A multi-patch single run is therefore not a compatible layout
-    for this runtime, even when its total token count happens to match.
-    """
-
-    temporal, raw_height, raw_width = (int(value) for value in grid_thw)
-    merge = int(spatial_merge_size)
-    if (
-        temporal < 1
-        or merge < 1
-        or raw_height < 1
-        or raw_width < 1
-        or raw_height % merge
-        or raw_width % merge
-    ):
-        raise ValueError("Native video grid is incompatible with spatial merge")
-    tokens_per_temporal_patch = (raw_height // merge) * (raw_width // merge)
-    spans = [(int(start), int(end)) for start, end in token_spans]
-    if any(start < 0 or end <= start for start, end in spans) or any(
-        current[0] < previous[1]
-        for previous, current in zip(spans, spans[1:])
-    ):
-        raise ValueError("Native video token spans are invalid or overlap")
-
-    if len(spans) != temporal:
-        raise ValueError(
-            "Official native input must contain exactly one video-token run "
-            "per temporal patch: "
-            f"runs={len(spans)}, temporal_grid={temporal}"
-        )
-    bad = [
-        {
-            "temporal_index": index,
-            "span": end - start,
-            "expected": tokens_per_temporal_patch,
-        }
-        for index, (start, end) in enumerate(spans)
-        if end - start != tokens_per_temporal_patch
-    ]
-    if bad:
-        raise ValueError(
-            "Native video temporal token/grid mismatch: "
-            f"{bad}; grid={grid_thw}, merge={merge}"
-        )
-    temporal_spans = spans
-
-    return [
-        ImageSpan(
-            f"video_t{index}",
-            str(video_path),
-            temporal_spans[index][0],
-            temporal_spans[index][1],
-            (1, raw_height, raw_width),
-        )
-        for index in range(temporal)
-    ]
-
-
 class QwenAttentionRuntime:
     """Eager-attention runtime for native and forward Qwen3-VL contracts."""
 
@@ -244,9 +135,6 @@ class QwenAttentionRuntime:
         self.torch = torch
         self.config = dict(config)
         self.protocol = validate_protocol(str(config["protocol"]))
-        self.content_order = validate_content_order(
-            str(config.get("content_order", "text_then_video"))
-        )
         dtype_name = str(config.get("torch_dtype", config.get("dtype", "bfloat16")))
         try:
             self.dtype = getattr(torch, dtype_name)
@@ -281,21 +169,6 @@ class QwenAttentionRuntime:
         self.num_layers = int(text_config.num_hidden_layers)
         self.num_heads = int(text_config.num_attention_heads)
         self.merge_size = _spatial_merge_size(self.model.config)
-        self.temporal_patch_size = int(
-            getattr(self.processor.video_processor, "temporal_patch_size", 0)
-        )
-        if self.temporal_patch_size < 1:
-            raise RuntimeError("Qwen video processor exposes no temporal_patch_size")
-        vision_config = getattr(self.model.config, "vision_config", None)
-        model_temporal_patch_size = int(
-            getattr(vision_config, "temporal_patch_size", 0)
-        )
-        if model_temporal_patch_size != self.temporal_patch_size:
-            raise RuntimeError(
-                "Qwen model and video processor temporal_patch_size differ: "
-                f"{model_temporal_patch_size} != {self.temporal_patch_size}"
-            )
-        self._sha256_cache: dict[str, str] = {}
 
     @property
     def layers(self):
@@ -375,11 +248,7 @@ class QwenAttentionRuntime:
         if not Path(video_path).is_file():
             raise FileNotFoundError(video_path)
         raw = self.processor.apply_chat_template(
-            _native_video_message(
-                sample["task"],
-                video_path,
-                content_order=self.content_order,
-            ),
+            _native_video_message(sample["task"], video_path),
             tokenize=True,
             add_generation_prompt=True,
             return_dict=True,
@@ -392,19 +261,20 @@ class QwenAttentionRuntime:
             if converted is not None:
                 raw = converted
         token_id = int(getattr(self.model.config, "video_token_id", 151656))
-        token_spans = find_contiguous_spans(
-            raw["input_ids"][0].tolist(), token_id
-        )
+        spans = find_contiguous_spans(raw["input_ids"][0].tolist(), token_id)
         grids = raw.get("video_grid_thw")
         if grids is None or int(grids.shape[0]) != 1:
             raise RuntimeError("Expected exactly one native video grid")
         temporal, height, width = (int(value) for value in grids[0].tolist())
-        image_spans = build_native_video_spans(
-            video_path,
-            token_spans,
-            (temporal, height, width),
-            spatial_merge_size=self.merge_size,
-        )
+        if len(spans) != temporal:
+            raise RuntimeError(
+                "Native video token alignment failed: "
+                f"token_spans={len(spans)}, grid_temporal={temporal}"
+            )
+        image_spans = [
+            ImageSpan(f"video_t{index}", video_path, start, end, (1, height, width))
+            for index, (start, end) in enumerate(spans)
+        ]
         visual = [position for span in image_spans for position in range(span.start, span.end)]
         metadata_value = metadata[0] if isinstance(metadata, (list, tuple)) and len(metadata) == 1 else metadata
         record = {}
@@ -421,44 +291,18 @@ class QwenAttentionRuntime:
             raise RuntimeError(
                 "Native video sampling omitted the terminal frame; cannot align endpoint bbox"
             )
-        expected_indices = sample.get("processor_frame_indices")
-        if expected_indices is not None and [int(value) for value in expected_indices] != [
-            int(value) for value in frame_indices
-        ]:
-            raise RuntimeError(
-                "Attention processor frame indices differ from the frozen input manifest"
-            )
-        expected_grid = sample.get("processor_video_grid_thw")
-        actual_grid = [
-            [int(value) for value in row] for row in grids.tolist()
-        ]
-        if expected_grid is not None and [
-            [int(value) for value in row] for row in expected_grid
-        ] != actual_grid:
-            raise RuntimeError(
-                "Attention processor video grid differs from the frozen input manifest"
-            )
-        frame_groups = temporal_source_frame_groups(
-            frame_indices,
-            temporal_patch_size=self.temporal_patch_size,
-            temporal_grid_size=temporal,
-        )
-        expected_patch = sample.get("processor_temporal_patch_size")
-        if expected_patch is None:
-            raise RuntimeError("Frozen manifest has no processor_temporal_patch_size")
-        if int(expected_patch) != self.temporal_patch_size:
-            raise RuntimeError(
-                "Attention processor temporal patch size differs from the frozen manifest"
-            )
-        record["temporal_patch_size"] = self.temporal_patch_size
-        record["source_frame_groups"] = frame_groups
-        record["video_token_run_count"] = len(token_spans)
-        record["video_token_layout"] = "timestamp_delimited_temporal_runs"
         record["target_video_span"] = image_spans[-1].label
-        record["target_source_frame_indices"] = frame_groups[-1]
-        record["target_span_alignment"] = (
-            "tracked_bbox_union_over_terminal_temporal_patch"
-        )
+        if len(frame_indices) % temporal == 0:
+            frames_per_span = len(frame_indices) // temporal
+            record["target_source_frame_indices"] = frame_indices[-frames_per_span:]
+            record["target_span_alignment"] = "terminal_merged_time_group"
+        else:
+            # Some processors pad/merge a final temporal group internally.
+            # The reported terminal index still proves that the final token
+            # span is the only endpoint-aligned span; do not infer a false
+            # one-to-one frame grouping from a non-divisible count.
+            record["target_source_frame_indices"] = [frame_indices[-1]]
+            record["target_span_alignment"] = "terminal_in_final_padded_or_merged_group"
         return PreparedAttentionInput(
             inputs=_move_inputs(self.torch, self.model, raw, self.dtype),
             spans=image_spans,
@@ -466,7 +310,6 @@ class QwenAttentionRuntime:
             target_image_path=str(Path(sample["last_image_path"]).resolve()),
             visual_positions=visual,
             protocol=self.protocol,
-            target_source_frame_indices=tuple(frame_groups[-1]),
             video_metadata=record,
         )
 
@@ -477,90 +320,14 @@ class QwenAttentionRuntime:
             else self._prepare_native(sample)
         )
 
-    def visual_positions_for_scope(
-        self, prepared: PreparedAttentionInput, scope: str
-    ) -> list[int]:
-        scope = str(scope)
-        if scope not in VISUAL_SCOPES:
-            choices = ", ".join(sorted(VISUAL_SCOPES))
-            raise ValueError(f"Unknown visual scope {scope!r}; choose one of {choices}")
-        if scope == "target_slot_only":
-            return list(range(prepared.target_span.start, prepared.target_span.end))
-        return list(prepared.visual_positions)
-
-    def _native_target_positions(
-        self, sample: dict[str, Any], prepared: PreparedAttentionInput
-    ) -> list[int]:
-        if sample.get("target_token_grounding_scope") != (
-            "terminal_temporal_patch_tracked_bbox_union"
-        ):
-            raise ValueError(
-                "Native video sample lacks the reviewed temporal-patch grounding contract"
-            )
-        raw_frames = sample.get("tracked_processor_frames")
-        if not isinstance(raw_frames, list) or not raw_frames:
-            raise ValueError(
-                "Native video target mapping requires tracked_processor_frames"
-            )
-        by_index: dict[int, dict[str, Any]] = {}
-        for raw in raw_frames:
-            if not isinstance(raw, dict):
-                raise ValueError("Tracked processor frame record is malformed")
-            index = raw.get("source_frame_index")
-            if isinstance(index, bool) or not isinstance(index, int) or index in by_index:
-                raise ValueError("Tracked processor frame index is invalid or duplicate")
-            by_index[index] = raw
-        expected = [
-            int(value) for value in (prepared.video_metadata or {}).get("frames_indices", [])
-        ]
-        if sorted(by_index) != expected:
-            raise ValueError(
-                "Tracked processor frames do not exactly cover actual sampled indices"
-            )
-
-        positions: set[int] = set()
-        visible_indices: list[int] = []
-        for index in dict.fromkeys(prepared.target_source_frame_indices):
-            frame = by_index.get(int(index))
-            if frame is None:
-                raise ValueError(f"Tracked target frame {index} is missing")
-            if frame.get("visible") is not True:
-                continue
-            path = Path(str(frame.get("image_path", ""))).resolve()
-            expected_sha = str(frame.get("image_sha256", ""))
-            if not path.is_file() or len(expected_sha) != 64:
-                raise ValueError(f"Tracked target frame {index} has invalid image provenance")
-            actual_sha = self._sha256_cache.setdefault(str(path), sha256_file(path))
-            if actual_sha != expected_sha:
-                raise ValueError(f"Tracked target frame {index} image SHA changed")
-            bbox = frame.get("bbox_xyxy", frame.get("bbox"))
-            with Image.open(path) as image:
-                size = image.size
-            mapped = bbox_to_token_positions(
-                prepared.target_span, bbox, size, self.merge_size
-            )
-            if not mapped:
-                raise ValueError(f"Tracked target frame {index} mapped to no tokens")
-            positions.update(mapped)
-            visible_indices.append(int(index))
-        if not positions:
-            raise ValueError("No visible tracked target in the terminal temporal patch")
-        if prepared.video_metadata is not None:
-            prepared.video_metadata["target_visible_source_frame_indices"] = visible_indices
-            prepared.video_metadata["target_bbox_policy"] = (
-                "token_union_over_visible_frames_in_temporal_patch"
-            )
-        return sorted(positions)
-
-    def target_positions(
-        self, sample: dict[str, Any], prepared: PreparedAttentionInput
-    ) -> list[int]:
-        if self.protocol == ROBOREWARDBENCH_NATIVE:
-            return self._native_target_positions(sample, prepared)
+    def target_positions(self, sample: dict[str, Any], prepared: PreparedAttentionInput) -> list[int]:
         with Image.open(prepared.target_image_path) as image:
             size = image.size
         positions = bbox_to_token_positions(
-            prepared.target_span, sample["last_bbox"], size, self.merge_size
+            prepared.target_span,
+            sample["last_bbox"],
+            size,
+            self.merge_size,
         )
         if not positions:
             raise ValueError("Target bbox did not map to any visual tokens")
@@ -569,23 +336,36 @@ class QwenAttentionRuntime:
     def wrong_control_positions(
         self, prepared: PreparedAttentionInput, target_positions: Sequence[int]
     ) -> tuple[list[int], str]:
-        wrong = matched_wrong_position_set(
-            prepared.target_span,
-            target_positions,
-            spatial_merge_size=self.merge_size,
+        """Return an equal-size, disjoint visual control with explicit provenance.
+
+        Prefer GRM's same-image far-spatial-region control.  When a coarse
+        visual grid makes the audited box cover that whole plane, use a
+        different equal-grid image/time plane; this preserves cardinality and
+        disjointness instead of silently dropping the frozen cohort sample.
+        """
+        same_span = matched_wrong_position_set(
+            prepared.target_span, target_positions, spatial_merge_size=self.merge_size
         )
-        if wrong is None:
-            raise RuntimeError(
-                "No equal-size disjoint wrong region exists in the target span"
+        if same_span is not None:
+            return same_span, "same_target_span_farthest_region"
+        relative = [int(position) - prepared.target_span.start for position in target_positions]
+        for span in prepared.spans:
+            if span == prepared.target_span or span.grid_thw != prepared.target_span.grid_thw:
+                continue
+            remapped = [span.start + value for value in relative]
+            candidate = matched_wrong_position_set(
+                span, remapped, spatial_merge_size=self.merge_size
             )
-        return wrong, "same_target_span_farthest_translated_footprint"
+            if candidate is not None:
+                return candidate, "equal_grid_other_visual_span_farthest_region"
+        other = sorted(set(prepared.visual_positions) - set(target_positions))
+        if len(other) >= len(target_positions):
+            return other[: len(target_positions)], "other_visual_tokens_fallback"
+        raise RuntimeError("No equal-size non-overlapping visual control region")
+
     def collect_mass(self, sample: dict[str, Any]) -> dict[str, Any]:
         prepared = self.prepare(sample)
         target = self.target_positions(sample, prepared)
-        visual_scope = str(
-            self.config.get("ranking_visual_scope", "target_slot_only")
-        )
-        visual_positions = self.visual_positions_for_scope(prepared, visual_scope)
         query = int(prepared.inputs["input_ids"].shape[1] - 1)
         raw = np.zeros((self.num_layers, self.num_heads), dtype=np.float64)
         visual = np.zeros_like(raw)
@@ -604,7 +384,7 @@ class QwenAttentionRuntime:
                     matrix[:, target].sum(dim=-1).detach().float().cpu().numpy()
                 )
                 visual[layer] = (
-                    matrix[:, visual_positions]
+                    matrix[:, prepared.visual_positions]
                     .sum(dim=-1)
                     .detach()
                     .float()
@@ -630,7 +410,7 @@ class QwenAttentionRuntime:
         if observed != set(range(self.num_layers)):
             missing = sorted(set(range(self.num_layers)) - observed)
             raise RuntimeError(f"Missing Qwen attention observations for layers {missing}")
-        fraction = len(target) / len(visual_positions)
+        fraction = len(target) / len(prepared.visual_positions)
         enrichment = np.divide(
             raw,
             visual,
@@ -645,11 +425,9 @@ class QwenAttentionRuntime:
             "visual_enrichment": enrichment.tolist(),
             "bbox_token_fraction": fraction,
             "bbox_positions": target,
-            "visual_positions": visual_positions,
-            "visual_scope": visual_scope,
+            "visual_positions": prepared.visual_positions,
             "target_span": prepared.target_span.__dict__,
             "video_metadata": prepared.video_metadata,
-            "content_order": self.content_order,
             "status": "ok",
         }
 
@@ -707,29 +485,11 @@ class QwenAttentionRuntime:
         prepared = prepared or self.prepare(sample)
         if not selected_positions:
             selected_positions = self.target_positions(sample, prepared)
-        visual_scope = str(
-            self.config.get("intervention_visual_scope", "target_slot_only")
-        )
-        expected_visual = self.visual_positions_for_scope(prepared, visual_scope)
         if not visual_positions:
-            visual_positions = expected_visual
-        elif list(visual_positions) != expected_visual:
-            raise ValueError(
-                "Supplied visual positions differ from configured intervention universe"
-            )
-        if not set(selected_positions) < set(visual_positions):
-            raise ValueError(
-                "Selected target/control positions must be a proper subset of visual universe"
-            )
+            visual_positions = prepared.visual_positions
         diagnostics: dict[str, Any] = {
             "protocol": self.protocol,
             "query_scope": query_scope,
-            "visual_scope": visual_scope,
-            "selected_token_count": len(set(selected_positions)),
-            "visual_token_count": len(set(visual_positions)),
-            "negative_visual_token_count": len(
-                set(visual_positions) - set(selected_positions)
-            ),
             "hook_active": bool(heads and bias != 0),
             "video_metadata": prepared.video_metadata,
         }

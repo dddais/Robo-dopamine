@@ -1,0 +1,47 @@
+# Secondary, instruction-conditioned attention experiment on the frozen 63
+# same-video reward=1/reward=5 pairs.  It is exploratory by design: after the
+# video-hash split its evaluation partition cannot meet the >=90 formal gate.
+grounding:
+  pair_manifest: /home/dais/workspace/Robo-Dopamine/rewardbench/raw_eval/outputs/counterfactual_reward1_reward5_pairs_official/pairs.jsonl
+  output_dir: /home/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/pairs_attention_dino_official
+  parser_model_path: /home/dais/workspace/model/Qwen3-4B-Instruct-2507
+  use_parser_model: true
+
+grounding_dino:
+  model_path: /home/dais/workspace/model/grounding-dino-base
+  device: cuda
+  box_threshold: 0.12
+  text_threshold: 0.10
+  top_n: 10
+
+attention_eval:
+  pair_manifest: /home/dais/workspace/Robo-Dopamine/rewardbench/raw_eval/outputs/counterfactual_reward1_reward5_pairs_official/pairs.jsonl
+  output_dir: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/pairs_attention_dino_official
+  grounding_run: /home/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/pairs_attention_dino_official/grounding_dino
+  model_path: /home/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  ranking_path: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/pairs_attention_dino_official/consensus_ranking.json
+  consensus_ranking_paths:
+    - /home/dais/workspace/Robo-Dopamine/results/attention/3data_3instruction_prompt_20260720/rank_carrot_forward_last_prompt/head_ranking.json
+    - /home/dais/workspace/Robo-Dopamine/results/attention/3data_3instruction_prompt_20260720/rank_cube_forward_last_prompt/head_ranking.json
+    - /home/dais/workspace/Robo-Dopamine/results/attention/3data_3instruction_prompt_20260720/rank_bottle_forward_last_prompt/head_ranking.json
+  prompt_mode: official
+  seed: 20260724
+  discovery_fraction: 0.3333333333333333
+  num_layers: 36
+  num_heads: 32
+  skip_early_layers: 2
+  query_mode: last_prompt
+  top_k: 8
+  swap_bias: 6
+  intervention_location: after_cam_high
+  top_k_sensitivity: [8, 64]
+  bias_sensitivity: [0, 2, 4, 6]
+  video_episode_count: 12
+  run_paired: true
+  bootstrap_samples: 10000
+  dtype: bfloat16
+  device_map: auto
+  min_pixels: 12544
+  max_pixels: 76800
+  max_new_tokens: 16

@@ -1,0 +1,21 @@
+# Optional single-view/blank-goal adaptation used by the completed
+# 2026-07-24 counterfactual reward=1 experiment.  It is intentionally
+# separate from reward1.yaml, which is the official-prompt control.
+raw_eval:
+  dataset_root: /home/dais/workspace/data/RoboRewardBench_counterfactual_reward1
+  split: test
+  output_dir: /home/dais/workspace/Robo-Dopamine/rewardbench/raw_eval/outputs/counterfactual_reward1_simplified_deterministic
+  model_path: /home/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  min_pixels: 12544
+  max_pixels: 76800
+  max_model_len: 8192
+  prompt_mode: simplified
+  temperature: 0.0
+  top_p: 1.0
+  top_k: -1
+  max_tokens: 16
+  shard_id: 0
+  num_shards: 1
+  temporal_ablation:
+    enabled: false

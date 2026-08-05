@@ -1,0 +1,42 @@
+sam3:
+  model_path: /home/dais/workspace/model/sam3
+  checkpoint_path: /home/dais/workspace/model/sam3/sam3.pt
+  device: cuda
+  threshold: 0.30
+  mask_threshold: 0.50
+  top_n: 10
+
+attention_eval:
+  dataset_root: /home/dais/workspace/data/RoboRewardBench_counterfactual_reward1
+  split: test
+  output_dir: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/counterfactual_reward1_sam3_consensus
+  grounding_run: /home/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/counterfactual_reward1_sam3/sam3
+  model_path: /home/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  prompt_mode: official
+  ranking_path: /home/dais/workspace/Robo-Dopamine/rewardbench/attention_eval/outputs/counterfactual_reward1_sam3_consensus/consensus_ranking.json
+  consensus_ranking_paths:
+    - /home/dais/workspace/Robo-Dopamine/results/attention/3data_3instruction_prompt_20260720/rank_carrot_forward_last_prompt/head_ranking.json
+    - /home/dais/workspace/Robo-Dopamine/results/attention/3data_3instruction_prompt_20260720/rank_cube_forward_last_prompt/head_ranking.json
+    - /home/dais/workspace/Robo-Dopamine/results/attention/3data_3instruction_prompt_20260720/rank_bottle_forward_last_prompt/head_ranking.json
+  seed: 20260724
+  discovery_fraction: 0.3333333333333333
+  top_k: 8
+  swap_bias: 6
+  intervention_location: after_cam_high
+  num_layers: 36
+  num_heads: 32
+  skip_early_layers: 2
+  query_mode: last_prompt
+
+  top_k_sensitivity: [8, 64]
+  bias_sensitivity: [0, 2, 4, 6]
+  video_episode_count: 12
+  run_paired: true
+  bootstrap_samples: 10000
+  dtype: bfloat16
+  device_map: auto
+  min_pixels: 12544
+  max_pixels: 76800
+  max_new_tokens: 16
+

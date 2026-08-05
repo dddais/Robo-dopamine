@@ -1,0 +1,19 @@
+# Optional Robo-Dopamine-I/O ablation on the same frozen 111-ID cohort.
+qwen_eval:
+  dataset_root: /home/dais/workspace/data/RoboRewardBench
+  split: test
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/rewardbench/cohorts/outputs/reward5_sam3_formal112/example_ids.json
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/qwen_eval/outputs/reward5_sam3_formal112_qwen3vl_8b_robo_dopamine_forward
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+
+  protocol: robo_dopamine_forward
+  prompt_mode: official
+  min_pixels: 12544
+  max_pixels: 76800
+  do_sample: false
+  max_new_tokens: 32
+  torch_dtype: bfloat16
+  device_map: auto
+  shard_id: 0
+  num_shards: 1

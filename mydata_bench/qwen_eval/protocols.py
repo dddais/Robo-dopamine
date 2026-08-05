@@ -20,7 +20,6 @@ from ..schemas import EpisodeRecord, FrameRecord
 ROBOREWARDBENCH_NATIVE = "roborewardbench_native"
 ROBO_DOPAMINE_FORWARD = "robo_dopamine_forward"
 PROTOCOLS = {ROBOREWARDBENCH_NATIVE, ROBO_DOPAMINE_FORWARD}
-CONTENT_ORDERS = {"text_then_video", "video_then_text"}
 
 
 def validate_protocol(value: str) -> str:
@@ -30,47 +29,18 @@ def validate_protocol(value: str) -> str:
     return value
 
 
-def validate_content_order(value: str) -> str:
-    if value not in CONTENT_ORDERS:
-        choices = ", ".join(sorted(CONTENT_ORDERS))
-        raise ValueError(f"Unknown content_order {value!r}; choose one of {choices}")
-    return value
-
-
-def native_video_message(
-    task: str,
-    video_path: str | Path,
-    *,
-    content_order: str = "text_then_video",
-) -> list[dict[str, Any]]:
-    """Build one native-video request with an explicit, frozen media order."""
-    order = validate_content_order(content_order)
-    text = {"type": "text", "text": ROBOREWARD_PROMPT.format(task=task)}
-    video = {"type": "video", "video": str(Path(video_path).resolve())}
-    content = [text, video] if order == "text_then_video" else [video, text]
-    return [{"role": "user", "content": content}]
-
-
-def protocol_descriptor(
-    protocol: str,
-    *,
-    prompt_mode: str = "official",
-    content_order: str = "text_then_video",
-) -> dict[str, Any]:
+def protocol_descriptor(protocol: str, *, prompt_mode: str = "official") -> dict[str, Any]:
     """Return the model-facing contract that is frozen into every manifest."""
     protocol = validate_protocol(protocol)
     if protocol == ROBOREWARDBENCH_NATIVE:
-        order = validate_content_order(content_order)
-        media_order = ["text", "video"] if order == "text_then_video" else ["video", "text"]
         return {
             "name": protocol,
-            "input": f"original_mp4_{order}",
+            "input": "original_mp4_text_then_video",
             "output": "ANSWER: <1-5>",
             "progress_mapping": "(answer - 1) / 4",
             "prompt_sha256": hashlib.sha256(ROBOREWARD_PROMPT.encode("utf-8")).hexdigest(),
             "prompt_contract": "RoboRewardBench discrete progress rubric",
-            "content_order": order,
-            "media_order": media_order,
+            "media_order": ["text", "video"],
         }
     # ``native_endpoint_payload`` validates the requested named prompt.
     from ..protocol import system_prompt
@@ -88,21 +58,17 @@ def protocol_descriptor(
     }
 
 
-def native_video_payload(
-    episode: EpisodeRecord, *, content_order: str = "text_then_video"
-) -> dict[str, Any]:
+def native_video_payload(episode: EpisodeRecord) -> dict[str, Any]:
     """Build the benchmark-native direct-video request without labels."""
     payload = episode.model_payload()
     path = Path(payload["video_path"]).resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
-    order = validate_content_order(content_order)
     return {
         "protocol": ROBOREWARDBENCH_NATIVE,
         "task": payload["task"],
         "video_path": str(path),
-        "content_order": order,
-        "media_order": ["text", "video"] if order == "text_then_video" else ["video", "text"],
+        "media_order": ["text", "video"],
         "prompt": ROBOREWARD_PROMPT.format(task=payload["task"]),
     }
 

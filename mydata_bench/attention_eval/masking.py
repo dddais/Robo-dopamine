@@ -7,7 +7,6 @@ import numpy as np
 
 
 QUERY_SCOPES = frozenset({"all", "prefill", "last_prompt", "decode"})
-VISUAL_SCOPES = frozenset({"target_slot_only", "all_visual"})
 
 
 @dataclass(frozen=True)
@@ -66,11 +65,10 @@ def matched_wrong_position_set(
     *,
     spatial_merge_size: int = 2,
 ) -> list[int] | None:
-    """Translate the target footprint to a disjoint far region in the same span.
+    """Find a non-overlapping grid rectangle with exactly the target token count.
 
-    The translation preserves the exact spatial footprint and token count. It
-    also supports non-rectangular unions from moving targets in one Qwen
-    temporal patch. Callers must fail closed when no same-span translation exists.
+    If the target covers multiple temporal planes or is not rectangular, this
+    intentionally returns None instead of shrinking or fabricating a control.
     """
     t, raw_h, raw_w = span.grid_thw
     grid_h = raw_h // spatial_merge_size
@@ -82,20 +80,19 @@ def matched_wrong_position_set(
         return None
     rows = [value // grid_w for value in relative]
     cols = [value % grid_w for value in relative]
-    row_min, row_max = min(rows), max(rows)
-    col_min, col_max = min(cols), max(cols)
-    height = row_max - row_min + 1
-    width = col_max - col_min + 1
-    footprint = {
-        (row - row_min, col - col_min) for row, col in zip(rows, cols)
-    }
+    height = max(rows) - min(rows) + 1
+    width = max(cols) - min(cols) + 1
+    if height * width != len(relative):
+        return None
     target = set(relative)
     candidates = []
     target_center = ((min(rows) + max(rows)) / 2, (min(cols) + max(cols)) / 2)
     for row in range(grid_h - height + 1):
         for col in range(grid_w - width + 1):
             candidate = {
-                (row + dy) * grid_w + col + dx for dy, dx in footprint
+                (row + dy) * grid_w + col + dx
+                for dy in range(height)
+                for dx in range(width)
             }
             if target & candidate:
                 continue
@@ -129,49 +126,6 @@ def select_low_ranked_heads(
     return selected
 
 
-def select_layer_matched_low_ranked_heads(
-    ranking: Sequence[dict], candidates: Sequence[Head]
-) -> list[Head]:
-    """Select bottom-ranked heads while preserving candidate layer counts.
-
-    This prevents a global bottom-K control from confounding attention rank
-    with decoder depth.
-    """
-
-    required: dict[int, int] = {}
-    excluded = {(int(head.layer), int(head.head)) for head in candidates}
-    for head in candidates:
-        layer = int(head.layer)
-        required[layer] = required.get(layer, 0) + 1
-
-    by_layer: dict[int, list[Head]] = {layer: [] for layer in required}
-    for row in reversed(list(ranking)):
-        layer = int(row["layer"])
-        head = int(row["head"])
-        if layer not in required or (layer, head) in excluded:
-            continue
-        if len(by_layer[layer]) < required[layer]:
-            by_layer[layer].append(Head(layer, head))
-
-    missing = {
-        layer: required[layer] - len(by_layer[layer])
-        for layer in required
-        if len(by_layer[layer]) != required[layer]
-    }
-    if missing:
-        raise ValueError(
-            "Insufficient non-overlapping low-ranked heads in matched layers: "
-            f"{missing}"
-        )
-
-    selected: list[Head] = []
-    for layer in required:
-        selected.extend(by_layer[layer])
-    if len(selected) != len(candidates):
-        raise AssertionError("Layer-matched low-rank selection changed head count")
-    return selected
-
-
 def make_attention_mask_hook(
     head_indices: Sequence[int],
     selected_positions: Sequence[int],
@@ -201,8 +155,6 @@ def make_attention_mask_hook(
     other = sorted({int(value) for value in other_visual_positions})
     if any(value < 0 or value >= num_query_heads for value in heads):
         raise ValueError("Selected head index is outside query-head range")
-    if set(selected) & set(other):
-        raise ValueError("Selected and other visual positions must be disjoint")
     base_length = max(selected + other, default=-1) + 1
     base = torch.zeros((1, num_query_heads, 1, base_length), dtype=torch.float32)
     for head in heads:
@@ -214,19 +166,13 @@ def make_attention_mask_hook(
     diagnostics.update(
         {
             "calls": 0,
-            "missing_mask_calls": 0,
             "prefill_calls": 0,
             "decode_calls": 0,
-            "observed_query_rows": 0,
-            "prefill_query_rows": 0,
-            "decode_query_rows": 0,
             "applied_calls": 0,
             "skipped_calls": 0,
             "prefill_applied_calls": 0,
             "decode_applied_calls": 0,
             "applied_query_rows": 0,
-            "prefill_applied_query_rows": 0,
-            "decode_applied_query_rows": 0,
             "selected_heads": heads,
             # Per-record outputs retain the selected/visual token positions.
             # Keep only compact evidence here because this dictionary is
@@ -241,39 +187,16 @@ def make_attention_mask_hook(
     )
 
     def hook(_module, args, kwargs):
-        diagnostics["calls"] += 1
         mask = kwargs.get("attention_mask")
         if mask is None:
-            diagnostics["missing_mask_calls"] += 1
-            diagnostics["skipped_calls"] += 1
             return None
-        if mask.ndim != 4:
-            raise RuntimeError(
-                f"Attention hook requires a 4D additive mask, got shape={tuple(mask.shape)}"
-            )
-        if int(mask.shape[0]) != 1 or int(mask.shape[1]) not in {
-            1,
-            num_query_heads,
-        }:
-            raise RuntimeError(
-                "Attention hook received an incompatible batch/head mask shape: "
-                f"{tuple(mask.shape)}"
-            )
+        diagnostics["calls"] += 1
         query_length = int(mask.shape[-2])
-        key_length = int(mask.shape[-1])
-        if query_length < 1 or key_length < base_length:
-            raise RuntimeError(
-                "Attention hook mask does not contain every declared query/key "
-                f"position: shape={tuple(mask.shape)}, required_keys={base_length}"
-            )
         is_decode = query_length == 1
-        diagnostics["observed_query_rows"] += query_length
         if is_decode:
             diagnostics["decode_calls"] += 1
-            diagnostics["decode_query_rows"] += query_length
         else:
             diagnostics["prefill_calls"] += 1
-            diagnostics["prefill_query_rows"] += query_length
         should_apply = (
             query_scope == "all"
             or (query_scope in {"prefill", "last_prompt"} and not is_decode)
@@ -283,8 +206,11 @@ def make_attention_mask_hook(
             diagnostics["skipped_calls"] += 1
             return None
         bias = base.to(device=mask.device, dtype=mask.dtype)
+        key_length = int(mask.shape[-1])
         if key_length > base_length:
             bias = torch.nn.functional.pad(bias, (0, key_length - base_length))
+        else:
+            bias = bias[..., :key_length]
         if query_scope == "last_prompt":
             scoped = torch.zeros(
                 (1, num_query_heads, query_length, key_length),
@@ -300,10 +226,8 @@ def make_attention_mask_hook(
         diagnostics["applied_query_rows"] += applied_rows
         if is_decode:
             diagnostics["decode_applied_calls"] += 1
-            diagnostics["decode_applied_query_rows"] += applied_rows
         else:
             diagnostics["prefill_applied_calls"] += 1
-            diagnostics["prefill_applied_query_rows"] += applied_rows
         new_kwargs = dict(kwargs)
         new_kwargs["attention_mask"] = mask + bias
         return args, new_kwargs

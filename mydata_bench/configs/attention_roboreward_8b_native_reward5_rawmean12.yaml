@@ -1,0 +1,16 @@
+attention_steer:
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/roboreward_eval/attention_outputs/roboreward_8b_checkpoint_native_rawmean12/reward5_sam3_formal112
+  model_path: /mnt/public1/dais/workspace/model/RoboReward-8B
+  protocol: roborewardbench_native
+  dataset_root: /home/dais/workspace/data/RoboRewardBench
+  split: test
+  example_ids_file: /mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/cohorts/outputs/reward5_sam3_formal112/example_ids.json
+  grounding_run: /mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/grounding/outputs/reward5_full_sam3/sam3
+  ranking_path: /mnt/public1/dais/workspace/Robo-Dopamine/rewardbench/roboreward_eval/attention_outputs/roboreward_8b_checkpoint_native_rawmean12/consensus_ranking.json
+  torch_dtype: bfloat16
+  device_map: auto
+  attention_video_max_frames: 8
+  max_new_tokens: 5000
+  top_k: 8
+  swap_bias: 6
+  steering_query_scope: all
