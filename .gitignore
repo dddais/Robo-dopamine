@@ -233,3 +233,12 @@ mydata_bench/**/.cache/
 mydata_bench/**/frames/
 mydata_bench/**/runs/
 mydata_bench/**/*.jsonl.tmp
+
+# Keep the three small experiment documents versioned; all other outputs stay ignored.
+mydata_bench/outputs/
+mydata_bench/outputs/**
+mydata_bench/outputs/my_dataset/
+mydata_bench/outputs/my_dataset/ljx_lfz_cf_v1/
+mydata_bench/outputs/my_dataset/ljx_lfz_cf_v1/exp_record.md
+mydata_bench/outputs/my_dataset/ljx_lfz_cf_v1/exp_use.md
+mydata_bench/outputs/my_dataset/ljx_lfz_cf_v1/ranking_summary.md

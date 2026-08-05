@@ -1,17 +1,19 @@
-"""Loopback-only reviewer for ``my_dataset`` SAM3 grounding proposals.
+"""Loopback-only reviewer for the current tracking-v2 grounding workflow.
 
-The reviewer consumes ``requests.jsonl`` and ``proposals.jsonl`` produced by
-``ground-prepare``/``ground-propose``.  Every decision is appended to
-``review_history.jsonl`` and the latest decision per example is materialized as
-the duplicate-free ``reviews.jsonl`` consumed by ``ground-audit``.
+The reviewer consumes the requests and tracks produced by
+``ground-track-prepare``/``ground-track-run``. Every decision is appended to
+``review_history.jsonl`` and the latest decision per example is materialized
+as the duplicate-free ``reviews.jsonl`` consumed by ``ground-audit``.
 
 Run from the Robo-Dopamine repository root, forward the loopback port when
 needed, and open the printed URL in a browser::
 
     python mydata_bench/review_sam3_grounding_web.py \
-      --run-dir mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_auto_v2_low015_top40 \
-      --output-dir mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_reviewed_v1 \
-      --reviewer <reviewer-id>
+      --mode tracking_v2 \
+      --run-dir mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_v2 \
+      --output-dir mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_reviewed_v2 \
+      --reviewer <reviewer-id> \
+      --port 8766
 """
 
 from __future__ import annotations
@@ -820,7 +822,7 @@ class TrackedGroundingReviewStore:
         tracker = self.manifest.get("tracker")
         if (
             not isinstance(tracker, Mapping)
-            or tracker.get("backend") != "official_sam3_video_predictor"
+            or tracker.get("backend") != "official_sam3_sam2_style_instance_tracker"
             or not str(tracker.get("tracker_fingerprint", ""))
             or not str(tracker.get("official_source_path", ""))
             or not str(tracker.get("checkpoint_path", ""))
@@ -834,10 +836,12 @@ class TrackedGroundingReviewStore:
             raise ValueError(f"{identity}: predictor provenance is missing")
         required = (
             "official_source_path", "model_builder_sha256",
-            "video_predictor_sha256", "checkpoint_path", "checkpoint_sha256",
+            "video_predictor_sha256", "tracking_predictor_sha256",
+            "checkpoint_path", "checkpoint_sha256",
             "source_tree_fingerprint", "source_tree_file_count",
             "sam3_video_inference_files", "tracking_predictor_files",
-            "bpe_vocab_files", "tracker_fingerprint",
+            "bpe_vocab_files", "orchestrator_source_path",
+            "orchestrator_source_sha256", "tracker_fingerprint",
         )
         if any(key not in value for key in required):
             raise ValueError(f"{identity}: incomplete tracker provenance")
@@ -846,12 +850,30 @@ class TrackedGroundingReviewStore:
             "official_source_path", "checkpoint_path", "tracker_fingerprint"
         )):
             raise ValueError(f"{identity}: tracker provenance differs from manifest")
+        fingerprint_view = dict(value)
+        for key in (
+            "cache_hit", "cache_key", "cache_path",
+            "source_video_path", "source_video_sha256",
+        ):
+            fingerprint_view.pop(key, None)
+        fingerprint = fingerprint_view.pop("tracker_fingerprint", None)
+        if fingerprint != object_fingerprint(fingerprint_view):
+            raise ValueError(f"{identity}: tracker provenance fingerprint mismatch")
+        self._verified_file(
+            value["orchestrator_source_path"],
+            value["orchestrator_source_sha256"],
+            identity=f"{identity}/orchestrator",
+        )
         source_value = str(value["official_source_path"])
         if source_value == "injected-test-double":
             if (
                 value["checkpoint_path"] != "injected-test-double"
                 or value["source_tree_file_count"] != 0
-                or any(value[key] != [] for key in required[7:10])
+                or any(value[key] != [] for key in (
+                    "sam3_video_inference_files",
+                    "tracking_predictor_files",
+                    "bpe_vocab_files",
+                ))
             ):
                 raise ValueError(f"{identity}: malformed injected tracker provenance")
             return dict(value)
@@ -863,6 +885,11 @@ class TrackedGroundingReviewStore:
         self._verified_file(
             source / "sam3" / "model" / "sam3_video_predictor.py",
             value["video_predictor_sha256"], identity=f"{identity}/video_predictor",
+        )
+        self._verified_file(
+            source / "sam3" / "model" / "sam3_tracking_predictor.py",
+            value["tracking_predictor_sha256"],
+            identity=f"{identity}/tracking_predictor",
         )
         self._verified_file(
             value["checkpoint_path"], value["checkpoint_sha256"],
@@ -886,9 +913,6 @@ class TrackedGroundingReviewStore:
         }
         if any(value[key] != expected for key, expected in inventories.items()):
             raise ValueError(f"{identity}: tracker source-tree inventory changed")
-        base = {key: value[key] for key in required if key != "tracker_fingerprint"}
-        if value["tracker_fingerprint"] != object_fingerprint(base):
-            raise ValueError(f"{identity}: tracker provenance fingerprint mismatch")
         return dict(value)
 
     def _verify_request_sources(
@@ -1130,12 +1154,22 @@ class TrackedGroundingReviewStore:
             "height": height,
         }
         if bbox_key is not None:
-            raw, bbox, clipped = _clip_bbox(
-                value.get(bbox_key),
-                width=width,
-                height=height,
-                identity=f"{identity}/bbox",
-            )
+            visible = value.get("visible")
+            if not isinstance(visible, bool):
+                raise ValueError(f"{identity}: visibility flag is missing")
+            if visible:
+                raw, bbox, clipped = _clip_bbox(
+                    value.get(bbox_key),
+                    width=width,
+                    height=height,
+                    identity=f"{identity}/bbox",
+                )
+            else:
+                if value.get(bbox_key) is not None:
+                    raise ValueError(
+                        f"{identity}: invisible frame must not carry a bbox"
+                    )
+                raw, bbox, clipped = None, None, False
             obj_id = value.get("obj_id")
             if obj_id is None or isinstance(obj_id, bool):
                 raise ValueError(f"{identity}: invalid obj_id")
@@ -1153,15 +1187,27 @@ class TrackedGroundingReviewStore:
                     "bbox_clipped": clipped,
                     "obj_id": obj_id,
                     "score": float(score),
+                    "visible": visible,
                 }
             )
             mask_path, mask_sha = value.get("mask_path"), value.get("mask_sha256")
             if (mask_path is None) != (mask_sha is None):
                 raise ValueError(f"{identity}: mask path/SHA mismatch")
+            verified_mask = None
             if mask_path is not None:
-                self._verified_file(
+                verified_mask = self._verified_file(
                     mask_path, mask_sha, identity=f"{identity}/mask"
                 )
+            if not visible:
+                if verified_mask is None:
+                    raise ValueError(
+                        f"{identity}: invisible frame requires a frozen empty mask"
+                    )
+                with Image.open(verified_mask) as mask_image:
+                    if mask_image.convert("L").getbbox() is not None:
+                        raise ValueError(
+                            f"{identity}: invisible frame mask is not empty"
+                        )
         return result
 
     @staticmethod
@@ -1333,7 +1379,8 @@ class TrackedGroundingReviewStore:
             if terminals[model] is not None:
                 expected = request["model_frame_bindings"][model]["terminal"]
                 if (
-                    terminals[model]["obj_id"] != locked_obj_id
+                    terminals[model]["visible"] is not True
+                    or terminals[model]["obj_id"] != locked_obj_id
                     or terminals[model]["source_frame_index"]
                     != expected["source_frame_index"]
                     or terminals[model]["image_sha256"]
@@ -2160,7 +2207,7 @@ function startDraw(){if(state.manual_artifact_frozen)return;drawing=true;render(
 function clearManual(){manualBox=null;dirty=true;render()}
 function selectTrack(id){selectedId=id;render()}
 function renderGallery(){const o=selectedOption(),gallery=document.querySelector('#gallery'),status=document.querySelector('#trackStatus');if(!o?.track){status.innerHTML='<span class="warning">该候选没有预计算 track。</span>';gallery.innerHTML='';return}const t=o.track;status.innerHTML=(t.valid?'<span class="ok">track有效</span>':'<span class="warning">track无效：'+esc(t.error||t.status)+'</span>')+' · locked obj_id='+esc(t.locked_obj_id);const rows=[];for(const f of t.frames)rows.push({title:'关键帧 '+f.source_frame_index+' · obj_id '+f.obj_id,frame:f,color:'#0f766e'});for(const [m,f] of Object.entries(t.terminals))if(f)rows.push({title:m+' terminal '+f.source_frame_index+' · obj_id '+f.obj_id,frame:f,color:'#b45309'});gallery.innerHTML=rows.map((r,i)=>'<div class="frame"><b>'+esc(r.title)+'</b><canvas id="track-'+i+'"></canvas></div>').join('');rows.forEach((r,i)=>paintStatic(document.querySelector('#track-'+i),r.frame,r.color,'obj '+r.frame.obj_id))}
-function paintStatic(canvas,frame,color,label){const img=new Image();img.onload=()=>{canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const x=canvas.getContext('2d');x.drawImage(img,0,0,canvas.width,canvas.height);drawBox(x,frame.bbox,color,label,4)};img.src=frame.image_url}
+function paintStatic(canvas,frame,color,label){const img=new Image();img.onload=()=>{canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const x=canvas.getContext('2d');x.drawImage(img,0,0,canvas.width,canvas.height);if(frame.visible===false||!frame.bbox){x.fillStyle='#b91c1c';x.font='18px sans-serif';x.fillText(label+' · 当前帧不可见',12,28);return}drawBox(x,frame.bbox,color,label,4)};img.src=frame.image_url}
 async function submit(payload){if(busy)return;busy=true;try{const r=await fetch('/api/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),v=await r.json();if(!r.ok)throw new Error(v.error||'保存失败');state=v;dirty=false;render()}catch(e){document.querySelector('#message').textContent=e.message}finally{busy=false}}
 function accept(id,source){submit({example_id:state.current.example_id,status:'eligible',candidate_id:id,decision_source:source})}
 function saveManual(){if(!manualBox||state.manual_artifact_frozen)return;submit({example_id:state.current.example_id,status:'needs_retrack',first_bbox:manualBox})}

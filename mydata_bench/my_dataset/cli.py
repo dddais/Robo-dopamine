@@ -123,6 +123,18 @@ def parser() -> argparse.ArgumentParser:
     track_run.add_argument("--config", required=True)
     track_run.add_argument("--retry-failed", action="store_true")
     track_manual = commands.add_parser("ground-track-manual", help="run reviewer-supplied manual anchors")
+    track_run.add_argument("--shard-id", type=int)
+    track_run.add_argument("--num-shards", type=int)
+    track_reconcile = commands.add_parser(
+        "ground-track-reconcile",
+        help="rerun artifacts bound to stale tracking provenance",
+    )
+    track_reconcile.add_argument("--config", required=True)
+    track_finalize = commands.add_parser(
+        "ground-track-finalize",
+        help="freeze a complete sharded tracking manifest",
+    )
+    track_finalize.add_argument("--config", required=True)
     track_manual.add_argument("--config", required=True)
     track_manual.add_argument("--anchors", required=True)
     track_manual.add_argument("--output", required=True)
@@ -287,9 +299,22 @@ def main(argv: list[str] | None = None) -> None:
 
         print(
             run_tracked_grounding(
-                load_config(args.config), retry_failed=args.retry_failed
+                load_config(args.config),
+                retry_failed=args.retry_failed,
+                shard_id=args.shard_id,
+                num_shards=args.num_shards,
             )
         )
+        return
+    if args.command == "ground-track-reconcile":
+        from .tracking_finalize import reconcile_stale_tracking_provenance
+
+        print(reconcile_stale_tracking_provenance(load_config(args.config)))
+        return
+    if args.command == "ground-track-finalize":
+        from .tracking_finalize import finalize_sharded_tracking_manifest
+
+        print(finalize_sharded_tracking_manifest(load_config(args.config)))
         return
     if args.command == "ground-track-manual":
         from .tracked_grounding import run_manual_retracks

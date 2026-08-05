@@ -1,0 +1,43 @@
+name: rewardbench-sam3
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - ffmpeg
+  - pip
+  # Vendored official SAM3 imports pkg_resources during module loading.
+  - setuptools>=61,<81
+  - wheel
+  # Official SAM3 video runtime monitors worker processes through psutil.
+  - psutil
+  - pip:
+      # The pytorch/nvidia conda channels expose pytorch-cuda only through
+      # CUDA 12.4 and no PyTorch 2.8 GPU conda build.  Do not replace these
+      # with conda packages: the solver otherwise selects CPU PyTorch 2.8.
+      # The server's CUDA-13.0 driver supports these official CUDA-12.8 wheels.
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.8.0+cu128
+      - torchvision==0.23.0+cu128
+      # Local SAM3 metadata declares transformers_version=5.0.0.dev0.
+      # 5.0.0 is the first released package containing Sam3Model/Sam3Processor.
+      - transformers==5.0.0
+      - accelerate==1.12.0
+      - opencv-python-headless==4.12.0.88
+      - pillow==12.0.0
+      - numpy==2.2.6
+      - safetensors==0.7.0
+      - jsonschema==4.25.1
+      # Official runtime dependencies from the vendored SAM3 pyproject.toml.
+      - timm>=1.0.17
+      - tqdm
+      - ftfy==6.1.1
+      - regex
+      - iopath>=0.1.10
+      - einops==0.8.2
+      - decord==0.6.0
+      - pycocotools==2.0.11
+      - typing-extensions
+      - huggingface-hub
+      # Install the audited vendored official source as the importable sam3 package.
+      - -e /mnt/public1/dais/workspace/cap-x/capx/third_party/sam3

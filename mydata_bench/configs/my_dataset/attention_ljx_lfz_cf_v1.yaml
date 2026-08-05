@@ -1,7 +1,0 @@
-my_dataset_attention:
-  inputs_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/model_inputs/inputs.jsonl
-  split_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/whitebox_split/split.json
-  grounding_requests_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding/requests.jsonl
-  grounding_reviews_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding/reviews.jsonl
-  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/attention_inputs
-

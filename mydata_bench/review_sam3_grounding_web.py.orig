@@ -1,0 +1,2368 @@
+"""Loopback-only reviewer for the current tracking-v2 grounding workflow.
+
+The reviewer consumes the requests and tracks produced by
+``ground-track-prepare``/``ground-track-run``. Every decision is appended to
+``review_history.jsonl`` and the latest decision per example is materialized
+as the duplicate-free ``reviews.jsonl`` consumed by ``ground-audit``.
+
+Run from the Robo-Dopamine repository root, forward the loopback port when
+needed, and open the printed URL in a browser::
+
+    python mydata_bench/review_sam3_grounding_web.py \
+      --mode tracking_v2 \
+      --run-dir mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_v2 \
+      --output-dir mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_reviewed_v2 \
+      --reviewer <reviewer-id> \
+      --port 8766
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import mimetypes
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from threading import Lock
+from typing import Any, Mapping
+from urllib.parse import parse_qs, urlparse
+
+from PIL import Image
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mydata_bench.io import (
+    append_jsonl,
+    object_fingerprint,
+    read_jsonl,
+    sha256_file,
+    write_json,
+    write_jsonl,
+)
+from mydata_bench.my_dataset.grounding_manifest import (
+    GROUNDING_REQUEST_SCHEMA,
+    GROUNDING_REVIEW_SCHEMA,
+)
+from mydata_bench.my_dataset.tracked_grounding import (
+    TRACKED_GROUNDING_ARTIFACT_SCHEMA as TRACKING_ARTIFACT_SCHEMA,
+    TRACKED_GROUNDING_MANIFEST_SCHEMA as TRACKING_MANIFEST_SCHEMA,
+    TRACKED_GROUNDING_MANUAL_ANCHOR_SCHEMA as MANUAL_ANCHOR_SCHEMA,
+    TRACKED_GROUNDING_PROPOSAL_SCHEMA as TRACKING_PROPOSAL_SCHEMA,
+    TRACKED_GROUNDING_REQUEST_SCHEMA as TRACKING_REQUEST_SCHEMA,
+    TRACKED_GROUNDING_TRACK_SCHEMA as TRACK_SCHEMA,
+    derive_manual_anchor_id,
+    validate_processor_content_order_contract,
+)
+
+
+MODELS = ("roboreward", "qwen", "grm")
+REVIEW_STATUSES = {"eligible", "ineligible"}
+TRACKING_REVIEW_SCHEMA = "my_dataset.tracked_grounding_review.v2"
+TRACKING_REVIEW_SESSION_SCHEMA = "my_dataset.tracked_grounding_review_session.v2"
+TRACKING_REVIEW_STATUSES = {"eligible", "needs_retrack", "skipped"}
+
+SKIP_CODES = {"reviewer_skip"}
+
+
+def _unique_rows(path: Path, *, key: str) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for number, row in enumerate(read_jsonl(path), 1):
+        identity = str(row.get(key, "")).strip()
+        if not identity:
+            raise ValueError(f"{path}:{number} has no {key}")
+        if identity in rows:
+            raise ValueError(f"{path}:{number} duplicates {key}={identity!r}")
+        rows[identity] = row
+    if not rows:
+        raise ValueError(f"{path} is empty")
+    return rows
+
+
+def _latest_reviews(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.is_file():
+        return {}
+    latest: dict[str, dict[str, Any]] = {}
+    for number, row in enumerate(read_jsonl(path), 1):
+        example_id = str(row.get("example_id", "")).strip()
+        if not example_id:
+            raise ValueError(f"{path}:{number} has no example_id")
+        status = row.get("status")
+        if status not in REVIEW_STATUSES:
+            raise ValueError(f"{path}:{number} has invalid review status {status!r}")
+        latest[example_id] = row
+    return latest
+
+
+def _expected_image(request: Mapping[str, Any], model: str) -> Path:
+    frames = request.get("model_frames")
+    frame = frames.get(model) if isinstance(frames, Mapping) else None
+    if not isinstance(frame, Mapping):
+        raise ValueError(f"{request.get('example_id')}/{model}: missing model frame")
+    if model in {"roboreward", "qwen"}:
+        value = frame.get("image_path")
+    else:
+        terminal = frame.get("terminal_views")
+        front = terminal.get("front") if isinstance(terminal, Mapping) else None
+        value = front.get("image_path") if isinstance(front, Mapping) else None
+    path = Path(str(value or "")).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path
+
+
+def _expected_image_sha256(request: Mapping[str, Any], model: str) -> str:
+    frames = request.get("model_frames")
+    frame = frames.get(model) if isinstance(frames, Mapping) else None
+    if not isinstance(frame, Mapping):
+        return ""
+    if model in {"roboreward", "qwen"}:
+        return str(frame.get("image_sha256", ""))
+    terminal = frame.get("terminal_views")
+    front = terminal.get("front") if isinstance(terminal, Mapping) else None
+    return str(front.get("image_sha256", "")) if isinstance(front, Mapping) else ""
+
+
+def _finite_bbox(value: Any, *, identity: str) -> list[float]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(float(item))
+            for item in value
+        )
+    ):
+        raise ValueError(f"{identity}: bbox must contain four finite numbers")
+    bbox = [float(item) for item in value]
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        raise ValueError(f"{identity}: bbox must have positive area")
+    return bbox
+
+
+def _clip_bbox(
+    value: Any, *, width: int, height: int, identity: str
+) -> tuple[list[float], list[float], bool]:
+    """Clip detector overflow while rejecting a box outside the image."""
+    raw = _finite_bbox(value, identity=identity)
+    clipped = [
+        min(max(raw[0], 0.0), float(width)),
+        min(max(raw[1], 0.0), float(height)),
+        min(max(raw[2], 0.0), float(width)),
+        min(max(raw[3], 0.0), float(height)),
+    ]
+    if clipped[2] <= clipped[0] or clipped[3] <= clipped[1]:
+        raise ValueError(f"{identity}: bbox is outside the image after clipping")
+    changed = any(abs(a - b) > 1e-9 for a, b in zip(raw, clipped, strict=True))
+    return raw, clipped, changed
+
+
+
+def _intersection_area(left: list[float], right: list[float]) -> float:
+    width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+    height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+    return width * height
+
+@dataclass
+class Sam3ReviewStore:
+    run_dir: Path
+    reviewer_id: str
+    output_dir: Path | None = None
+
+    def __post_init__(self) -> None:
+        self.run_dir = self.run_dir.resolve()
+        self.output_dir = (
+            self.output_dir.resolve()
+            if self.output_dir is not None
+            else self.run_dir / "human_review_v1"
+        )
+        self.reviewer_id = self.reviewer_id.strip()
+        if not self.reviewer_id:
+            raise ValueError("reviewer ID must not be empty")
+        self.requests_path = self.run_dir / "requests.jsonl"
+        self.proposals_path = self.run_dir / "proposals.jsonl"
+        for path in (self.requests_path, self.proposals_path):
+            if not path.is_file():
+                raise FileNotFoundError(path)
+        self.requests_sha256 = sha256_file(self.requests_path)
+        self.proposals_sha256 = sha256_file(self.proposals_path)
+
+        self.requests = _unique_rows(self.requests_path, key="example_id")
+        bad_request_schema = sorted(
+            example_id
+            for example_id, row in self.requests.items()
+            if row.get("schema_version") != GROUNDING_REQUEST_SCHEMA
+        )
+        if bad_request_schema:
+            raise ValueError(f"request schema mismatch: {bad_request_schema[:10]}")
+        partition_order = {"discovery": 0, "validation": 1, "test": 2}
+        self.example_ids = sorted(
+            self.requests,
+            key=lambda example_id: (
+                partition_order.get(str(self.requests[example_id].get("partition")), 9),
+                str(self.requests[example_id].get("group_id", "")),
+                str(self.requests[example_id].get("task_id", "")), example_id,
+            ),
+        )
+        self.index_by_id = {
+            example_id: index for index, example_id in enumerate(self.example_ids)
+        }
+
+        proposals: dict[tuple[str, str], dict[str, Any]] = {}
+        for number, row in enumerate(read_jsonl(self.proposals_path), 1):
+            key = (
+                str(row.get("example_id", "")).strip(),
+                str(row.get("model_family", "")).strip(),
+            )
+            if not all(key) or key[1] not in MODELS:
+                raise ValueError(f"{self.proposals_path}:{number}: invalid proposal key {key}")
+            # proposals.jsonl is resumable/append-only; the latest attempt wins.
+            proposals[key] = row
+        expected = {
+            (example_id, model)
+            for example_id in self.example_ids
+            for model in MODELS
+        }
+        if set(proposals) != expected:
+            missing = sorted(expected - set(proposals))[:10]
+            extra = sorted(set(proposals) - expected)[:10]
+            raise ValueError(f"proposal coverage mismatch: missing={missing}, extra={extra}")
+
+        self._image_sizes: dict[Path, tuple[int, int]] = {}
+        image_sha_cache: dict[Path, str] = {}
+        self.proposals: dict[str, dict[str, dict[str, Any]]] = {}
+        for example_id in self.example_ids:
+            request = self.requests[example_id]
+            model_rows: dict[str, dict[str, Any]] = {}
+            for model in MODELS:
+                row = proposals[(example_id, model)]
+                if row.get("schema_version") != GROUNDING_REQUEST_SCHEMA:
+                    raise ValueError(f"{example_id}/{model}: proposal schema mismatch")
+                if row.get("status") != "ok":
+                    raise ValueError(f"{example_id}/{model}: latest proposal is not ok")
+                expected_image = _expected_image(request, model)
+                actual_image = Path(str(row.get("image_path", ""))).resolve()
+                if actual_image != expected_image:
+                    raise ValueError(
+                        f"{example_id}/{model}: proposal image differs from request"
+                    )
+                expected_digest = _expected_image_sha256(request, model)
+                recorded_digest = str(row.get("image_sha256", ""))
+                if not expected_digest or recorded_digest != expected_digest:
+                    raise ValueError(
+                        f"{example_id}/{model}: request/proposal image SHA mismatch"
+                    )
+                if actual_image not in image_sha_cache:
+                    image_sha_cache[actual_image] = sha256_file(actual_image)
+                if image_sha_cache[actual_image] != expected_digest:
+                    raise ValueError(
+                        f"{example_id}/{model}: frozen review image content changed"
+                    )
+                width, height = self._size(actual_image)
+
+                candidates = row.get("candidates")
+                if not isinstance(candidates, list):
+                    raise ValueError(f"{example_id}/{model}: candidates must be a list")
+                candidate_indices: set[int] = set()
+                for index, candidate in enumerate(candidates):
+                    raw_index = candidate.get("candidate_index", index)
+                    if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+                        raise ValueError(
+                            f"{example_id}/{model}: invalid candidate index {raw_index!r}"
+                        )
+                    if raw_index in candidate_indices:
+                        raise ValueError(f"{example_id}/{model}: duplicate candidate index")
+                    candidate_indices.add(raw_index)
+                    _clip_bbox(
+                        candidate.get("bbox"), width=width, height=height,
+                        identity=f"{example_id}/{model}/candidate/{raw_index}",
+                    )
+                model_rows[model] = row
+            self.proposals[example_id] = model_rows
+
+        self.history_path = self.output_dir / "review_history.jsonl"
+        self.reviews_path = self.output_dir / "reviews.jsonl"
+        self.session_path = self.output_dir / "review_session.json"
+        session = {
+            "schema_version": "my_dataset.grounding_review_session.v1",
+            "requests_path": str(self.requests_path.resolve()),
+            "requests_sha256": self.requests_sha256,
+            "proposals_path": str(self.proposals_path.resolve()),
+            "proposals_sha256": self.proposals_sha256,
+            "review_schema_version": GROUNDING_REVIEW_SCHEMA,
+            "reviewer_id": self.reviewer_id,
+            "frozen_images_verified": True,
+        }
+        if self.session_path.is_file():
+            existing_session = json.loads(self.session_path.read_text(encoding="utf-8"))
+            if existing_session != session:
+                raise ValueError("review session differs from frozen source or reviewer")
+        elif self.reviews_path.exists() or self.history_path.exists():
+            raise ValueError("review outputs exist without review_session.json")
+        else:
+            write_json(self.session_path, session)
+
+        history = _latest_reviews(self.history_path)
+        canonical = history if history else _latest_reviews(self.reviews_path)
+        for example_id, review in canonical.items():
+            if (
+                review.get("schema_version") != GROUNDING_REVIEW_SCHEMA
+                or review.get("human_reviewed") is not True
+                or review.get("review_id") != self.reviewer_id
+                or review.get("request_sha256") != self.requests_sha256
+                or review.get("proposals_sha256") != self.proposals_sha256
+            ):
+                raise ValueError(
+                    f"{example_id}: existing review differs from frozen review session"
+                )
+
+        unknown = sorted(set(canonical) - set(self.requests))
+        if unknown:
+            raise ValueError(f"existing reviews contain unknown examples: {unknown[:10]}")
+        self.reviews = canonical
+        self._lock = Lock()
+        if history:
+            self._materialize()
+
+    def _materialize(self) -> None:
+        temporary = self.reviews_path.with_name(f".{self.reviews_path.name}.tmp")
+        write_jsonl(
+            temporary,
+            (self.reviews[example_id] for example_id in sorted(self.reviews)),
+        )
+        temporary.replace(self.reviews_path)
+
+    def _size(self, path: Path) -> tuple[int, int]:
+        if path not in self._image_sizes:
+            with Image.open(path) as image:
+                self._image_sizes[path] = tuple(map(int, image.size))
+        return self._image_sizes[path]
+
+    def _public_model(self, example_id: str, model: str) -> dict[str, Any]:
+        row = self.proposals[example_id][model]
+        image_path = Path(str(row["image_path"])).resolve()
+        width, height = self._size(image_path)
+        candidates = []
+        for index, candidate in enumerate(row["candidates"]):
+            candidate_index = int(candidate.get("candidate_index", index))
+            raw_bbox, bbox, bbox_clipped = _clip_bbox(
+                candidate.get("bbox"), width=width, height=height,
+                identity=f"{example_id}/{model}/candidate/{candidate_index}",
+            )
+            candidates.append(
+                {
+                    "candidate_index": candidate_index,
+                    "bbox": bbox,
+                    "raw_bbox": raw_bbox,
+                    "bbox_clipped": bbox_clipped,
+                    "query": candidate.get("query"),
+                    "label": candidate.get("label"),
+                    "score": candidate.get("score"),
+                    "mask_available": bool(candidate.get("mask_path")),
+                }
+            )
+        return {
+            "image_url": f"/api/image?example_id={example_id}&model={model}",
+            "image_sha256": str(row.get("image_sha256", "")),
+            "width": width,
+            "height": height,
+            "candidates": candidates,
+        }
+
+    def _public_example(self, example_id: str) -> dict[str, Any]:
+        request = self.requests[example_id]
+        models = {model: self._public_model(example_id, model) for model in MODELS}
+        sync_signatures = {
+            (
+                value["image_sha256"],
+                value["width"],
+                value["height"],
+                json.dumps(value["candidates"], sort_keys=True),
+            )
+            for value in models.values()
+        }
+
+        return {
+            "example_id": example_id,
+            "group_id": request.get("group_id"),
+            "task_id": request.get("task_id"),
+            "partition": request.get("partition"),
+            "instruction": request.get("instruction"),
+            "roles": request.get("roles"),
+            "candidate_sync_safe": len(sync_signatures) == 1,
+            "models": models,
+        }
+
+    def state(
+        self, example_id: str | None = None, position: int | None = None
+    ) -> dict[str, Any]:
+        if example_id is not None and position is not None:
+            raise ValueError("specify example_id or position, not both")
+        if position is not None:
+            if not 1 <= position <= len(self.example_ids):
+                raise ValueError(f"position must be in 1..{len(self.example_ids)}")
+            current_id = self.example_ids[position - 1]
+        elif example_id is not None:
+            if example_id not in self.index_by_id:
+                raise KeyError("unknown example")
+            current_id = example_id
+        else:
+            current_id = next(
+                (value for value in self.example_ids if value not in self.reviews), None
+            )
+        if current_id is None:
+            index = len(self.example_ids)
+            current = None
+            saved = None
+        else:
+            index = self.index_by_id[current_id]
+            current = self._public_example(current_id)
+            saved = self.reviews.get(current_id)
+        dispositions: dict[str, int] = {"eligible": 0, "ineligible": 0}
+        for row in self.reviews.values():
+            status = str(row.get("status"))
+            if status in dispositions:
+                dispositions[status] += 1
+        return {
+            "total": len(self.example_ids),
+            "completed": len(self.reviews),
+            "dispositions": dispositions,
+            "position": index + 1 if current is not None else None,
+            "current": current,
+            "saved_review": saved,
+            "previous_example_id": self.example_ids[index - 1] if index > 0 else None,
+            "next_example_id": (
+                self.example_ids[index + 1]
+                if current is not None and index + 1 < len(self.example_ids)
+                else None
+            ),
+            "done": current is None,
+        }
+
+    def image_path(self, example_id: str, model: str) -> Path:
+        if example_id not in self.proposals or model not in MODELS:
+            raise KeyError("unknown review image")
+        return Path(str(self.proposals[example_id][model]["image_path"])).resolve()
+
+    def _region(
+        self,
+        example_id: str,
+        model: str,
+        kind: str,
+        value: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{example_id}/{model}/{kind}: region must be an object")
+        image_path = self.image_path(example_id, model)
+        width, height = self._size(image_path)
+        bbox = _finite_bbox(
+            value.get("bbox"), identity=f"{example_id}/{model}/{kind}"
+        )
+        if bbox[0] < 0 or bbox[1] < 0 or bbox[2] > width or bbox[3] > height:
+            raise ValueError(
+                f"{example_id}/{model}/{kind}: bbox is outside {width}x{height} image"
+            )
+        source = str(value.get("source", "manual_bbox"))
+        result: dict[str, Any] = {
+            "image_path": str(image_path),
+            "image_sha256": str(self.proposals[example_id][model]["image_sha256"]),
+            "bbox": bbox,
+            "source": source,
+        }
+        candidate_index = value.get("candidate_index")
+        if source == "sam3_candidate":
+            if isinstance(candidate_index, bool) or not isinstance(candidate_index, int):
+                raise ValueError(
+                    f"{example_id}/{model}/{kind}: candidate_index is required"
+                )
+            candidates = self.proposals[example_id][model]["candidates"]
+            matches = [
+                candidate
+                for index, candidate in enumerate(candidates)
+                if int(candidate.get("candidate_index", index)) == candidate_index
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"{example_id}/{model}/{kind}: unknown candidate {candidate_index}"
+                )
+            candidate = matches[0]
+            raw_bbox, expected_bbox, bbox_clipped = _clip_bbox(
+                candidate.get("bbox"), width=width, height=height,
+                identity=f"{example_id}/{model}/{kind}/candidate",
+            )
+            if any(abs(a - b) > 1e-4 for a, b in zip(bbox, expected_bbox, strict=True)):
+                raise ValueError(
+                    f"{example_id}/{model}/{kind}: candidate bbox was modified"
+                )
+            result.update(
+                {
+                    "candidate_index": candidate_index,
+                    "query": candidate.get("query"),
+                    "label": candidate.get("label"),
+                    "score": candidate.get("score"),
+                    "raw_proposal_bbox": raw_bbox,
+                    "bbox_clipped": bbox_clipped,
+                }
+            )
+        elif source != "manual_bbox":
+            raise ValueError(f"{example_id}/{model}/{kind}: unsupported source {source!r}")
+        return result
+
+    def submit(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        example_id = str(payload.get("example_id", "")).strip()
+        if example_id not in self.requests:
+            raise KeyError("unknown example")
+        status = str(payload.get("status", "")).strip()
+        if status not in REVIEW_STATUSES:
+            raise ValueError("status must be eligible or ineligible")
+        record: dict[str, Any] = {
+            "schema_version": GROUNDING_REVIEW_SCHEMA,
+            "example_id": example_id,
+            "status": status,
+            "review_id": self.reviewer_id,
+            "human_reviewed": True,
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+            "request_sha256": self.requests_sha256,
+            "proposals_sha256": self.proposals_sha256,
+        }
+        if status == "ineligible":
+            reason = str(payload.get("reason", "")).strip()
+            if not reason:
+                raise ValueError("ineligible review requires a reason")
+            record["ineligible_reason"] = reason
+            record["models"] = {}
+        else:
+            raw_models = payload.get("models")
+            if not isinstance(raw_models, Mapping) or set(raw_models) != set(MODELS):
+                raise ValueError(f"eligible review requires exactly {list(MODELS)}")
+            models: dict[str, Any] = {}
+            for model in MODELS:
+                raw = raw_models[model]
+                if not isinstance(raw, Mapping):
+                    raise ValueError(f"{example_id}/{model}: review must be an object")
+                target = self._region(example_id, model, "target", raw.get("target"))
+                wrong = self._region(
+                    example_id, model, "wrong_region", raw.get("wrong_region")
+                )
+                if _intersection_area(target["bbox"], wrong["bbox"]) > 0:
+                    raise ValueError(
+                        f"{example_id}/{model}: target and wrong-region bbox overlap")
+                models[model] = {
+                    "proposal_image_path": str(self.image_path(example_id, model)),
+                    "target": target,
+                    "wrong_region": wrong,
+                }
+            record["models"] = models
+
+        with self._lock:
+            append_jsonl(self.history_path, record)
+            self.reviews[example_id] = record
+            self._materialize()
+        return self.state()
+
+
+def _verified_fingerprint(
+    row: Mapping[str, Any], field: str, *, identity: str
+) -> str:
+    recorded = str(row.get(field, ""))
+    payload = dict(row)
+    payload.pop(field, None)
+    if not recorded or object_fingerprint(payload) != recorded:
+        raise ValueError(f"{identity}: invalid {field}")
+    return recorded
+
+
+def _latest_tracking_reviews(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.is_file():
+        return {}
+    latest: dict[str, dict[str, Any]] = {}
+    for number, row in enumerate(read_jsonl(path), 1):
+        example_id = str(row.get("example_id", "")).strip()
+        if not example_id or row.get("schema_version") != TRACKING_REVIEW_SCHEMA:
+            raise ValueError(
+                f"{path}:{number}: invalid tracking review identity/schema"
+            )
+        if row.get("status") not in TRACKING_REVIEW_STATUSES:
+            raise ValueError(f"{path}:{number}: invalid tracking review status")
+        _verified_fingerprint(
+            row,
+            "fingerprint",
+            identity=f"{path}:{number}/{example_id}/review",
+        )
+        latest[example_id] = row
+    return latest
+
+
+@dataclass
+class TrackedGroundingReviewStore:
+    """Strict reviewer for first-frame proposals and their frozen SAM3 tracks."""
+
+    run_dir: Path
+    reviewer_id: str
+    output_dir: Path | None = None
+
+    review_mode = "tracking_v2"
+
+    def __post_init__(self) -> None:
+        self.run_dir = self.run_dir.resolve()
+        self.output_dir = (
+            self.output_dir.resolve()
+            if self.output_dir is not None
+            else self.run_dir / "human_tracking_review_v2"
+        )
+        self.reviewer_id = self.reviewer_id.strip()
+        if not self.reviewer_id:
+            raise ValueError("reviewer ID must not be empty")
+
+        self.requests_path = self.run_dir / "requests.jsonl"
+        self.tracks_path = self.run_dir / "tracks.jsonl"
+        self.manifest_path = self.run_dir / "manifest.json"
+        self.manual_tracks_path = self.run_dir / "manual_tracks.jsonl"
+        for path in (self.requests_path, self.tracks_path, self.manifest_path):
+            if not path.is_file():
+                raise FileNotFoundError(path)
+        self.requests_sha256 = sha256_file(self.requests_path)
+        self.tracking_artifact_sha256 = sha256_file(self.tracks_path)
+        self.manifest_sha256 = sha256_file(self.manifest_path)
+        self.manual_tracking_artifact_sha256 = (
+            sha256_file(self.manual_tracks_path)
+            if self.manual_tracks_path.is_file()
+            else None
+        )
+        self._sha_cache: dict[Path, str] = {
+            self.requests_path: self.requests_sha256,
+            self.tracks_path: self.tracking_artifact_sha256,
+            self.manifest_path: self.manifest_sha256,
+        }
+        self._image_sizes: dict[Path, tuple[int, int]] = {}
+        self._assets: dict[str, dict[str, Path]] = {}
+
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(manifest, Mapping)
+            or manifest.get("schema_version") != TRACKING_MANIFEST_SCHEMA
+        ):
+            raise ValueError("tracking manifest schema mismatch")
+        if (
+            manifest.get("status") != "complete"
+            or manifest.get("coverage_complete") is not True
+            or manifest.get("request_bindings_current") is not True
+            or manifest.get("labels_opened") is not False
+        ):
+            raise ValueError("tracking manifest is not a reviewable label-free artifact")
+        if Path(str(manifest.get("requests_path", ""))).resolve() != self.requests_path:
+            raise ValueError("tracking manifest requests_path mismatch")
+        if Path(str(manifest.get("tracks_path", ""))).resolve() != self.tracks_path:
+            raise ValueError("tracking manifest tracks_path mismatch")
+        if (
+            manifest.get("requests_sha256") != self.requests_sha256
+            or manifest.get("tracks_sha256") != self.tracking_artifact_sha256
+        ):
+            raise ValueError("tracking manifest source SHA mismatch")
+        self.manifest = dict(manifest)
+        self._verify_manifest_sources()
+
+        self.requests = _unique_rows(self.requests_path, key="example_id")
+        for example_id, row in self.requests.items():
+            if (
+                row.get("schema_version") != TRACKING_REQUEST_SCHEMA
+                or row.get("status") != "ok"
+            ):
+                raise ValueError(f"{example_id}: tracking request schema/status mismatch")
+            _verified_fingerprint(
+                row, "request_fingerprint", identity=f"{example_id}/request"
+            )
+            self._verify_request_sources(example_id, row)
+        self.base_artifacts = self._load_artifacts(self.tracks_path, complete=True)
+        self.manual_artifacts = (
+            self._load_artifacts(self.manual_tracks_path, complete=False)
+            if self.manual_tracks_path.is_file()
+            else {}
+        )
+
+        partition_order = {"discovery": 0, "validation": 1, "test": 2}
+        self.example_ids = sorted(
+            self.requests,
+            key=lambda example_id: (
+                partition_order.get(
+                    str(self.requests[example_id].get("partition")), 9
+                ),
+                str(self.requests[example_id].get("group_id", "")),
+                str(self.requests[example_id].get("task_id", "")),
+                example_id,
+            ),
+        )
+        self.index_by_id = {
+            example_id: index
+            for index, example_id in enumerate(self.example_ids)
+        }
+        self.examples = {
+            example_id: self._normalize_example(
+                example_id,
+                self.requests[example_id],
+                self.base_artifacts[example_id],
+                self.manual_artifacts.get(example_id),
+            )
+            for example_id in self.example_ids
+        }
+
+        self.history_path = self.output_dir / "review_history.jsonl"
+        self.reviews_path = self.output_dir / "reviews.jsonl"
+        self.session_path = self.output_dir / "review_session.json"
+        self.manual_anchors_path = self.output_dir / "manual_anchors.jsonl"
+        session = {
+            "schema_version": TRACKING_REVIEW_SESSION_SCHEMA,
+            "requests_path": str(self.requests_path),
+            "requests_sha256": self.requests_sha256,
+            "tracking_artifact_path": str(self.tracks_path),
+            "tracking_artifact_sha256": self.tracking_artifact_sha256,
+            "manifest_path": str(self.manifest_path),
+            "manifest_sha256": self.manifest_sha256,
+            "review_schema_version": TRACKING_REVIEW_SCHEMA,
+            "reviewer_id": self.reviewer_id,
+            "frozen_sources_verified": True,
+        }
+        if self.session_path.is_file():
+            existing = json.loads(self.session_path.read_text(encoding="utf-8"))
+            if existing != session:
+                raise ValueError(
+                    "tracking review session differs from frozen base sources"
+                )
+        elif self.reviews_path.exists() or self.history_path.exists():
+            raise ValueError(
+                "tracking review outputs exist without review_session.json"
+            )
+        else:
+            write_json(self.session_path, session)
+
+        history = _latest_tracking_reviews(self.history_path)
+        canonical = history if history else _latest_tracking_reviews(self.reviews_path)
+        unknown = sorted(set(canonical) - set(self.requests))
+        if unknown:
+            raise ValueError(
+                f"existing reviews contain unknown examples: {unknown[:10]}"
+            )
+        for example_id, review in canonical.items():
+            if (
+                review.get("review_id") != self.reviewer_id
+                or review.get("human_reviewed") is not True
+                or review.get("requests_sha256") != self.requests_sha256
+                or review.get("tracking_artifact_sha256")
+                != self.tracking_artifact_sha256
+                or review.get("manifest_sha256") != self.manifest_sha256
+            ):
+                raise ValueError(f"{example_id}: review differs from frozen session")
+            if (
+                review.get("decision", {}).get("source")
+                == "accept_manual_track"
+                and review.get("manual_tracking_artifact_sha256")
+                != self.manual_tracking_artifact_sha256
+            ):
+                raise ValueError(
+                    f"{example_id}: manual tracking artifact SHA mismatch"
+                )
+        self.reviews = canonical
+        self._lock = Lock()
+        if history:
+            self._materialize()
+
+    def _verified_file(
+        self, path_value: Any, digest_value: Any, *, identity: str
+    ) -> Path:
+        path = Path(str(path_value or "")).resolve()
+        digest = str(digest_value or "")
+        if not path.is_file() or len(digest) != 64:
+            raise ValueError(f"{identity}: missing frozen file or SHA")
+        if path not in self._sha_cache:
+            self._sha_cache[path] = sha256_file(path)
+        if self._sha_cache[path] != digest:
+            raise ValueError(f"{identity}: frozen file content changed")
+        return path
+
+    def _verify_manifest_sources(self) -> None:
+        self._verified_file(
+            self.manifest.get("inputs_path"),
+            self.manifest.get("inputs_sha256"),
+            identity="manifest/inputs",
+        )
+        self._verified_file(
+            self.manifest.get("roles_path"),
+            self.manifest.get("roles_sha256"),
+            identity="manifest/roles",
+        )
+        self._verified_file(
+            self.manifest.get("split_path"),
+            self.manifest.get("split_sha256"),
+            identity="manifest/split",
+        )
+        proposer = self.manifest.get("proposal_backend")
+        if not isinstance(proposer, Mapping):
+            raise ValueError("manifest lacks proposal backend provenance")
+        _verified_fingerprint(
+            proposer,
+            "proposer_fingerprint",
+            identity="manifest/proposal_backend",
+        )
+        self._verified_file(
+            proposer.get("grounder_source_path"),
+            proposer.get("grounder_source_sha256"),
+            identity="manifest/proposal_backend/source",
+        )
+        runs = self.manifest.get("baseline_runs")
+        if not isinstance(runs, Mapping) or set(runs) != set(MODELS):
+            raise ValueError(
+                "manifest baseline_runs must cover exactly three models"
+            )
+        tracker = self.manifest.get("tracker")
+        if (
+            not isinstance(tracker, Mapping)
+            or tracker.get("backend") != "official_sam3_sam2_style_instance_tracker"
+            or not str(tracker.get("tracker_fingerprint", ""))
+            or not str(tracker.get("official_source_path", ""))
+            or not str(tracker.get("checkpoint_path", ""))
+        ):
+            raise ValueError("manifest does not identify the official SAM3 tracker")
+
+    def _verify_predictor_provenance(
+        self, value: Any, *, identity: str
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{identity}: predictor provenance is missing")
+        required = (
+            "official_source_path", "model_builder_sha256",
+            "video_predictor_sha256", "checkpoint_path", "checkpoint_sha256",
+            "source_tree_fingerprint", "source_tree_file_count",
+            "sam3_video_inference_files", "tracking_predictor_files",
+            "bpe_vocab_files", "tracker_fingerprint",
+        )
+        if any(key not in value for key in required):
+            raise ValueError(f"{identity}: incomplete tracker provenance")
+        tracker = self.manifest["tracker"]
+        if any(str(value[key]) != str(tracker[key]) for key in (
+            "official_source_path", "checkpoint_path", "tracker_fingerprint"
+        )):
+            raise ValueError(f"{identity}: tracker provenance differs from manifest")
+        source_value = str(value["official_source_path"])
+        if source_value == "injected-test-double":
+            if (
+                value["checkpoint_path"] != "injected-test-double"
+                or value["source_tree_file_count"] != 0
+                or any(value[key] != [] for key in required[7:10])
+            ):
+                raise ValueError(f"{identity}: malformed injected tracker provenance")
+            return dict(value)
+        source = Path(source_value).resolve()
+        self._verified_file(
+            source / "sam3" / "model_builder.py", value["model_builder_sha256"],
+            identity=f"{identity}/model_builder",
+        )
+        self._verified_file(
+            source / "sam3" / "model" / "sam3_video_predictor.py",
+            value["video_predictor_sha256"], identity=f"{identity}/video_predictor",
+        )
+        self._verified_file(
+            value["checkpoint_path"], value["checkpoint_sha256"],
+            identity=f"{identity}/checkpoint",
+        )
+        files = sorted(path for path in (source / "sam3").rglob("*.py")
+                       if "__pycache__" not in path.parts and path.is_file())
+        files.extend(path for path in sorted(source.rglob("bpe_simple_vocab_16e6.txt.gz"))
+                     if path.is_file() and path not in files)
+        entries = [{"path": str(path.relative_to(source)), "sha256": sha256_file(path)}
+                   for path in files]
+        if (value["source_tree_file_count"] != len(entries)
+                or value["source_tree_fingerprint"] != object_fingerprint(entries)):
+            raise ValueError(f"{identity}: official SAM3 source tree changed")
+        def named(name: str) -> list[dict[str, str]]:
+            return [row for row in entries if Path(row["path"]).name == name]
+        inventories = {
+            "sam3_video_inference_files": named("sam3_video_inference.py"),
+            "tracking_predictor_files": named("tracking_predictor.py"),
+            "bpe_vocab_files": named("bpe_simple_vocab_16e6.txt.gz"),
+        }
+        if any(value[key] != expected for key, expected in inventories.items()):
+            raise ValueError(f"{identity}: tracker source-tree inventory changed")
+        base = {key: value[key] for key in required if key != "tracker_fingerprint"}
+        if value["tracker_fingerprint"] != object_fingerprint(base):
+            raise ValueError(f"{identity}: tracker provenance fingerprint mismatch")
+        return dict(value)
+
+    def _verify_request_sources(
+        self, example_id: str, request: Mapping[str, Any]
+    ) -> None:
+        video = request.get("video")
+        if not isinstance(video, Mapping):
+            raise ValueError(f"{example_id}: missing frozen video")
+        self._verified_file(
+            video.get("path"), video.get("sha256"), identity=f"{example_id}/video"
+        )
+        first = request.get("first_frame")
+        if not isinstance(first, Mapping):
+            raise ValueError(f"{example_id}: missing frozen first frame")
+        self._verified_file(
+            first.get("image_path"),
+            first.get("image_sha256"),
+            identity=f"{example_id}/first",
+        )
+        split = request.get("source", {}).get("split")
+        if (
+            not isinstance(split, Mapping)
+            or split.get("partition") != request.get("partition")
+            or split.get("assignment_fingerprint")
+            != object_fingerprint(
+                {
+                    "example_id": example_id,
+                    "partition": request.get("partition"),
+                }
+            )
+        ):
+            raise ValueError(f"{example_id}: split assignment binding mismatch")
+        self._verified_file(
+            split.get("path"),
+            split.get("sha256"),
+            identity=f"{example_id}/split",
+        )
+        bindings = request.get("model_frame_bindings")
+        if not isinstance(bindings, Mapping) or set(bindings) != set(MODELS):
+            raise ValueError(f"{example_id}: incomplete model terminal bindings")
+        for model in MODELS:
+            binding = bindings[model]
+            terminal = (
+                binding.get("terminal") if isinstance(binding, Mapping) else None
+            )
+            if not isinstance(terminal, Mapping):
+                raise ValueError(f"{example_id}/{model}: missing terminal binding")
+            self._verified_file(
+                terminal.get("image_path"),
+                terminal.get("image_sha256"),
+                identity=f"{example_id}/{model}/terminal",
+            )
+            processor_contract = validate_processor_content_order_contract(
+                binding,
+                identity=f"{example_id}/{model}",
+                verify_file=self._verified_file,
+            )
+            if model == "qwen" and processor_contract is not None:
+                raise ValueError(
+                    f"{example_id}/qwen: RoboReward order contract is forbidden"
+                )
+
+    def _load_artifacts(
+        self, path: Path, *, complete: bool
+    ) -> dict[str, dict[str, Any]]:
+        rows: dict[str, dict[str, Any]] = {}
+        attempts: dict[tuple[str, str], int] = {}
+        for number, row in enumerate(read_jsonl(path), 1):
+            example_id = str(row.get("example_id", "")).strip()
+            attempt = row.get("attempt")
+            if (
+                not example_id
+                or isinstance(attempt, bool)
+                or not isinstance(attempt, int)
+            ):
+                raise ValueError(f"{path}:{number}: invalid example_id/attempt")
+            if row.get("schema_version") != TRACKING_ARTIFACT_SCHEMA:
+                raise ValueError(f"{path}:{number}: artifact schema mismatch")
+            if complete:
+                attempt_identity = example_id
+            else:
+                anchor = row.get("manual_anchor")
+                attempt_identity = str(row.get("selected_candidate_id", "")).strip()
+                anchor_identity = (
+                    str(anchor.get("manual_anchor_id", "")).strip()
+                    if isinstance(anchor, Mapping)
+                    else ""
+                )
+                if (
+                    not attempt_identity
+                    or not isinstance(anchor, Mapping)
+                    or anchor_identity != attempt_identity
+                    or anchor.get("reviewer_id") != self.reviewer_id
+                    or derive_manual_anchor_id(
+                        example_id,
+                        str(anchor.get("first_image_sha256", "")),
+                        anchor.get("bbox_xyxy", []),
+                    )
+                    != attempt_identity
+                ):
+                    raise ValueError(
+                        f"{path}:{number}: invalid derived manual anchor identity"
+                    )
+            attempt_key = (example_id, attempt_identity)
+            if attempt < 1 or attempt <= attempts.get(attempt_key, 0):
+                raise ValueError(
+                    f"{path}:{number}: attempts must be strictly increasing per artifact identity"
+                )
+            _verified_fingerprint(
+                row, "fingerprint", identity=f"{example_id}/artifact"
+            )
+            request = self.requests.get(example_id)
+            if (
+                request is None
+                or row.get("request_fingerprint")
+                != request.get("request_fingerprint")
+            ):
+                raise ValueError(f"{example_id}: artifact/request mismatch")
+            rows[example_id] = row
+            attempts[attempt_key] = attempt
+        if complete and set(rows) != set(self.requests):
+            raise ValueError("tracking artifact coverage differs from requests")
+        if complete and not rows:
+            raise ValueError(f"{path} is empty")
+        return rows
+
+    def _verify_source(self, source: Any, *, identity: str) -> dict[str, Any]:
+        if not isinstance(source, Mapping):
+            raise ValueError(f"{identity}: source must be an object")
+        for name in ("inputs", "roles"):
+            item = source.get(name)
+            if (
+                not isinstance(item, Mapping)
+                or not str(item.get("row_fingerprint", ""))
+            ):
+                raise ValueError(f"{identity}/{name}: incomplete source binding")
+            self._verified_file(
+                item.get("path"), item.get("sha256"), identity=f"{identity}/{name}"
+            )
+        split = source.get("split")
+        if (
+            not isinstance(split, Mapping)
+            or not str(split.get("assignment_fingerprint", ""))
+            or not str(split.get("partition", ""))
+        ):
+            raise ValueError(f"{identity}/split: incomplete split binding")
+        self._verified_file(
+            split.get("path"),
+            split.get("sha256"),
+            identity=f"{identity}/split",
+        )
+        baseline = source.get("baseline_records")
+        if not isinstance(baseline, Mapping) or set(baseline) != set(MODELS):
+            raise ValueError(f"{identity}: baseline source coverage mismatch")
+        for model in MODELS:
+            item = baseline[model]
+            if (
+                not isinstance(item, Mapping)
+                or not str(item.get("row_fingerprint", ""))
+            ):
+                raise ValueError(f"{identity}/{model}: incomplete baseline binding")
+            self._verified_file(
+                item.get("path"),
+                item.get("file_sha256"),
+                identity=f"{identity}/{model}",
+            )
+        video = source.get("video")
+        if not isinstance(video, Mapping):
+            raise ValueError(f"{identity}: missing video source")
+        self._verified_file(
+            video.get("path"),
+            video.get("sha256"),
+            identity=f"{identity}/video",
+        )
+        for field in ("width", "height", "frame_count"):
+            if (
+                isinstance(video.get(field), bool)
+                or not isinstance(video.get(field), int)
+                or video[field] < 1
+            ):
+                raise ValueError(f"{identity}/video: invalid {field}")
+        fps = video.get("fps")
+        if (
+            isinstance(fps, bool)
+            or not isinstance(fps, (int, float))
+            or not math.isfinite(float(fps))
+            or fps <= 0
+        ):
+            raise ValueError(f"{identity}/video: invalid fps")
+        return dict(source)
+
+    def _size(self, path: Path) -> tuple[int, int]:
+        if path not in self._image_sizes:
+            with Image.open(path) as image:
+                self._image_sizes[path] = tuple(map(int, image.size))
+        return self._image_sizes[path]
+
+    def _asset(
+        self,
+        example_id: str,
+        value: Any,
+        *,
+        identity: str,
+        bbox_key: str | None = None,
+        require_dimensions: bool = False,
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{identity}: frame must be an object")
+        path = self._verified_file(
+            value.get("image_path"), value.get("image_sha256"), identity=identity
+        )
+        width, height = self._size(path)
+        if require_dimensions and (
+            value.get("width") != width or value.get("height") != height
+        ):
+            raise ValueError(f"{identity}: recorded dimensions differ from image")
+        frame_index = value.get("source_frame_index")
+        if (
+            isinstance(frame_index, bool)
+            or not isinstance(frame_index, int)
+            or frame_index < 0
+        ):
+            raise ValueError(f"{identity}: invalid source_frame_index")
+        asset_id = object_fingerprint(
+            {
+                "identity": identity,
+                "path": str(path),
+                "sha256": value["image_sha256"],
+                "source_frame_index": frame_index,
+            }
+        )[:24]
+        self._assets.setdefault(example_id, {})[asset_id] = path
+        result: dict[str, Any] = {
+            "asset_id": asset_id,
+            "image_path": str(path),
+            "image_sha256": str(value["image_sha256"]),
+            "source_frame_index": frame_index,
+            "width": width,
+            "height": height,
+        }
+        if bbox_key is not None:
+            visible = value.get("visible")
+            if not isinstance(visible, bool):
+                raise ValueError(f"{identity}: visibility flag is missing")
+            if visible:
+                raw, bbox, clipped = _clip_bbox(
+                    value.get(bbox_key),
+                    width=width,
+                    height=height,
+                    identity=f"{identity}/bbox",
+                )
+            else:
+                if value.get(bbox_key) is not None:
+                    raise ValueError(
+                        f"{identity}: invisible frame must not carry a bbox"
+                    )
+                raw, bbox, clipped = None, None, False
+            obj_id = value.get("obj_id")
+            if obj_id is None or isinstance(obj_id, bool):
+                raise ValueError(f"{identity}: invalid obj_id")
+            score = value.get("score")
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not math.isfinite(float(score))
+            ):
+                raise ValueError(f"{identity}: invalid score")
+            result.update(
+                {
+                    "bbox": bbox,
+                    "raw_bbox": raw,
+                    "bbox_clipped": clipped,
+                    "obj_id": obj_id,
+                    "score": float(score),
+                    "visible": visible,
+                }
+            )
+            mask_path, mask_sha = value.get("mask_path"), value.get("mask_sha256")
+            if (mask_path is None) != (mask_sha is None):
+                raise ValueError(f"{identity}: mask path/SHA mismatch")
+            verified_mask = None
+            if mask_path is not None:
+                verified_mask = self._verified_file(
+                    mask_path, mask_sha, identity=f"{identity}/mask"
+                )
+            if not visible:
+                if verified_mask is None:
+                    raise ValueError(
+                        f"{identity}: invisible frame requires a frozen empty mask"
+                    )
+                with Image.open(verified_mask) as mask_image:
+                    if mask_image.convert("L").getbbox() is not None:
+                        raise ValueError(
+                            f"{identity}: invisible frame mask is not empty"
+                        )
+        return result
+
+    @staticmethod
+    def _public_asset(asset: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in asset.items()
+            if key not in {"image_path", "raw_bbox"}
+        }
+
+    def _candidate(
+        self, value: Any, *, first: Mapping[str, Any], identity: str
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{identity}: candidate must be an object")
+        candidate_id = str(value.get("candidate_id", "")).strip()
+        if (
+            not candidate_id
+            or value.get("query_role") not in {"target", "reference"}
+        ):
+            raise ValueError(f"{identity}: invalid candidate identity/role")
+        raw, bbox, clipped = _clip_bbox(
+            value.get("bbox_xyxy"),
+            width=int(first["width"]),
+            height=int(first["height"]),
+            identity=identity,
+        )
+        mask_path, mask_sha = value.get("mask_path"), value.get("mask_sha256")
+        if (mask_path is None) != (mask_sha is None):
+            raise ValueError(f"{identity}: mask path/SHA mismatch")
+        if mask_path is not None:
+            self._verified_file(mask_path, mask_sha, identity=f"{identity}/mask")
+        center, score = value.get("center_xy"), value.get("score")
+        if (
+            not isinstance(center, list)
+            or len(center) != 2
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or not math.isfinite(float(item))
+                for item in center
+            )
+        ):
+            raise ValueError(f"{identity}: invalid center_xy")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+        ):
+            raise ValueError(f"{identity}: invalid score")
+        return {
+            "candidate_id": candidate_id,
+            "query_role": value["query_role"],
+            "query": str(value.get("query", "")),
+            "bbox": bbox,
+            "raw_bbox": raw,
+            "bbox_clipped": clipped,
+            "score": float(score),
+            "center_xy": [float(item) for item in center],
+        }
+
+    def _anchor(
+        self,
+        value: Any,
+        *,
+        first: Mapping[str, Any],
+        identity: str,
+    ) -> list[float]:
+        if not isinstance(value, Mapping) or value.get("source_frame_index") != 0:
+            raise ValueError(f"{identity}: invalid track anchor")
+        path = self._verified_file(
+            value.get("image_path"), value.get("image_sha256"), identity=identity
+        )
+        if (
+            str(path) != first["image_path"]
+            or value.get("image_sha256") != first["image_sha256"]
+        ):
+            raise ValueError(f"{identity}: anchor differs from frozen first frame")
+        _, bbox, _ = _clip_bbox(
+            value.get("bbox_xyxy"),
+            width=int(first["width"]),
+            height=int(first["height"]),
+            identity=identity,
+        )
+        mask_path, mask_sha = value.get("mask_path"), value.get("mask_sha256")
+        if (mask_path is None) != (mask_sha is None):
+            raise ValueError(f"{identity}: anchor mask path/SHA mismatch")
+        if mask_path is not None:
+            self._verified_file(mask_path, mask_sha, identity=f"{identity}/mask")
+        return bbox
+
+    def _track(
+        self,
+        example_id: str,
+        value: Any,
+        *,
+        first: Mapping[str, Any],
+        identity: str,
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or value.get("schema_version") != TRACK_SCHEMA:
+            raise ValueError(f"{identity}: track schema mismatch")
+        fingerprint = _verified_fingerprint(value, "fingerprint", identity=identity)
+        candidate_id = str(value.get("candidate_id", "")).strip()
+        status, source = value.get("status"), value.get("source")
+        if (
+            value.get("example_id") != example_id
+            or not candidate_id
+            or status not in {"ok", "invalid"}
+            or source not in {"sam3_candidate", "manual_bbox"}
+        ):
+            raise ValueError(f"{identity}: invalid track identity/status/source")
+        request = self.requests[example_id]
+        if value.get("request_fingerprint") != request.get("request_fingerprint"):
+            raise ValueError(f"{identity}: track/request fingerprint mismatch")
+        anchor_bbox = self._anchor(
+            value.get("anchor"), first=first, identity=f"{identity}/anchor"
+        )
+        locked_obj_id = value.get("locked_obj_id")
+        if status == "ok" and (
+            locked_obj_id is None or isinstance(locked_obj_id, bool)
+        ):
+            raise ValueError(f"{identity}: valid track has no locked_obj_id")
+        frames_raw = value.get("frames")
+        if not isinstance(frames_raw, list):
+            raise ValueError(f"{identity}: frames must be a list")
+        frames = [
+            self._asset(
+                example_id,
+                frame,
+                identity=f"{identity}/frame/{index}",
+                bbox_key="bbox_xyxy",
+            )
+            for index, frame in enumerate(frames_raw)
+        ]
+        expected_frames = {
+            int(frame["source_frame_index"]): frame
+            for frame in request.get("key_frames", [])
+        }
+        for frame in frames:
+            expected = expected_frames.get(frame["source_frame_index"])
+            if (
+                expected is None
+                or frame["image_sha256"] != expected.get("image_sha256")
+                or frame["image_path"]
+                != str(Path(str(expected.get("image_path", ""))).resolve())
+            ):
+                raise ValueError(f"{identity}: track frame differs from request")
+        if any(frame["obj_id"] != locked_obj_id for frame in frames):
+            raise ValueError(f"{identity}: obj_id changed within locked track")
+        terminals_raw = value.get("terminal_by_model")
+        if (
+            not isinstance(terminals_raw, Mapping)
+            or set(terminals_raw) != set(MODELS)
+        ):
+            raise ValueError(f"{identity}: terminal_by_model coverage mismatch")
+        terminals: dict[str, dict[str, Any] | None] = {}
+        for model in MODELS:
+            terminal = terminals_raw[model]
+            terminals[model] = (
+                None
+                if terminal is None
+                else self._asset(
+                    example_id,
+                    terminal,
+                    identity=f"{identity}/terminal/{model}",
+                    bbox_key="bbox_xyxy",
+                )
+            )
+            if terminals[model] is not None:
+                expected = request["model_frame_bindings"][model]["terminal"]
+                if (
+                    terminals[model]["visible"] is not True
+                    or terminals[model]["obj_id"] != locked_obj_id
+                    or terminals[model]["source_frame_index"]
+                    != expected["source_frame_index"]
+                    or terminals[model]["image_sha256"]
+                    != expected["image_sha256"]
+                    or terminals[model]["image_path"]
+                    != str(Path(expected["image_path"]).resolve())
+                ):
+                    raise ValueError(
+                        f"{identity}/{model}: terminal differs from request/locked track"
+                    )
+        continuity = value.get("continuity")
+        continuity_ok = (
+            isinstance(continuity, Mapping)
+            and continuity.get("frame_coverage_complete") is True
+            and continuity.get("id_switch_detected") is False
+            and continuity.get("missing_frame_indices") == []
+            and continuity.get("duplicate_frame_indices") == []
+            and continuity.get("locked_id_missing_frame_indices") == []
+        )
+        provenance = self._verify_predictor_provenance(
+            value.get("predictor_provenance"), identity=f"{identity}/predictor"
+        )
+        if (
+            provenance.get("source_video_sha256") != request["video"]["sha256"]
+            or str(Path(str(provenance.get("source_video_path", ""))).resolve())
+            != str(Path(request["video"]["path"]).resolve())
+        ):
+            raise ValueError(f"{identity}: predictor provenance is stale")
+        valid = (
+            status == "ok"
+            and bool(frames)
+            and all(terminals[model] is not None for model in MODELS)
+            and continuity_ok
+        )
+        return {
+            "candidate_id": candidate_id,
+            "source": source,
+            "status": status,
+            "error": value.get("error"),
+            "locked_obj_id": locked_obj_id,
+            "anchor_bbox": anchor_bbox,
+            "frames": frames,
+            "terminals": terminals,
+            "continuity": continuity,
+            "predictor_provenance": dict(provenance),
+            "fingerprint": fingerprint,
+            "request_fingerprint": value.get("request_fingerprint"),
+            "proposal_fingerprint": value.get("proposal_fingerprint"),
+            "valid": valid,
+        }
+
+    def _normalize_example(
+        self,
+        example_id: str,
+        request: Mapping[str, Any],
+        artifact: Mapping[str, Any],
+        manual_artifact: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if artifact.get("status") not in {"ok", "needs_review", "invalid"}:
+            raise ValueError(f"{example_id}: invalid artifact status")
+        self._verify_source(artifact.get("source"), identity=f"{example_id}/source")
+        first = self._asset(
+            example_id,
+            artifact.get("first_frame"),
+            identity=f"{example_id}/first",
+            require_dimensions=True,
+        )
+        request_first = request["first_frame"]
+        if (
+            first["source_frame_index"] != 0
+            or first["image_sha256"] != request_first["image_sha256"]
+            or first["image_path"]
+            != str(Path(request_first["image_path"]).resolve())
+        ):
+            raise ValueError(f"{example_id}: artifact first frame differs from request")
+
+        proposal = artifact.get("proposal")
+        if (
+            not isinstance(proposal, Mapping)
+            or proposal.get("schema_version") != TRACKING_PROPOSAL_SCHEMA
+            or proposal.get("status") not in {"ok", "needs_review", "invalid"}
+        ):
+            raise ValueError(f"{example_id}: proposal schema/status mismatch")
+        proposal_fingerprint = _verified_fingerprint(
+            proposal, "fingerprint", identity=f"{example_id}/proposal"
+        )
+        provider = proposal.get("provider_provenance")
+        if not isinstance(provider, Mapping):
+            raise ValueError(f"{example_id}: missing proposal provider provenance")
+        _verified_fingerprint(
+            provider,
+            "proposer_fingerprint",
+            identity=f"{example_id}/proposal/provider",
+        )
+        if dict(provider) != dict(self.manifest["proposal_backend"]):
+            raise ValueError(f"{example_id}: proposal provider differs from manifest")
+        if artifact.get("proposal_fingerprint") != proposal_fingerprint:
+            raise ValueError(f"{example_id}: artifact/proposal fingerprint mismatch")
+        target_rows = proposal.get("target_candidates")
+        reference_rows = proposal.get("reference_candidates")
+        options_raw = proposal.get("options")
+        if (
+            not isinstance(target_rows, list)
+            or not isinstance(reference_rows, list)
+            or not isinstance(options_raw, list)
+            or len(options_raw) > 3
+        ):
+            raise ValueError(f"{example_id}: invalid proposal candidate lists")
+
+        targets: dict[str, dict[str, Any]] = {}
+        for index, row in enumerate(target_rows):
+            candidate = self._candidate(
+                row, first=first, identity=f"{example_id}/target/{index}"
+            )
+            if (
+                candidate["query_role"] != "target"
+                or candidate["candidate_id"] in targets
+            ):
+                raise ValueError(f"{example_id}: invalid/duplicate target candidate")
+            targets[candidate["candidate_id"]] = candidate
+        references: list[dict[str, Any]] = []
+        for index, row in enumerate(reference_rows):
+            candidate = self._candidate(
+                row, first=first, identity=f"{example_id}/reference/{index}"
+            )
+            if candidate["query_role"] != "reference":
+                raise ValueError(f"{example_id}: reference entered target namespace")
+            references.append(candidate)
+
+        options: list[dict[str, Any]] = []
+        for index, row in enumerate(options_raw):
+            option = self._candidate(
+                row, first=first, identity=f"{example_id}/option/{index}"
+            )
+            selection = row.get("selection")
+            if (
+                option["query_role"] != "target"
+                or selection not in {"algorithmic_default", "alternative"}
+            ):
+                raise ValueError(f"{example_id}: invalid target option")
+            original = targets.get(option["candidate_id"])
+            comparable = (
+                "candidate_id",
+                "query_role",
+                "query",
+                "bbox",
+                "score",
+                "center_xy",
+            )
+            if original is None or any(
+                option[key] != original[key] for key in comparable
+            ):
+                raise ValueError(
+                    f"{example_id}: option differs from frozen target candidate"
+                )
+            option["selection"] = selection
+            options.append(option)
+        option_ids = [row["candidate_id"] for row in options]
+        if len(option_ids) != len(set(option_ids)):
+            raise ValueError(f"{example_id}: duplicate proposal option")
+
+        default_raw = proposal.get("algorithmic_default")
+        default_id = None
+        if default_raw is not None:
+            default = self._candidate(
+                default_raw, first=first, identity=f"{example_id}/default"
+            )
+            default_id = default["candidate_id"]
+            if default_id not in targets:
+                raise ValueError(f"{example_id}: default is not a target candidate")
+        marked_defaults = [
+            row["candidate_id"]
+            for row in options
+            if row["selection"] == "algorithmic_default"
+        ]
+        if marked_defaults != ([default_id] if default_id is not None else []):
+            raise ValueError(
+                f"{example_id}: algorithmic default is not unique/consistent"
+            )
+        if (
+            default_id is not None
+            and sum(row["selection"] == "alternative" for row in options) > 2
+        ):
+            raise ValueError(f"{example_id}: more than two default alternatives")
+
+        tracks_raw = artifact.get("candidate_tracks")
+        if not isinstance(tracks_raw, list):
+            raise ValueError(f"{example_id}: candidate_tracks must be a list")
+        tracks: dict[str, dict[str, Any]] = {}
+        for index, row in enumerate(tracks_raw):
+            track = self._track(
+                example_id,
+                row,
+                first=first,
+                identity=f"{example_id}/track/{index}",
+            )
+            if (
+                track["candidate_id"] in tracks
+                or track["proposal_fingerprint"] != proposal_fingerprint
+            ):
+                raise ValueError(f"{example_id}: duplicate or stale candidate track")
+            tracks[track["candidate_id"]] = track
+        if set(tracks) != set(option_ids):
+            raise ValueError(f"{example_id}: track coverage differs from review options")
+        for option in options:
+            option["track"] = tracks[option["candidate_id"]]
+            if option["track"]["anchor_bbox"] != option["bbox"]:
+                raise ValueError(f"{example_id}: track anchor differs from option bbox")
+
+        selection_source = artifact.get("selection_source")
+        selected_id = artifact.get("selected_candidate_id")
+        if selection_source == "algorithmic_default":
+            if (
+                artifact.get("status") != "ok"
+                or selected_id != default_id
+                or default_id not in tracks
+                or tracks[default_id]["valid"] is not True
+            ):
+                raise ValueError(f"{example_id}: invalid automated selection binding")
+        elif selection_source is not None or selected_id is not None:
+            raise ValueError(f"{example_id}: unexpected automated selection")
+
+        manual_option = None
+        manual_artifact_fingerprint = None
+        if manual_artifact is not None:
+            if manual_artifact.get("status") not in {"ok", "invalid"}:
+                raise ValueError(f"{example_id}: invalid manual artifact status")
+            manual_artifact_fingerprint = str(manual_artifact["fingerprint"])
+            self._verify_source(
+                manual_artifact.get("source"),
+                identity=f"{example_id}/manual/source",
+            )
+            manual_first = self._asset(
+                example_id,
+                manual_artifact.get("first_frame"),
+                identity=f"{example_id}/manual/first",
+                require_dimensions=True,
+            )
+            if (
+                manual_first["image_sha256"] != first["image_sha256"]
+                or manual_first["image_path"] != first["image_path"]
+                or manual_artifact.get("proposal_fingerprint")
+                != proposal_fingerprint
+                or manual_artifact.get("selection_source") != "manual_bbox"
+            ):
+                raise ValueError(
+                    f"{example_id}: manual artifact is not bound to base artifact"
+                )
+            manual_id = str(
+                manual_artifact.get("selected_candidate_id", "")
+            ).strip()
+            anchor_row = manual_artifact.get("manual_anchor")
+            if (
+                not manual_id
+                or not isinstance(anchor_row, Mapping)
+                or anchor_row.get("schema_version") != MANUAL_ANCHOR_SCHEMA
+                or anchor_row.get("manual_anchor_id") != manual_id
+                or anchor_row.get("reviewer_id") != self.reviewer_id
+                or derive_manual_anchor_id(
+                    example_id,
+                    str(anchor_row.get("first_image_sha256", "")),
+                    anchor_row.get("bbox_xyxy", []),
+                )
+                != manual_id
+            ):
+                raise ValueError(f"{example_id}: incomplete manual anchor binding")
+            _verified_fingerprint(
+                anchor_row,
+                "fingerprint",
+                identity=f"{example_id}/manual/anchor",
+            )
+            manual_tracks = manual_artifact.get("candidate_tracks")
+            if not isinstance(manual_tracks, list):
+                raise ValueError(f"{example_id}: invalid manual candidate_tracks")
+            matches = []
+            for index, row in enumerate(manual_tracks):
+                track = self._track(
+                    example_id,
+                    row,
+                    first=first,
+                    identity=f"{example_id}/manual/track/{index}",
+                )
+                if track["candidate_id"] == manual_id:
+                    matches.append(track)
+            if (
+                len(matches) != 1
+                or matches[0]["source"] != "manual_bbox"
+                or matches[0]["proposal_fingerprint"] != proposal_fingerprint
+            ):
+                raise ValueError(
+                    f"{example_id}: manual selected track is missing/ambiguous"
+                )
+            manual_track = matches[0]
+            if manual_track["anchor_bbox"] != [
+                float(item) for item in anchor_row["bbox_xyxy"]
+            ]:
+                raise ValueError(f"{example_id}: manual track anchor bbox changed")
+            manual_option = {
+                "candidate_id": manual_id,
+                "query_role": "target",
+                "query": str(proposal.get("target_query") or "manual bbox"),
+                "bbox": manual_track["anchor_bbox"],
+                "bbox_clipped": False,
+                "score": None,
+                "center_xy": None,
+                "selection": "manual_track",
+                "track": manual_track,
+            }
+
+        return {
+            "request": dict(request),
+            "artifact_fingerprint": str(artifact["fingerprint"]),
+            "manual_artifact_fingerprint": manual_artifact_fingerprint,
+            "first": first,
+            "proposal_fingerprint": proposal_fingerprint,
+            "proposal_status": proposal.get("status"),
+            "review_reasons": list(proposal.get("review_reasons", [])),
+            "default_candidate_id": default_id,
+            "options": options,
+            "references": references,
+            "manual_option": manual_option,
+        }
+
+    def _public_track(
+        self, example_id: str, track: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if track is None:
+            return None
+        frames = []
+        for frame in track["frames"]:
+            item = self._public_asset(frame)
+            item["image_url"] = (
+                f"/api/image?example_id={example_id}&asset_id={frame['asset_id']}"
+            )
+            frames.append(item)
+        terminals = {}
+        for model, terminal in track["terminals"].items():
+            if terminal is None:
+                terminals[model] = None
+            else:
+                item = self._public_asset(terminal)
+                item["image_url"] = (
+                    f"/api/image?example_id={example_id}"
+                    f"&asset_id={terminal['asset_id']}"
+                )
+                terminals[model] = item
+        return {
+            "candidate_id": track["candidate_id"],
+            "source": track["source"],
+            "status": track["status"],
+            "error": track["error"],
+            "locked_obj_id": track["locked_obj_id"],
+            "frames": frames,
+            "terminals": terminals,
+            "continuity": track["continuity"],
+            "valid": track["valid"],
+        }
+
+    def _public_option(
+        self, example_id: str, option: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in option.items()
+            if key not in {"raw_bbox", "track"}
+        } | {"track": self._public_track(example_id, option.get("track"))}
+
+    def _bound_manual_option(self, example_id: str) -> dict[str, Any] | None:
+        option = self.examples[example_id]["manual_option"]
+        review = self.reviews.get(example_id)
+        if option is None or review is None:
+            return None
+        if review.get("status") == "needs_retrack":
+            expected = review.get("manual_anchor_id")
+        elif review.get("decision", {}).get("source") == "accept_manual_track":
+            expected = review.get("selected_candidate_id")
+        else:
+            return None
+        return option if option["candidate_id"] == expected else None
+
+    def _public_example(self, example_id: str) -> dict[str, Any]:
+        value = self.examples[example_id]
+        request = value["request"]
+        first = self._public_asset(value["first"])
+        first["image_url"] = (
+            f"/api/image?example_id={example_id}"
+            f"&asset_id={value['first']['asset_id']}"
+        )
+        return {
+            "review_mode": self.review_mode,
+            "example_id": example_id,
+            "group_id": request.get("group_id"),
+            "task_id": request.get("task_id"),
+            "partition": request.get("partition"),
+            "instruction": request.get("instruction"),
+            "roles": request.get("roles"),
+            "artifact_fingerprint": value["artifact_fingerprint"],
+            "proposal_status": value["proposal_status"],
+            "review_reasons": value["review_reasons"],
+            "first_frame": first,
+            "default_candidate_id": value["default_candidate_id"],
+            "options": [
+                self._public_option(example_id, row)
+                for row in value["options"]
+            ],
+            "reference_candidates": [
+                {
+                    key: item
+                    for key, item in row.items()
+                    if key != "raw_bbox"
+                }
+                for row in value["references"]
+            ],
+            "manual_track": (
+                self._public_option(example_id, manual_option)
+                if (manual_option := self._bound_manual_option(example_id)) is not None
+                else None
+            ),
+        }
+
+    def _materialize(self) -> None:
+        temporary = self.reviews_path.with_name(f".{self.reviews_path.name}.tmp")
+        write_jsonl(
+            temporary,
+            (self.reviews[example_id] for example_id in sorted(self.reviews)),
+        )
+        temporary.replace(self.reviews_path)
+
+        anchors = []
+        for example_id in sorted(self.reviews):
+            review = self.reviews[example_id]
+            if review.get("status") != "needs_retrack":
+                continue
+            decision = review["decision"]
+            anchor = {
+                "schema_version": MANUAL_ANCHOR_SCHEMA,
+                "manual_anchor_id": review["manual_anchor_id"],
+                "example_id": example_id,
+                "request_fingerprint": self.requests[example_id][
+                    "request_fingerprint"
+                ],
+                "first_frame_index": 0,
+                "first_image_path": decision["first_image_path"],
+                "first_image_sha256": decision["first_image_sha256"],
+                "bbox_xyxy": decision["first_bbox"],
+                "reviewer_id": self.reviewer_id,
+                "reviewed_at": review["reviewed_at"],
+                "note": None,
+            }
+            anchor["fingerprint"] = object_fingerprint(anchor)
+            anchors.append(anchor)
+        queue_tmp = self.manual_anchors_path.with_name(
+            f".{self.manual_anchors_path.name}.tmp"
+        )
+        write_jsonl(queue_tmp, anchors)
+        queue_tmp.replace(self.manual_anchors_path)
+
+    def state(
+        self, example_id: str | None = None, position: int | None = None
+    ) -> dict[str, Any]:
+        if example_id is not None and position is not None:
+            raise ValueError("specify example_id or position, not both")
+        second_phase = self.manual_tracking_artifact_sha256 is not None
+        pending_ids = [
+            value
+            for value in self.example_ids
+            if value not in self.reviews
+            or (
+                second_phase
+                and self.reviews[value].get("status") == "needs_retrack"
+            )
+        ]
+        if position is not None:
+            if not 1 <= position <= len(self.example_ids):
+                raise ValueError(f"position must be in 1..{len(self.example_ids)}")
+            current_id = self.example_ids[position - 1]
+        elif example_id is not None:
+            if example_id not in self.index_by_id:
+                raise KeyError("unknown example")
+            current_id = example_id
+        else:
+            current_id = pending_ids[0] if pending_ids else None
+        if current_id is None:
+            index, current, saved = len(self.example_ids), None, None
+        else:
+            index = self.index_by_id[current_id]
+            current = self._public_example(current_id)
+            saved = self.reviews.get(current_id)
+        dispositions = {
+            name: 0 for name in sorted(TRACKING_REVIEW_STATUSES)
+        }
+        for row in self.reviews.values():
+            status = row.get("status")
+            if status in dispositions:
+                dispositions[status] += 1
+        manual_artifact_frozen = any(
+            row.get("decision", {}).get("source") == "accept_manual_track"
+            for row in self.reviews.values()
+        )
+        completed = len(self.example_ids) - len(pending_ids)
+        needs_manual_retrack = (
+            not second_phase and dispositions["needs_retrack"] > 0 and not pending_ids
+        )
+        return {
+            "review_mode": self.review_mode,
+            "phase": (
+                "manual_track_review"
+                if second_phase
+                else "awaiting_manual_retrack"
+                if needs_manual_retrack
+                else "initial_review"
+            ),
+            "manual_artifact_frozen": manual_artifact_frozen,
+            "pending_count": len(pending_ids),
+            "needs_manual_retrack_count": dispositions["needs_retrack"],
+            "total": len(self.example_ids),
+            "completed": completed,
+            "dispositions": dispositions,
+            "position": index + 1 if current is not None else None,
+            "current": current,
+            "saved_review": saved,
+            "previous_example_id": (
+                self.example_ids[index - 1] if index > 0 else None
+            ),
+            "next_example_id": (
+                self.example_ids[index + 1]
+                if current is not None and index + 1 < len(self.example_ids)
+                else None
+            ),
+            "done": current is None,
+        }
+
+    def asset_path(self, example_id: str, asset_id: str) -> Path:
+        try:
+            return self._assets[example_id][asset_id]
+        except KeyError as exc:
+            raise KeyError("unknown frozen review asset") from exc
+
+    def submit(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        example_id = str(payload.get("example_id", "")).strip()
+        if example_id not in self.examples:
+            raise KeyError("unknown example")
+        if (
+            "reason" in payload
+            or "note" in payload
+            or "wrong_region" in payload
+        ):
+            raise ValueError(
+                "tracking v2 accepts no free text or wrong_region"
+            )
+        status = str(payload.get("status", "")).strip()
+        if status not in TRACKING_REVIEW_STATUSES:
+            raise ValueError("invalid tracking review status")
+        if self.manual_tracking_artifact_sha256 is not None:
+            frozen = self.reviews.get(example_id)
+            if not isinstance(frozen, Mapping) or frozen.get("status") != (
+                "needs_retrack"
+            ):
+                raise ValueError("二阶段只能处理首轮已冻结的 needs_retrack")
+            if status == "needs_retrack":
+                raise ValueError("manual artifact已冻结，不能再新增或修改手画框")
+            if (
+                status == "eligible"
+                and payload.get("decision_source") != "accept_manual_track"
+            ):
+                raise ValueError(
+                    "二阶段 eligible 只能接受与初审锚点绑定的 manual track"
+                )
+        if (
+            status == "needs_retrack"
+            and self.manual_tracking_artifact_sha256 is not None
+        ):
+            raise ValueError("manual artifact已冻结，不能再新增或修改手画框")
+        reviewed_at = datetime.now(timezone.utc).isoformat()
+        record: dict[str, Any] = {
+            "schema_version": TRACKING_REVIEW_SCHEMA,
+            "example_id": example_id,
+            "status": status,
+            "review_id": self.reviewer_id,
+            "human_reviewed": True,
+            "reviewed_at": reviewed_at,
+            "requests_sha256": self.requests_sha256,
+            "tracking_artifact_sha256": self.tracking_artifact_sha256,
+            "manifest_sha256": self.manifest_sha256,
+        }
+        example = self.examples[example_id]
+
+        if status == "eligible":
+            candidate_id = str(payload.get("candidate_id", "")).strip()
+            decision_source = str(
+                payload.get("decision_source", "")
+            ).strip()
+            selectable = {
+                row["candidate_id"]: row for row in example["options"]
+            }
+            manual_option = self._bound_manual_option(example_id)
+            if manual_option is not None:
+                selectable[manual_option["candidate_id"]] = manual_option
+            option = selectable.get(candidate_id)
+            if option is None:
+                raise ValueError(
+                    "selected candidate is not a frozen review option"
+                )
+            required_source = {
+                "algorithmic_default": "accept_default",
+                "alternative": "select_alternative",
+                "manual_track": "accept_manual_track",
+            }[option["selection"]]
+            if decision_source != required_source:
+                raise ValueError(
+                    "decision source does not match candidate provenance"
+                )
+            track = option.get("track")
+            if not isinstance(track, Mapping) or track.get("valid") is not True:
+                raise ValueError(
+                    "candidate has no complete valid precomputed track"
+                )
+            provenance = {
+                "artifact_fingerprint": (
+                    example["manual_artifact_fingerprint"]
+                    if required_source == "accept_manual_track"
+                    else example["artifact_fingerprint"]
+                ),
+                "track_fingerprint": track["fingerprint"],
+                "track_source": track["source"],
+                "request_fingerprint": track["request_fingerprint"],
+                "proposal_fingerprint": track["proposal_fingerprint"],
+                "locked_obj_id": track["locked_obj_id"],
+                "continuity": track["continuity"],
+                "predictor_provenance": track["predictor_provenance"],
+            }
+            record["selected_candidate_id"] = candidate_id
+            record["decision"] = {
+                "source": required_source,
+                "selected_candidate_id": candidate_id,
+                "candidate_provenance": {
+                    "selection": option["selection"],
+                    "query": option["query"],
+                    "score": option["score"],
+                    "first_bbox": option["bbox"],
+                },
+                "track_provenance": provenance,
+            }
+            models = {}
+            for model in MODELS:
+                terminal = track["terminals"][model]
+                if terminal is None:
+                    raise ValueError(
+                        f"{model}: selected track has no terminal target"
+                    )
+                models[model] = {
+                    "target": {
+                        "image_path": terminal["image_path"],
+                        "image_sha256": terminal["image_sha256"],
+                        "source_frame_index": terminal[
+                            "source_frame_index"
+                        ],
+                        "bbox": terminal["bbox"],
+                        "source": "tracked_sam3",
+                        "candidate_id": candidate_id,
+                        "obj_id": terminal["obj_id"],
+                    }
+                }
+            record["models"] = models
+            if required_source == "accept_manual_track":
+                if self.manual_tracking_artifact_sha256 is None:
+                    raise ValueError(
+                        "manual tracking artifact is unavailable"
+                    )
+                if (
+                    not self.manual_tracks_path.is_file()
+                    or sha256_file(self.manual_tracks_path)
+                    != self.manual_tracking_artifact_sha256
+                ):
+                    raise ValueError(
+                        "manual tracking artifact changed during review; restart required"
+                    )
+                record["manual_tracking_artifact_sha256"] = (
+                    self.manual_tracking_artifact_sha256
+                )
+
+        elif status == "needs_retrack":
+            first = example["first"]
+            bbox = _finite_bbox(
+                payload.get("first_bbox"),
+                identity=f"{example_id}/manual",
+            )
+            if (
+                bbox[0] < 0
+                or bbox[1] < 0
+                or bbox[2] > first["width"]
+                or bbox[3] > first["height"]
+            ):
+                raise ValueError(
+                    "manual first-frame bbox is outside the frozen image"
+                )
+            manual_anchor_id = derive_manual_anchor_id(
+                example_id, first["image_sha256"], bbox
+            )
+            record["manual_anchor_id"] = manual_anchor_id
+            record["decision"] = {
+                "source": "manual_first_bbox",
+                "first_image_path": first["image_path"],
+                "first_image_sha256": first["image_sha256"],
+                "first_bbox": bbox,
+            }
+            record["models"] = {}
+
+        else:
+            code = str(payload.get("disposition_code", "")).strip()
+            if code not in SKIP_CODES:
+                raise ValueError(
+                    f"disposition_code must be one of {sorted(SKIP_CODES)}"
+                )
+            record["disposition"] = {"code": code}
+            record["models"] = {}
+
+        record["fingerprint"] = object_fingerprint(record)
+        with self._lock:
+            if (
+                status == "needs_retrack"
+                and self.manual_tracking_artifact_sha256 is not None
+            ):
+                raise ValueError("manual artifact已冻结，不能再新增或修改手画框")
+            append_jsonl(self.history_path, record)
+            self.reviews[example_id] = record
+            self._materialize()
+        return self.state()
+
+PAGE = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>SAM3 人工审核</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:18px;background:#f4f6f8;color:#18202a}button,input{font:inherit}
+#meta{color:#53606e;margin-bottom:8px}#instruction{font-size:1.15rem;font-weight:650}.card{background:#fff;padding:14px;border-radius:10px;box-shadow:0 1px 4px #0002;margin:12px 0}
+#models button.active{background:#215fa6;color:white}.toolbar button,.nav button,#models button{padding:7px 12px;margin:3px;border:1px solid #9ba8b7;border-radius:6px;cursor:pointer}
+#wrap{display:grid;grid-template-columns:minmax(520px,2fr) minmax(300px,1fr);gap:14px}canvas{width:100%;height:auto;background:#111;cursor:crosshair}
+.candidate{padding:7px;border-bottom:1px solid #ddd}.candidate button{margin-left:6px}.selected{outline:3px solid #2b8a3e}.warning{color:#a43d00}.ok{color:#237a38}.danger{background:#b22b2b;color:#fff}.primary{background:#237a38;color:#fff}
+#reason{width:min(720px,90%)}@media(max-width:900px){#wrap{grid-template-columns:1fr}}
+</style></head><body><h1>SAM3 grounding 人工审核</h1><div id="app">加载中…</div>
+<script>
+const MODELS=['roboreward','qwen','grm'];let state=null,currentModel='roboreward',regions={},loadedExampleId=null,drawMode=null,image=null,dragStart=null,busy=false,syncEnabled=true,dirty=false;
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function blankRegions(){return Object.fromEntries(MODELS.map(m=>[m,{target:null,wrong_region:null}]));}
+function savedRegions(saved){const out=blankRegions();if(saved?.status==='eligible')for(const m of MODELS)for(const k of ['target','wrong_region'])if(saved.models?.[m]?.[k])out[m][k]=saved.models[m][k];return out;}
+async function load(exampleId=null,pos=null){if(busy)return;if(dirty&&!confirm('当前框尚未保存，确定离开吗？'))return;busy=true;try{const q=exampleId?`?example_id=${encodeURIComponent(exampleId)}`:pos!==null?`?position=${pos}`:'';const r=await fetch('/api/state'+q),v=await r.json();if(!r.ok)throw new Error(v.error||'加载失败');state=v;dirty=false;render()}catch(e){document.querySelector('#app').innerHTML=`<div class="card warning">${esc(e.message)}</div>`}finally{busy=false}}
+function render(){const a=document.querySelector('#app');if(state.done){loadedExampleId=null;a.innerHTML=`<div class="card ok">已完成 ${state.completed}/${state.total}；eligible=${state.dispositions.eligible}，ineligible=${state.dispositions.ineligible}</div><div class="nav"><button onclick="load('${state.previous_example_id}')">上一条</button></div>`;return}
+const c=state.current;if(loadedExampleId!==c.example_id){regions=savedRegions(state.saved_review);loadedExampleId=c.example_id;currentModel='roboreward'}const r=c.roles||{};a.innerHTML=`<div id="meta">${state.position}/${state.total} · 已完成 ${state.completed} · eligible ${state.dispositions.eligible} · ineligible ${state.dispositions.ineligible} · ${esc(c.partition)} / ${esc(c.task_id)}</div><div id="instruction">${esc(c.instruction)}</div><div>目标：<b>${esc(r.target_instance||r.target_phrase)}</b>；策略：${esc(r.grounding_strategy)} ${r.requires_instance_review?'<span class="warning">（必须确认具体实例）</span>':''}</div><div class="card"><div id="models">${MODELS.map(m=>`<button onclick="switchModel('${m}')" class="${m===currentModel?'active':''}">${m}</button>`).join('')}</div><label><input id="sync" type="checkbox" checked> 三个模型图像哈希相同时同步选择/画框</label><div id="wrap"><div><canvas id="canvas"></canvas><div class="toolbar"><button onclick="drawMode='target'">手画 target</button><button onclick="drawMode='wrong_region'">手画 wrong-region</button><button onclick="clearRegion('target')">清 target</button><button onclick="clearRegion('wrong_region')">清 wrong</button></div></div><div><div id="selection"></div><h3>SAM3 候选</h3><div id="candidates"></div></div></div></div><div class="card"><button class="primary" onclick="saveEligible()">保存为 eligible</button> <input id="reason" placeholder="ineligible 原因（必填）"><button class="danger" onclick="saveIneligible()">保存为 ineligible</button><span id="message"></span></div><div class="nav"><button ${state.previous_example_id?'':'disabled'} onclick="load('${state.previous_example_id||''}')">← 上一条</button><button ${state.next_example_id?'':'disabled'} onclick="load('${state.next_example_id||''}')">下一条 →</button><label> 跳到 <input id="jump" type="number" min="1" max="${state.total}" value="${state.position}" style="width:6em"><button onclick="load(null,Number(document.querySelector('#jump').value))">Go</button></label></div>`;setupCanvas();renderCandidates();}
+function switchModel(m){currentModel=m;render()}
+function modelInfo(){return state.current.models[currentModel]}
+function syncModels(value){const info=MODELS.map(m=>state.current.models[m]),sameImage=new Set(info.map(x=>`${x.image_sha256}:${x.width}x${x.height}`)).size===1;return syncEnabled&&sameImage&&(!value||value.source!=='sam3_candidate'||state.current.candidate_sync_safe)}
+function targets(value){return syncModels(value)?MODELS:[currentModel]}
+function setRegion(kind,value){for(const m of targets(value))regions[m][kind]=value?JSON.parse(JSON.stringify(value)):null;dirty=true;redraw();renderCandidates()}
+function clearRegion(kind){setRegion(kind,null)}
+function choose(kind,index){const c=modelInfo().candidates.find(x=>x.candidate_index===index);setRegion(kind,{bbox:c.bbox,source:'sam3_candidate',candidate_index:index})}
+function setupCanvas(){const sync=document.querySelector('#sync');sync.checked=syncEnabled;sync.onchange=()=>{syncEnabled=sync.checked};const reason=document.querySelector('#reason');if(state.saved_review?.status==='ineligible')reason.value=state.saved_review.ineligible_reason||'';const canvas=document.querySelector('#canvas');image=new Image();image.onload=()=>{canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;redraw()};image.src=modelInfo().image_url;canvas.onpointerdown=e=>{if(!drawMode)return;dragStart=point(e,canvas)};canvas.onpointerup=e=>{if(!drawMode||!dragStart)return;const p=point(e,canvas),box=[Math.min(p[0],dragStart[0]),Math.min(p[1],dragStart[1]),Math.max(p[0],dragStart[0]),Math.max(p[1],dragStart[1])];if(box[2]-box[0]>=2&&box[3]-box[1]>=2)setRegion(drawMode,{bbox:box,source:'manual_bbox'});dragStart=null;drawMode=null};}
+function point(e,c){const r=c.getBoundingClientRect();return[(e.clientX-r.left)*c.width/r.width,(e.clientY-r.top)*c.height/r.height]}
+function box(ctx,b,color,label,width=3){ctx.strokeStyle=color;ctx.lineWidth=width;ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);ctx.fillStyle=color;ctx.font='16px sans-serif';ctx.fillText(label,b[0]+3,Math.max(16,b[1]-4))}
+function redraw(){const c=document.querySelector('#canvas');if(!c||!image?.complete)return;const x=c.getContext('2d');x.drawImage(image,0,0,c.width,c.height);for(const q of modelInfo().candidates)box(x,q.bbox,'#e0a800',`#${q.candidate_index}`,1);const r=regions[currentModel];if(r.target)box(x,r.target.bbox,'#20a044','TARGET',4);if(r.wrong_region)box(x,r.wrong_region.bbox,'#e03131','WRONG',4)}
+function renderCandidates(){const info=modelInfo(),r=regions[currentModel];document.querySelector('#selection').innerHTML=`<h3>当前选择</h3><div>target: ${r.target?esc(JSON.stringify(r.target.bbox.map(x=>+x.toFixed(1)))):'<span class="warning">未选</span>'}</div><div>wrong: ${r.wrong_region?esc(JSON.stringify(r.wrong_region.bbox.map(x=>+x.toFixed(1)))):'<span class="warning">未选</span>'}</div>`;document.querySelector('#candidates').innerHTML=info.candidates.length?info.candidates.map(q=>`<div class="candidate"><b>#${q.candidate_index}</b> ${esc(q.query||q.label)} · score=${Number(q.score).toFixed(3)}<button onclick="choose('target',${q.candidate_index})">设为 target</button><button onclick="choose('wrong_region',${q.candidate_index})">设为 wrong</button></div>`).join(''):'<div class="warning">没有候选，请手动画框或标记 ineligible。</div>';}
+async function submit(payload){if(busy)return;busy=true;try{const r=await fetch('/api/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),v=await r.json();if(!r.ok)throw new Error(v.error||'保存失败');state=v;dirty=false;render()}catch(e){document.querySelector('#message').textContent=' '+e.message}finally{busy=false}}
+function saveEligible(){for(const m of MODELS)for(const k of ['target','wrong_region'])if(!regions[m][k]){document.querySelector('#message').textContent=` ${m} ${k} 未确认`;return}submit({example_id:state.current.example_id,status:'eligible',models:Object.fromEntries(MODELS.map(m=>[m,regions[m]]))})}
+function saveIneligible(){submit({example_id:state.current.example_id,status:'ineligible',reason:document.querySelector('#reason').value})}
+window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});
+load();
+</script></body></html>"""
+
+
+TRACKING_PAGE = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tracked grounding v2 人工审核</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:18px;background:#f4f6f8;color:#18202a}
+button,input{font:inherit}.card{background:#fff;padding:14px;border-radius:10px;box-shadow:0 1px 4px #0002;margin:12px 0}
+#meta{color:#53606e;margin-bottom:8px}#instruction{font-size:1.15rem;font-weight:650;margin-bottom:6px}
+#layout{display:grid;grid-template-columns:minmax(520px,3fr) minmax(330px,2fr);gap:14px}
+canvas{width:100%;height:auto;background:#111}.draw{cursor:crosshair}.toolbar button,.nav button,.action{padding:7px 12px;margin:3px;border:1px solid #9ba8b7;border-radius:6px;cursor:pointer}
+.option{padding:10px;margin:8px 0;border:2px solid #ccd3dc;border-radius:8px}.option.active{box-shadow:0 0 0 3px #0002}
+.option.default{border-color:#16a34a}.option.preselect{border-color:#16a34a;background:#f0fdf4}
+.option.alt1{border-color:#2563eb}.option.alt2{border-color:#f59e0b}.reference{color:#7e22ce}
+.primary{background:#16803b;color:#fff}.secondary{background:#245fa5;color:#fff}.danger{background:#a82929;color:#fff}
+.warning{color:#a43d00}.ok{color:#237a38}.muted{color:#647181}.frozen{background:#fff4df;padding:8px;border-radius:6px}
+#gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.frame{background:#fff;padding:8px;border:1px solid #d8dee6;border-radius:8px}.frame canvas{display:block}
+.badge{display:inline-block;padding:2px 7px;border-radius:999px;background:#e8edf3;margin-left:5px;font-size:.84rem}
+button:disabled{opacity:.48;cursor:not-allowed}@media(max-width:900px){#layout{grid-template-columns:1fr}}
+</style></head><body><h1>Tracked grounding v2 人工审核</h1><div id="app">加载中…</div>
+<script>
+let state=null,busy=false,dirty=false,loadedId=null,selectedId=null,manualBox=null,drawing=false,dragStart=null;
+const COLORS=['#16a34a','#2563eb','#f59e0b'];
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function point(e,c){const r=c.getBoundingClientRect();return[(e.clientX-r.left)*c.width/r.width,(e.clientY-r.top)*c.height/r.height]}
+function drawBox(ctx,b,color,label,width=3,dashed=false){ctx.save();ctx.strokeStyle=color;ctx.lineWidth=width;ctx.setLineDash(dashed?[9,6]:[]);ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);ctx.setLineDash([]);ctx.fillStyle=color;ctx.font='16px sans-serif';ctx.fillText(label,b[0]+3,Math.max(16,b[1]-4));ctx.restore()}
+function optionColor(c,o,i){if(c.default_candidate_id)return o.candidate_id===c.default_candidate_id?COLORS[0]:COLORS[Math.min(i,2)];return i===0?COLORS[0]:COLORS[Math.min(i,2)]}
+function optionClass(c,o,i){if(c.default_candidate_id&&o.candidate_id===c.default_candidate_id)return'default';if(!c.default_candidate_id&&i===0)return'preselect';return i===1?'alt1':'alt2'}
+function optionLabel(c,o,i){if(c.default_candidate_id&&o.candidate_id===c.default_candidate_id)return'算法默认';if(!c.default_candidate_id&&i===0)return'人工预选（不是算法默认）';return'备选'}
+function allOptions(){const c=state.current;return c.manual_track?[...c.options,c.manual_track]:c.options}
+function selectedOption(){return allOptions().find(o=>o.candidate_id===selectedId)||null}
+async function load(exampleId=null,pos=null){if(busy)return;if(dirty&&!confirm('当前手画框尚未保存，确定离开吗？'))return;busy=true;try{const q=exampleId?'?example_id='+encodeURIComponent(exampleId):pos!==null?'?position='+pos:'';const r=await fetch('/api/state'+q),v=await r.json();if(!r.ok)throw new Error(v.error||'加载失败');state=v;dirty=false;render()}catch(e){document.querySelector('#app').innerHTML='<div class="card warning">'+esc(e.message)+'</div>'}finally{busy=false}}
+function render(){const app=document.querySelector('#app');if(state.done){loadedId=null;const message=state.phase==='awaiting_manual_retrack'?'初审已完成；请批量运行 manual retrack，再用同一审核目录重启本页面。':'已完成 '+state.completed+'/'+state.total;app.innerHTML='<div class="card '+(state.phase==='awaiting_manual_retrack'?'warning':'ok')+'">'+message+'</div><div class="nav"><button onclick="goPrev()">上一条</button></div>';return}
+const c=state.current;if(loadedId!==c.example_id){loadedId=c.example_id;manualBox=state.saved_review?.status==='needs_retrack'?state.saved_review.decision?.first_bbox:null;const resumedManual=state.saved_review?.status==='needs_retrack'&&c.manual_track?c.manual_track.candidate_id:null;selectedId=state.saved_review?.selected_candidate_id||resumedManual||c.default_candidate_id||(c.options[0]?.candidate_id)||c.manual_track?.candidate_id||null;drawing=false}
+const d=state.dispositions,saved=state.saved_review;const roles=c.roles||{};const noDefault=!c.default_candidate_id&&c.options.length>0;
+const options=c.options.map((o,i)=>renderOption(c,o,i)).join('');
+const manual=c.manual_track?renderManual(c.manual_track):'';
+const frozen=state.manual_artifact_frozen?'<div class="frozen warning">manual artifact 已冻结：已有人工 track 被批准，不能再新增或修改手画框。</div>':'';
+const savedText=saved?'<div class="badge">已保存：'+esc(saved.status)+'</div>':'';
+const phaseText=state.phase==='awaiting_manual_retrack'?'<div class="card warning">初审已完成；请先批量运行 manual retrack，然后重启本页面确认传播结果。</div>':state.phase==='manual_track_review'?'<div class="card ok">第二阶段：请逐条确认人工框传播得到的 terminal track。</div>':'';
+app.innerHTML=`${phaseText}<div id="meta">${state.position}/${state.total} · 已完成 ${state.completed} · eligible ${d.eligible||0} · needs_retrack ${d.needs_retrack||0} · skipped ${d.skipped||0} · ${esc(c.partition)} / ${esc(c.task_id)} ${savedText}</div>
+<div id="instruction">${esc(c.instruction)}</div>
+<div>目标：<b>${esc(roles.target_phrase)}</b>；策略：${esc(roles.grounding_strategy)}。本决定跨 RoboReward/Qwen/GRM 共享，但 terminal 逐模型冻结。</div>
+${noDefault?'<div class="card warning">没有唯一 algorithmic_default；绿色框只是人工预选，确认后仍记录为 select_alternative。</div>':''}
+${frozen}
+<div id="layout"><div class="card"><h3>首帧（source frame ${c.first_frame.source_frame_index}）</h3><canvas id="firstCanvas" class="${drawing?'draw':''}"></canvas>
+<div class="toolbar"><button ${state.manual_artifact_frozen?'disabled':''} onclick="startDraw()">首帧手画</button><button ${manualBox&& !state.manual_artifact_frozen?'':'disabled'} onclick="saveManual()">保存手画框 → needs_retrack</button><button ${manualBox&& !state.manual_artifact_frozen?'':'disabled'} onclick="clearManual()">清除手画框</button></div>
+<div class="muted">紫色虚线框是几何判定用 reference，不可选作 target。手画框没有预计算 track，服务端不会直接设为 eligible。</div></div>
+<div class="card"><h3>Target 候选</h3>${options||'<div class="warning">没有 target option；请手画或跳过。</div>'}${manual}<div id="message" class="warning"></div></div></div>
+<div class="card"><h3>同一 obj_id 的 track 关键帧与 terminal</h3><div id="trackStatus"></div><div id="gallery"></div></div>
+<div class="card"><button class="danger action" onclick="skip()">跳过</button></div>
+<div class="nav"><button ${state.previous_example_id?'':'disabled'} onclick="goPrev()">← 上一条</button><button ${state.next_example_id?'':'disabled'} onclick="goNext()">下一条 →</button><label> 跳到 <input id="jump" type="number" min="1" max="${state.total}" value="${state.position}" style="width:6em"><button onclick="load(null,Number(document.querySelector('#jump').value))">Go</button></label></div>`;
+setupFirst();renderGallery()}
+function renderOption(c,o,i){const valid=o.track?.valid===true,color=optionColor(c,o,i),klass=optionClass(c,o,i),label=optionLabel(c,o,i);const source=o.selection==='algorithmic_default'?'accept_default':'select_alternative';const button=o.selection==='algorithmic_default'?'Yes，接受默认':'选择此候选';return `<div class="option ${klass} ${selectedId===o.candidate_id?'active':''}"><b style="color:${color}">${esc(label)}</b> · ${esc(o.candidate_id)}<br>score=${Number(o.score).toFixed(3)} · ${esc(o.query)}<br><button onclick="selectTrack('${o.candidate_id}')">查看 track</button><button class="${o.selection==='algorithmic_default'?'primary':'secondary'}" ${valid?'':'disabled'} onclick="accept('${o.candidate_id}','${source}')">${button}</button>${valid?'':'<span class="warning"> 无完整有效 track，不能 eligible</span>'}</div>`}
+function renderManual(o){const valid=o.track?.valid===true;return `<div class="option ${selectedId===o.candidate_id?'active':''}" style="border-color:#0891b2"><b style="color:#08768d">人工框传播结果</b> · ${esc(o.candidate_id)}<br><button onclick="selectTrack('${o.candidate_id}')">查看 track</button><button class="primary" ${valid?'':'disabled'} onclick="accept('${o.candidate_id}','accept_manual_track')">Yes，接受人工 track</button>${valid?'':'<span class="warning"> propagation 无效，不能 eligible</span>'}</div>`}
+function setupFirst(){const c=state.current,canvas=document.querySelector('#firstCanvas'),img=new Image();img.onload=()=>{canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const x=canvas.getContext('2d');x.drawImage(img,0,0,canvas.width,canvas.height);c.options.forEach((o,i)=>drawBox(x,o.bbox,optionColor(c,o,i),optionLabel(c,o,i),o.candidate_id===selectedId?4:2));c.reference_candidates.forEach((o,i)=>drawBox(x,o.bbox,'#7e22ce','REF '+(i+1),2,true));if(c.manual_track)drawBox(x,c.manual_track.bbox,'#0891b2','MANUAL TRACK',3);if(manualBox)drawBox(x,manualBox,'#dc2626','MANUAL NEW',4)};img.src=c.first_frame.image_url;canvas.onpointerdown=e=>{if(!drawing||state.manual_artifact_frozen)return;dragStart=point(e,canvas)};canvas.onpointerup=e=>{if(!drawing||!dragStart)return;const p=point(e,canvas),b=[Math.min(p[0],dragStart[0]),Math.min(p[1],dragStart[1]),Math.max(p[0],dragStart[0]),Math.max(p[1],dragStart[1])];dragStart=null;drawing=false;if(b[2]-b[0]>=2&&b[3]-b[1]>=2){manualBox=b;dirty=true}render()}}
+function startDraw(){if(state.manual_artifact_frozen)return;drawing=true;render()}
+function clearManual(){manualBox=null;dirty=true;render()}
+function selectTrack(id){selectedId=id;render()}
+function renderGallery(){const o=selectedOption(),gallery=document.querySelector('#gallery'),status=document.querySelector('#trackStatus');if(!o?.track){status.innerHTML='<span class="warning">该候选没有预计算 track。</span>';gallery.innerHTML='';return}const t=o.track;status.innerHTML=(t.valid?'<span class="ok">track有效</span>':'<span class="warning">track无效：'+esc(t.error||t.status)+'</span>')+' · locked obj_id='+esc(t.locked_obj_id);const rows=[];for(const f of t.frames)rows.push({title:'关键帧 '+f.source_frame_index+' · obj_id '+f.obj_id,frame:f,color:'#0f766e'});for(const [m,f] of Object.entries(t.terminals))if(f)rows.push({title:m+' terminal '+f.source_frame_index+' · obj_id '+f.obj_id,frame:f,color:'#b45309'});gallery.innerHTML=rows.map((r,i)=>'<div class="frame"><b>'+esc(r.title)+'</b><canvas id="track-'+i+'"></canvas></div>').join('');rows.forEach((r,i)=>paintStatic(document.querySelector('#track-'+i),r.frame,r.color,'obj '+r.frame.obj_id))}
+function paintStatic(canvas,frame,color,label){const img=new Image();img.onload=()=>{canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const x=canvas.getContext('2d');x.drawImage(img,0,0,canvas.width,canvas.height);drawBox(x,frame.bbox,color,label,4)};img.src=frame.image_url}
+async function submit(payload){if(busy)return;busy=true;try{const r=await fetch('/api/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),v=await r.json();if(!r.ok)throw new Error(v.error||'保存失败');state=v;dirty=false;render()}catch(e){document.querySelector('#message').textContent=e.message}finally{busy=false}}
+function accept(id,source){submit({example_id:state.current.example_id,status:'eligible',candidate_id:id,decision_source:source})}
+function saveManual(){if(!manualBox||state.manual_artifact_frozen)return;submit({example_id:state.current.example_id,status:'needs_retrack',first_bbox:manualBox})}
+function skip(){if(confirm('确定跳过这一例？'))submit({example_id:state.current.example_id,status:'skipped',disposition_code:'reviewer_skip'})}
+function goPrev(){if(state.previous_example_id)load(state.previous_example_id)}
+function goNext(){if(state.next_example_id)load(state.next_example_id)}
+window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});
+load();
+</script></body></html>"""
+
+
+def make_handler(
+    store: Sam3ReviewStore | TrackedGroundingReviewStore,
+):
+    class Handler(BaseHTTPRequestHandler):
+        def _json(
+            self, payload: Mapping[str, Any], status: HTTPStatus = HTTPStatus.OK
+        ) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:  # noqa: N802
+            parsed = urlparse(self.path)
+            if parsed.path == "/":
+                page = (
+                    TRACKING_PAGE
+                    if isinstance(store, TrackedGroundingReviewStore)
+                    else PAGE
+                )
+                body = page.encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path == "/api/state":
+                query = parse_qs(parsed.query)
+                try:
+                    raw_position = query.get("position", [None])[0]
+                    position = int(raw_position) if raw_position is not None else None
+                    value = store.state(
+                        query.get("example_id", [None])[0], position=position
+                    )
+                except (KeyError, ValueError) as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                    return
+                self._json(value)
+                return
+            if parsed.path == "/api/image":
+                query = parse_qs(parsed.query)
+                try:
+                    if isinstance(store, TrackedGroundingReviewStore):
+                        path = store.asset_path(
+                            query.get("example_id", [""])[0],
+                            query.get("asset_id", [""])[0],
+                        )
+                    else:
+                        path = store.image_path(
+                            query.get("example_id", [""])[0],
+                            query.get("model", [""])[0],
+                        )
+                except (KeyError, ValueError, FileNotFoundError) as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+                    return
+                content = path.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header(
+                    "Content-Type",
+                    mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                )
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+        def do_POST(self) -> None:  # noqa: N802
+            if urlparse(self.path).path != "/api/decision":
+                self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                content_type = self.headers.get("Content-Type", "")
+                if content_type.split(";", 1)[0].strip().lower() != "application/json":
+                    raise ValueError("Content-Type must be application/json")
+                origin = self.headers.get("Origin")
+                host = self.headers.get("Host", "")
+                host_name = host.rsplit(":", 1)[0].strip("[]").lower()
+                if host_name not in {"127.0.0.1", "localhost", "::1"}:
+                    raise ValueError("Host must be loopback")
+                if origin and origin not in {f"http://{host}", f"https://{host}"}:
+                    raise ValueError("cross-origin review submission is not allowed")
+
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 131_072:
+                    raise ValueError("invalid request size")
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, Mapping):
+                    raise ValueError("request body must be an object")
+                value = store.submit(payload)
+            except (KeyError, ValueError, json.JSONDecodeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json(value)
+
+        def log_message(self, format: str, *args: object) -> None:
+            print(f"[sam3-review] {self.address_string()} {format % args}")
+
+    return Handler
+
+
+def open_review_store(
+    run_dir: Path,
+    reviewer_id: str,
+    output_dir: Path | None = None,
+    *,
+    mode: str = "auto",
+) -> Sam3ReviewStore | TrackedGroundingReviewStore:
+    root = run_dir.resolve()
+    if mode not in {"auto", "v1", "tracking_v2"}:
+        raise ValueError("mode must be auto, v1, or tracking_v2")
+    selected = mode
+    if selected == "auto":
+        if (root / "tracks.jsonl").is_file():
+            selected = "tracking_v2"
+        elif (root / "proposals.jsonl").is_file():
+            selected = "v1"
+        else:
+            raise FileNotFoundError(
+                f"{root} contains neither tracks.jsonl nor proposals.jsonl"
+            )
+    if selected == "tracking_v2":
+        if not (root / "tracks.jsonl").is_file():
+            raise FileNotFoundError(root / "tracks.jsonl")
+        return TrackedGroundingReviewStore(root, reviewer_id, output_dir)
+    if not (root / "proposals.jsonl").is_file():
+        raise FileNotFoundError(root / "proposals.jsonl")
+    return Sam3ReviewStore(root, reviewer_id, output_dir)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Review my_dataset SAM3 grounding")
+    parser.add_argument("--run-dir", required=True)
+    parser.add_argument(
+        "--output-dir",
+        help="review output directory (mode-specific default under run-dir)",
+    )
+    parser.add_argument(
+        "--mode", choices=("auto", "v1", "tracking_v2"), default="auto"
+    )
+    parser.add_argument("--reviewer", required=True)
+    parser.add_argument("--port", type=int, default=8766)
+    args = parser.parse_args()
+    if not 1 <= args.port <= 65535:
+        raise ValueError("port must be in 1..65535")
+    store = open_review_store(
+        Path(args.run_dir),
+        args.reviewer,
+        Path(args.output_dir) if args.output_dir else None,
+        mode=args.mode,
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(store))
+    print(f"Review server: http://127.0.0.1:{args.port}")
+    print(f"History: {store.history_path}")
+    print(f"Canonical reviews: {store.reviews_path}")
+    print("The server binds to loopback only; use SSH/IDE port forwarding if needed.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

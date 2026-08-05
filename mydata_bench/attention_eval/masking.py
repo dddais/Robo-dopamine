@@ -7,6 +7,7 @@ import numpy as np
 
 
 QUERY_SCOPES = frozenset({"all", "prefill", "last_prompt", "decode"})
+VISUAL_SCOPES = frozenset({"target_slot_only", "all_visual"})
 
 
 @dataclass(frozen=True)
@@ -65,10 +66,11 @@ def matched_wrong_position_set(
     *,
     spatial_merge_size: int = 2,
 ) -> list[int] | None:
-    """Find a non-overlapping grid rectangle with exactly the target token count.
+    """Translate the target footprint to a disjoint far region in the same span.
 
-    If the target covers multiple temporal planes or is not rectangular, this
-    intentionally returns None instead of shrinking or fabricating a control.
+    The translation preserves the exact spatial footprint and token count. It
+    also supports non-rectangular unions from moving targets in one Qwen
+    temporal patch. Callers must fail closed when no same-span translation exists.
     """
     t, raw_h, raw_w = span.grid_thw
     grid_h = raw_h // spatial_merge_size
@@ -80,19 +82,20 @@ def matched_wrong_position_set(
         return None
     rows = [value // grid_w for value in relative]
     cols = [value % grid_w for value in relative]
-    height = max(rows) - min(rows) + 1
-    width = max(cols) - min(cols) + 1
-    if height * width != len(relative):
-        return None
+    row_min, row_max = min(rows), max(rows)
+    col_min, col_max = min(cols), max(cols)
+    height = row_max - row_min + 1
+    width = col_max - col_min + 1
+    footprint = {
+        (row - row_min, col - col_min) for row, col in zip(rows, cols)
+    }
     target = set(relative)
     candidates = []
     target_center = ((min(rows) + max(rows)) / 2, (min(cols) + max(cols)) / 2)
     for row in range(grid_h - height + 1):
         for col in range(grid_w - width + 1):
             candidate = {
-                (row + dy) * grid_w + col + dx
-                for dy in range(height)
-                for dx in range(width)
+                (row + dy) * grid_w + col + dx for dy, dx in footprint
             }
             if target & candidate:
                 continue
@@ -123,6 +126,49 @@ def select_low_ranked_heads(
             break
     if len(selected) != count:
         raise ValueError("Insufficient non-overlapping low-ranked heads")
+    return selected
+
+
+def select_layer_matched_low_ranked_heads(
+    ranking: Sequence[dict], candidates: Sequence[Head]
+) -> list[Head]:
+    """Select bottom-ranked heads while preserving candidate layer counts.
+
+    This prevents a global bottom-K control from confounding attention rank
+    with decoder depth.
+    """
+
+    required: dict[int, int] = {}
+    excluded = {(int(head.layer), int(head.head)) for head in candidates}
+    for head in candidates:
+        layer = int(head.layer)
+        required[layer] = required.get(layer, 0) + 1
+
+    by_layer: dict[int, list[Head]] = {layer: [] for layer in required}
+    for row in reversed(list(ranking)):
+        layer = int(row["layer"])
+        head = int(row["head"])
+        if layer not in required or (layer, head) in excluded:
+            continue
+        if len(by_layer[layer]) < required[layer]:
+            by_layer[layer].append(Head(layer, head))
+
+    missing = {
+        layer: required[layer] - len(by_layer[layer])
+        for layer in required
+        if len(by_layer[layer]) != required[layer]
+    }
+    if missing:
+        raise ValueError(
+            "Insufficient non-overlapping low-ranked heads in matched layers: "
+            f"{missing}"
+        )
+
+    selected: list[Head] = []
+    for layer in required:
+        selected.extend(by_layer[layer])
+    if len(selected) != len(candidates):
+        raise AssertionError("Layer-matched low-rank selection changed head count")
     return selected
 
 

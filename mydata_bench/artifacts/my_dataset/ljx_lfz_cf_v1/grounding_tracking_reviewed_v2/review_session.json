@@ -1,0 +1,12 @@
+{
+  "frozen_sources_verified": true,
+  "manifest_path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_v2/manifest.json",
+  "manifest_sha256": "14d7a2b7791557985a29d0cab0d293b7bb396c38c0009a50f94ce7b267f70883",
+  "requests_path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_v2/requests.jsonl",
+  "requests_sha256": "dd158cd6a7e5f00d9af65a06b86f6d4323b9f6696f52b453fac120b08d418cf3",
+  "review_schema_version": "my_dataset.tracked_grounding_review.v2",
+  "reviewer_id": "1",
+  "schema_version": "my_dataset.tracked_grounding_review_session.v2",
+  "tracking_artifact_path": "/mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_v2/tracks.jsonl",
+  "tracking_artifact_sha256": "7706ef9b2fdef70cb31284a10ea7ee4dadc94158f2fd138a591e0fd5c11175dd"
+}

@@ -8,7 +8,8 @@ human-reviewed exploratory robustness rerun，不能表述为 confirmatory、for
 
 1. 首帧上由 SAM3 image proposer 给出的候选；
 2. 审核者确认的首帧实例；
-3. official SAM3 video predictor 从该视觉框锁定并连续传播出的同一 obj_id；
+3. official SAM3 的 SAM2-style instance tracker 从该视觉框锁定并连续传播出的
+   同一 obj_id；
 4. 经严格 audit 通过的 terminal bbox。
 
 tracking、审核和 attention manifest 构建阶段不得读取 reward/scoring labels。
@@ -68,13 +69,23 @@ tracking-reviewed attention 配置，最后才允许 attention-prepare。
 
 ## 4. 全视频传播规则
 
-- tracker 只能接收首帧 normalized xywh 视觉框，text=None；
-- 必须调用 official streaming propagate_in_video，不能 text-only tracking，
-  不能逐帧重新检测或重新选最高分实例；
-- anchor 返回的 mask/bbox 必须唯一匹配一个 locked_obj_id；此后每帧只读取该 ID；
-- 帧重复、越界、缺帧、locked ID 消失、空 mask、数组长度/shape 异常、
-  normalized box 非法或 terminal 缺失均记为 invalid；
-- 即使发生异常也必须 close_session，run 结束必须 shutdown；
+- 必须用 `build_sam3_video_model` 得到官方模型，按官方
+  `sam3_for_sam2_video_task_example.ipynb` 取 `model.tracker`，并绑定
+  `model.detector.backbone`；不得使用 dense semantic
+  `handle_request(add_prompt)` 代替单实例追踪；
+- tracker 只接收首帧 normalized xyxy 视觉框，通过
+  `init_state → add_new_points_or_box → propagate_in_video` 传播；不能
+  text-only tracking，不能逐帧重新检测或重新选最高分实例；
+- 首帧框固定分配一个 client obj_id，此后每帧只接受完全相同的 ID；anchor mask
+  必须非空并与 proposal bbox 达到配置的 IoU 门槛；
+- 帧重复、越界、缺帧、locked ID 改变、输出 tuple/mask shape 异常或 terminal
+  不可见均记为 invalid；
+- tracker 保留 obj_id 但 mask 暂时为空表示遮挡/离开视野：普通帧和 sampled
+  keyframe 允许记录为 `visible=false, bbox=null`，同时必须冻结全零 mask；
+  后续重新出现时仍使用同一 obj_id。三模型 terminal 必须
+  `visible=true`，不得沿用旧框或伪造 bbox；
+- 即使发生异常也必须关闭传播 generator 并释放 caller-owned inference state；
+  run 结束必须退出官方 tracker 的 bf16 context 并清理模型；
 - RR/Qwen processor sampled frames 的 union、首帧和三模型 terminal 是可审核
   keyframes；连续性检查覆盖从 0 到 terminal 的每一帧；
 - manual bbox 也必须从首帧重新传播。禁止把首帧框直接复制为 terminal 框。

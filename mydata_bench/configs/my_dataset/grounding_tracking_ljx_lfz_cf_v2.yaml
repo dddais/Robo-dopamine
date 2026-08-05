@@ -18,6 +18,10 @@ my_dataset_tracked_grounding:
     # 这里是 CUDA_VISIBLE_DEVICES 过滤后的进程内编号；多卡机器可按需修改。
     gpus_to_use: [0]
     device: cuda
+    # SAM2-style instance tracker；视频帧放 CPU，tracking state 保留在 GPU。
+    offload_video_to_cpu: true
+    offload_state_to_cpu: false
+    async_loading_frames: false
     threshold: 0.15
     mask_threshold: 0.50
     top_n_per_query: 20

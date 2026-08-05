@@ -26,6 +26,7 @@ from PIL import Image
 
 from ..attention_eval.masking import (
     QUERY_SCOPES,
+    VISUAL_SCOPES,
     Head,
     ImageSpan,
     bbox_to_token_positions,
@@ -33,6 +34,7 @@ from ..attention_eval.masking import (
     matched_wrong_position_set,
 )
 from ..attention_eval.runtime import find_contiguous_spans
+from ..io import sha256_file
 from ..protocol import IMAGE_LABELS
 from ..roboreward_eval.runner import parse_native_score
 from .protocols import (
@@ -76,6 +78,44 @@ def _spatial_merge_size(config: Any) -> int:
     return int(value if value is not None else 2)
 
 
+def temporal_source_frame_groups(
+    frame_indices: Sequence[int],
+    *,
+    temporal_patch_size: int,
+    temporal_grid_size: int,
+) -> list[list[int]]:
+    """Reproduce Qwen3-VL's consecutive temporal patching and final padding."""
+
+    if temporal_patch_size < 1 or temporal_grid_size < 1:
+        raise ValueError("Temporal patch/grid sizes must be positive")
+    if not frame_indices:
+        raise ValueError("Processor returned no source frame indices")
+    normalized: list[int] = []
+    for value in frame_indices:
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError("Processor source frame index is not an integer")
+        normalized.append(int(value))
+    if normalized != sorted(set(normalized)):
+        raise ValueError("Processor source frame indices must be sorted and unique")
+    expected_temporal = (
+        len(normalized) + temporal_patch_size - 1
+    ) // temporal_patch_size
+    if expected_temporal != temporal_grid_size:
+        raise ValueError(
+            "Processor temporal grid does not match sampled-frame patching: "
+            f"frames={len(normalized)}, patch={temporal_patch_size}, grid={temporal_grid_size}"
+        )
+    padded = list(normalized)
+    padded.extend(
+        normalized[-1]
+        for _ in range(temporal_grid_size * temporal_patch_size - len(normalized))
+    )
+    return [
+        padded[offset : offset + temporal_patch_size]
+        for offset in range(0, len(padded), temporal_patch_size)
+    ]
+
+
 @dataclass(frozen=True)
 class PreparedAttentionInput:
     inputs: dict[str, Any]
@@ -84,6 +124,7 @@ class PreparedAttentionInput:
     target_image_path: str
     visual_positions: list[int]
     protocol: str
+    target_source_frame_indices: tuple[int, ...] = ()
     video_metadata: dict[str, Any] | None = None
 
 
@@ -171,6 +212,12 @@ class QwenAttentionRuntime:
         self.num_layers = int(text_config.num_hidden_layers)
         self.num_heads = int(text_config.num_attention_heads)
         self.merge_size = _spatial_merge_size(self.model.config)
+        self.temporal_patch_size = int(
+            getattr(self.processor.video_processor, "temporal_patch_size", 0)
+        )
+        if self.temporal_patch_size < 1:
+            raise RuntimeError("Qwen video processor exposes no temporal_patch_size")
+        self._sha256_cache: dict[str, str] = {}
 
     @property
     def layers(self):
@@ -314,18 +361,23 @@ class QwenAttentionRuntime:
             raise RuntimeError(
                 "Attention processor video grid differs from the frozen input manifest"
             )
+        frame_groups = temporal_source_frame_groups(
+            frame_indices,
+            temporal_patch_size=self.temporal_patch_size,
+            temporal_grid_size=temporal,
+        )
+        expected_patch = sample.get("processor_temporal_patch_size")
+        if expected_patch is not None and int(expected_patch) != self.temporal_patch_size:
+            raise RuntimeError(
+                "Attention processor temporal patch size differs from the frozen manifest"
+            )
+        record["temporal_patch_size"] = self.temporal_patch_size
+        record["source_frame_groups"] = frame_groups
         record["target_video_span"] = image_spans[-1].label
-        if len(frame_indices) % temporal == 0:
-            frames_per_span = len(frame_indices) // temporal
-            record["target_source_frame_indices"] = frame_indices[-frames_per_span:]
-            record["target_span_alignment"] = "terminal_merged_time_group"
-        else:
-            # Some processors pad/merge a final temporal group internally.
-            # The reported terminal index still proves that the final token
-            # span is the only endpoint-aligned span; do not infer a false
-            # one-to-one frame grouping from a non-divisible count.
-            record["target_source_frame_indices"] = [frame_indices[-1]]
-            record["target_span_alignment"] = "terminal_in_final_padded_or_merged_group"
+        record["target_source_frame_indices"] = frame_groups[-1]
+        record["target_span_alignment"] = (
+            "tracked_bbox_union_over_terminal_temporal_patch"
+        )
         return PreparedAttentionInput(
             inputs=_move_inputs(self.torch, self.model, raw, self.dtype),
             spans=image_spans,
@@ -333,6 +385,7 @@ class QwenAttentionRuntime:
             target_image_path=str(Path(sample["last_image_path"]).resolve()),
             visual_positions=visual,
             protocol=self.protocol,
+            target_source_frame_indices=tuple(frame_groups[-1]),
             video_metadata=record,
         )
 

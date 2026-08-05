@@ -599,6 +599,7 @@ def _tracking_asset(
     locked_obj_id: int,
     file_cache: dict[Path, str],
     image_size_cache: dict[Path, tuple[int, int]],
+    allow_invisible: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{identity}: asset is missing")
@@ -621,9 +622,23 @@ def _tracking_asset(
         with Image.open(actual_path) as image:
             image_size_cache[actual_path] = tuple(map(int, image.size))
     width, height = image_size_cache[actual_path]
-    bbox = _tracking_bbox(value.get(bbox_field), identity=f"{identity}/bbox")
-    if bbox[0] < 0 or bbox[1] < 0 or bbox[2] > width or bbox[3] > height:
-        raise ValueError(f"{identity}: bbox exceeds frozen image")
+
+    visible = value.get("visible")
+    if not isinstance(visible, bool):
+        raise ValueError(f"{identity}: visibility flag is missing")
+    if not visible and not allow_invisible:
+        raise ValueError(f"{identity}: terminal target is not visible")
+    if visible:
+        bbox: list[float] | None = _tracking_bbox(
+            value.get(bbox_field), identity=f"{identity}/bbox"
+        )
+        if bbox[0] < 0 or bbox[1] < 0 or bbox[2] > width or bbox[3] > height:
+            raise ValueError(f"{identity}: bbox exceeds frozen image")
+    else:
+        if value.get(bbox_field) is not None:
+            raise ValueError(f"{identity}: invisible frame must not carry a bbox")
+        bbox = None
+
     obj_id = value.get("obj_id")
     if isinstance(obj_id, bool) or not isinstance(obj_id, int) or obj_id != locked_obj_id:
         raise ValueError(f"{identity}: locked obj_id mismatch")
@@ -631,14 +646,26 @@ def _tracking_asset(
     mask_sha = value.get("mask_sha256")
     if (mask_path is None) != (mask_sha is None):
         raise ValueError(f"{identity}: mask path/SHA mismatch")
+    verified_mask: Path | None = None
     if mask_path is not None:
-        _tracking_verify_file(
+        verified_mask = _tracking_verify_file(
             mask_path,
             mask_sha,
             identity=f"{identity}/mask",
             cache=file_cache,
         )
-    return {"path": str(actual_path), "sha256": expected_sha, "bbox": bbox}
+    if not visible:
+        if verified_mask is None:
+            raise ValueError(f"{identity}: invisible frame requires a frozen empty mask")
+        with Image.open(verified_mask) as image:
+            if image.convert("L").getbbox() is not None:
+                raise ValueError(f"{identity}: invisible frame mask is not empty")
+    return {
+        "path": str(actual_path),
+        "sha256": expected_sha,
+        "bbox": bbox,
+        "visible": visible,
+    }
 
 
 def _tracking_validate_selected_track(
@@ -762,6 +789,7 @@ def _tracking_validate_selected_track(
             locked_obj_id=locked_obj_id,
             file_cache=file_cache,
             image_size_cache=image_size_cache,
+            allow_invisible=True,
         )
 
     terminals = track.get("terminal_by_model")
@@ -968,7 +996,7 @@ def audit_tracked_grounding_review(
     )
     if (
         not isinstance(tracker, Mapping)
-        or tracker.get("backend") != "official_sam3_video_predictor"
+        or tracker.get("backend") != "official_sam3_sam2_style_instance_tracker"
         or not tracker_fingerprint
     ):
         manifest_reasons.append("manifest_tracker_invalid")

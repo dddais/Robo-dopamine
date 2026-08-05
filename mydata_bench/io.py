@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -88,9 +89,11 @@ def append_jsonl(path: str | Path, row: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         handle.write(canonical_json(row) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def latest_by_id(

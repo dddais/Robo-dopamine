@@ -1,7 +1,6 @@
-"""Instruction parsing and interchangeable object grounding backends."""
+"""Object-grounding runtime used by the local-dataset pipeline."""
 
 from .base import Grounder
-from .parser import InstructionParser, heuristic_parse
 
-__all__ = ["Grounder", "InstructionParser", "heuristic_parse"]
+__all__ = ["Grounder"]
 

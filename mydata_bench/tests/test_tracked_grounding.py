@@ -21,7 +21,7 @@ from mydata_bench.my_dataset.tracked_grounding import (
     TRACKED_GROUNDING_MANUAL_ANCHOR_SCHEMA,
     TRACKED_GROUNDING_REQUEST_SCHEMA,
     _candidate_provider_provenance,
-    _parse_predictor_row,
+    _parse_tracker_frame,
     _predictor_from_config,
     _proposal_from_candidates,
     _run_visual_propagation,
@@ -280,58 +280,68 @@ class FakePredictor:
         self.shutdown_called = False
         self.anchor_bbox: list[float] | None = None
 
-    def _row(self, frame_index: int) -> dict[str, Any]:
+    def _frame_output(self, frame_index: int) -> tuple[Any, ...]:
         assert self.anchor_bbox is not None
-        x, y, box_width, box_height = self.anchor_bbox
-        x1 = max(0, min(WIDTH - 1, int(round(x * WIDTH)) + frame_index))
-        y1 = max(0, min(HEIGHT - 1, int(round(y * HEIGHT))))
-        x2 = min(WIDTH, x1 + max(1, int(round(box_width * WIDTH))))
-        y2 = min(HEIGHT, y1 + max(1, int(round(box_height * HEIGHT))))
-        mask = np.zeros((HEIGHT, WIDTH), dtype=bool)
-        mask[y1:y2, x1:x2] = True
+        x1_norm, y1_norm, x2_norm, y2_norm = self.anchor_bbox
+        x1 = max(0, min(WIDTH - 1, int(round(x1_norm * WIDTH)) + frame_index))
+        y1 = max(0, min(HEIGHT - 1, int(round(y1_norm * HEIGHT))))
+        box_width = max(1, int(round((x2_norm - x1_norm) * WIDTH)))
+        box_height = max(1, int(round((y2_norm - y1_norm) * HEIGHT)))
+        x2 = min(WIDTH, x1 + box_width)
+        y2 = min(HEIGHT, y1 + box_height)
+        masks = np.full((1, 1, HEIGHT, WIDTH), -1.0, dtype=np.float32)
+        masks[0, 0, y1:y2, x1:x2] = 1.0
         if self.empty_at == frame_index:
-            mask[:] = False
-        ids = np.asarray([7], dtype=np.int64)
+            masks[:] = -1.0
+        ids = np.asarray([1], dtype=np.int64)
         if self.missing_id_at == frame_index:
             ids = np.asarray([8], dtype=np.int64)
-        row = {
-            "frame_index": frame_index,
-            "outputs": {
-                "out_obj_ids": ids,
-                "out_probs": np.asarray([0.95], dtype=np.float32),
-                "out_boxes_xywh": np.asarray(
-                    [[x1 / WIDTH, y1 / HEIGHT, (x2 - x1) / WIDTH, (y2 - y1) / HEIGHT]],
-                    dtype=np.float32,
-                ),
-                "out_binary_masks": mask[None, :, :],
-            },
-        }
+        scores = np.asarray([[3.0]], dtype=np.float32)
         if self.malformed_at == frame_index:
-            row["outputs"]["out_probs"] = np.asarray([], dtype=np.float32)
-        return row
+            scores = np.asarray([], dtype=np.float32)
+        return frame_index, ids, None, masks, scores
 
-    def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        self.requests.append(copy.deepcopy(request))
-        kind = request["type"]
-        if kind == "start_session":
-            self.sessions += 1
-            return {"session_id": f"session-{self.sessions}"}
-        if kind == "add_prompt":
-            assert request["text"] is None
-            assert request["bounding_box_labels"] == [1]
-            self.anchor_bbox = list(request["bounding_boxes"][0])
-            return self._row(0)
-        if kind == "close_session":
-            self.closed += 1
-            return {"closed": True}
-        raise AssertionError(kind)
+    def init_state(self, **kwargs: Any) -> dict[str, Any]:
+        self.sessions += 1
+        self.requests.append({"type": "init_state", **copy.deepcopy(kwargs)})
+        return {
+            "num_frames": FRAME_COUNT,
+            "video_width": WIDTH,
+            "video_height": HEIGHT,
+        }
 
-    def handle_stream_request(self, request: dict[str, Any]):
-        self.stream_requests.append(copy.deepcopy(request))
+    def add_new_points_or_box(self, **kwargs: Any) -> tuple[Any, ...]:
+        box = np.asarray(kwargs["box"], dtype=np.float32).reshape(-1, 4)
+        assert box.shape == (1, 4)
+        assert kwargs["frame_idx"] == 0
+        assert kwargs["obj_id"] == 1
+        self.anchor_bbox = [float(value) for value in box[0]]
+        self.requests.append(
+            {
+                "type": "add_new_points_or_box",
+                "frame_idx": kwargs["frame_idx"],
+                "obj_id": kwargs["obj_id"],
+                "box": box.tolist(),
+            }
+        )
+        frame_index, ids, low_res, masks, _ = self._frame_output(0)
+        return frame_index, ids, low_res, masks
+
+    def propagate_in_video(
+        self, inference_state: dict[str, Any], **kwargs: Any
+    ):
+        self.stream_requests.append(
+            {"type": "propagate_in_video", **copy.deepcopy(kwargs)}
+        )
         if self.raise_stream:
             raise RuntimeError("stream failed")
         limit = FRAME_COUNT - 1 if self.missing_terminal else FRAME_COUNT
-        return iter(self._row(index) for index in range(limit))
+        for index in range(limit):
+            yield self._frame_output(index)
+
+    def release_state(self, inference_state: dict[str, Any]) -> None:
+        self.closed += 1
+        inference_state.clear()
 
     def shutdown(self) -> None:
         self.shutdown_called = True
@@ -554,13 +564,18 @@ def test_full_run_uses_visual_prompt_stream_and_locked_id(tmp_path: Path) -> Non
         == "injected_test_double"
     )
     assert provider.calls == ["cup"]
-    add = next(item for item in predictor.requests if item["type"] == "add_prompt")
-    assert add["text"] is None
-    assert add["bounding_boxes"] == [[2 / WIDTH, 2 / HEIGHT, 6 / WIDTH, 6 / HEIGHT]]
+    add = next(
+        item for item in predictor.requests
+        if item["type"] == "add_new_points_or_box"
+    )
+    assert add["obj_id"] == 1
+    assert np.allclose(
+        add["box"], [[2 / WIDTH, 2 / HEIGHT, 8 / WIDTH, 8 / HEIGHT]]
+    )
     assert predictor.stream_requests[0]["type"] == "propagate_in_video"
     track = artifact["candidate_tracks"][0]
-    assert track["locked_obj_id"] == 7
-    assert track["terminal_by_model"]["qwen"]["obj_id"] == 7
+    assert track["locked_obj_id"] == 1
+    assert track["terminal_by_model"]["qwen"]["obj_id"] == 1
     assert track["continuity"]["frame_coverage_complete"] is True
     assert predictor.closed == predictor.sessions
     assert predictor.shutdown_called
@@ -635,7 +650,7 @@ def test_cache_rejects_wrong_schema_even_with_valid_fingerprint(
 @pytest.mark.parametrize(
     "predictor",
     [
-        FakePredictor(empty_at=2),
+        FakePredictor(empty_at=FRAME_COUNT - 1),
         FakePredictor(missing_id_at=2),
         FakePredictor(malformed_at=2),
         FakePredictor(missing_terminal=True),
@@ -661,6 +676,34 @@ def test_tracking_failures_close_session(
     assert predictor.closed == 1
 
 
+def test_invisible_sampled_frame_is_audited_but_terminal_stays_visible(
+    tmp_path: Path,
+) -> None:
+    config, _, _ = _fixture_config(tmp_path)
+    request = list(read_jsonl(build_tracked_grounding_requests(config)))[0]
+    predictor = FakePredictor(empty_at=2)
+    result = _run_visual_propagation(
+        predictor,
+        request,
+        _candidate("target", [2, 2, 8, 8]),
+        {"tracker_fingerprint": "tracker"},
+        tmp_path / "cache",
+        "cache-key",
+        {},
+    )
+    frames = {
+        int(frame["source_frame_index"]): frame for frame in result["frames"]
+    }
+    assert result["continuity"]["empty_mask_frame_indices"] == [2]
+    assert frames[2]["visible"] is False
+    assert frames[2]["bbox_xyxy"] is None
+    mask = cv2.imread(frames[2]["mask_path"], cv2.IMREAD_GRAYSCALE)
+    assert mask is not None
+    assert cv2.countNonZero(mask) == 0
+    assert frames[FRAME_COUNT - 1]["visible"] is True
+    assert predictor.closed == 1
+
+
 def test_stream_exception_still_closes_session(tmp_path: Path) -> None:
     config, _, _ = _fixture_config(tmp_path)
     request = list(read_jsonl(build_tracked_grounding_requests(config)))[0]
@@ -678,16 +721,22 @@ def test_stream_exception_still_closes_session(tmp_path: Path) -> None:
     assert predictor.closed == 1
 
 
-def test_official_nested_output_shape_is_strict() -> None:
+def test_official_instance_tracker_output_shape_is_strict() -> None:
     predictor = FakePredictor()
-    predictor.anchor_bbox = [2 / WIDTH, 2 / HEIGHT, 6 / WIDTH, 6 / HEIGHT]
-    frame, objects = _parse_predictor_row(predictor._row(0), WIDTH, HEIGHT)
+    predictor.anchor_bbox = [2 / WIDTH, 2 / HEIGHT, 8 / WIDTH, 8 / HEIGHT]
+    frame, ids, _, masks, scores = predictor._frame_output(0)
+    frame, objects = _parse_tracker_frame(
+        frame, ids, masks, scores, WIDTH, HEIGHT
+    )
     assert frame == 0
-    assert objects[7]["bbox_xyxy"] == [2.0, 2.0, 8.0, 8.0]
-    malformed = predictor._row(0)
-    malformed["outputs"]["out_boxes_xywh"] = np.asarray([[0.0, 0.0, 2.0, 1.0]])
-    with pytest.raises(ValueError, match="normalized"):
-        _parse_predictor_row(malformed, WIDTH, HEIGHT)
+    assert objects[1]["bbox_xyxy"] == [2.0, 2.0, 8.0, 8.0]
+    malformed_masks = np.zeros(
+        (1, 1, HEIGHT, WIDTH - 1), dtype=np.float32
+    )
+    with pytest.raises(ValueError, match="masks"):
+        _parse_tracker_frame(
+            frame, ids, malformed_masks, scores, WIDTH, HEIGHT
+        )
 
 
 def test_missing_official_video_source_fails_closed() -> None:

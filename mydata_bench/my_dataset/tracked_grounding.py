@@ -30,6 +30,7 @@ from ..io import (
     object_fingerprint,
     read_jsonl,
     sha256_file,
+    stable_shard,
     write_json,
     write_jsonl,
 )
@@ -1495,6 +1496,57 @@ def _module_under(module: Any, root: Path) -> bool:
     return True
 
 
+class _OfficialSam3InstanceTracker:
+    """Own the official SAM3 model while exposing its SAM2-style tracker."""
+
+    def __init__(self, model: Any):
+        self._model = model
+        self._tracker = model.tracker
+        # Required by Meta's official sam3_for_sam2_video_task_example.ipynb.
+        self._tracker.backbone = model.detector.backbone
+
+    def init_state(self, **kwargs: Any) -> Any:
+        return self._tracker.init_state(**kwargs)
+
+    def add_new_points_or_box(self, **kwargs: Any) -> Any:
+        return self._tracker.add_new_points_or_box(**kwargs)
+
+    def propagate_in_video(self, *args: Any, **kwargs: Any) -> Any:
+        return self._tracker.propagate_in_video(*args, **kwargs)
+
+    def release_state(self, inference_state: Any) -> None:
+        # The official instance API has no close_session operation. Its state is
+        # caller-owned, so dropping the per-video tensors is the lifecycle boundary.
+        if isinstance(inference_state, dict):
+            inference_state.clear()
+        gc.collect()
+
+    def shutdown(self) -> None:
+        tracker = self._tracker
+        context = getattr(tracker, "bf16_context", None)
+        if context is not None:
+            context.__exit__(None, None, None)
+        self._tracker = None
+        self._model = None
+        gc.collect()
+        torch_module = sys.modules.get("torch")
+        cuda = getattr(torch_module, "cuda", None) if torch_module else None
+        if cuda is not None and callable(getattr(cuda, "empty_cache", None)):
+            cuda.empty_cache()
+
+
+def _to_numpy(value: Any, *, force_float: bool = False) -> np.ndarray:
+    if callable(getattr(value, "detach", None)):
+        value = value.detach()
+    if force_float and callable(getattr(value, "float", None)):
+        value = value.float()
+    if callable(getattr(value, "cpu", None)):
+        value = value.cpu()
+    if callable(getattr(value, "numpy", None)):
+        value = value.numpy()
+    return np.asarray(value)
+
+
 def _predictor_from_config(
     sam3_cfg: Mapping[str, Any],
 ) -> tuple[Any, dict[str, Any]]:
@@ -1504,6 +1556,7 @@ def _predictor_from_config(
         provenance.setdefault("official_source_path", "injected-test-double")
         provenance.setdefault("model_builder_sha256", object_fingerprint("injected"))
         provenance.setdefault("video_predictor_sha256", object_fingerprint("injected"))
+        provenance.setdefault("tracking_predictor_sha256", object_fingerprint("injected"))
         provenance.setdefault("checkpoint_path", "injected-test-double")
         provenance.setdefault("checkpoint_sha256", object_fingerprint("injected"))
         provenance.setdefault("source_tree_fingerprint", object_fingerprint("injected"))
@@ -1532,8 +1585,14 @@ def _predictor_from_config(
         )
     source = Path(str(source_value)).expanduser().resolve()
     builder_path = source / "sam3" / "model_builder.py"
-    predictor_path = source / "sam3" / "model" / "sam3_video_predictor.py"
-    if not builder_path.is_file() or not predictor_path.is_file():
+    dense_predictor_path = source / "sam3" / "model" / "sam3_video_predictor.py"
+    tracking_predictor_path = (
+        source / "sam3" / "model" / "sam3_tracking_predictor.py"
+    )
+    if not all(
+        path.is_file()
+        for path in (builder_path, dense_predictor_path, tracking_predictor_path)
+    ):
         raise RuntimeError(f"Official SAM3 video source is incomplete: {source}")
     checkpoint_value = sam3_cfg.get("checkpoint_path")
     if not checkpoint_value and sam3_cfg.get("model_path"):
@@ -1550,106 +1609,126 @@ def _predictor_from_config(
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
     builder_module = importlib.import_module("sam3.model_builder")
-    video_module = importlib.import_module("sam3.model.sam3_video_predictor")
-    if not _module_under(builder_module, source) or not _module_under(video_module, source):
-        raise RuntimeError("Imported SAM3 video modules do not originate from official_source_path")
-    builder = getattr(builder_module, "build_sam3_video_predictor", None)
+    tracking_module = importlib.import_module(
+        "sam3.model.sam3_tracking_predictor"
+    )
+    if not _module_under(builder_module, source) or not _module_under(
+        tracking_module, source
+    ):
+        raise RuntimeError(
+            "Imported SAM3 instance-tracking modules do not originate from "
+            "official_source_path"
+        )
+    builder = getattr(builder_module, "build_sam3_video_model", None)
     if not callable(builder):
-        raise RuntimeError("Official SAM3 source lacks build_sam3_video_predictor")
+        raise RuntimeError("Official SAM3 source lacks build_sam3_video_model")
     provenance = {
+        "backend": "official_sam3_sam2_style_instance_tracker",
+        "tracker_api": "init_state/add_new_points_or_box/propagate_in_video",
         "official_source_path": str(source),
         "model_builder_sha256": sha256_file(builder_path),
-        "video_predictor_sha256": sha256_file(predictor_path),
+        "video_predictor_sha256": sha256_file(dense_predictor_path),
+        "tracking_predictor_sha256": sha256_file(tracking_predictor_path),
         "checkpoint_path": str(checkpoint),
         "checkpoint_sha256": sha256_file(checkpoint),
+        "device": str(sam3_cfg.get("device", "cuda")),
+        "configured_gpus_to_use": copy.deepcopy(sam3_cfg.get("gpus_to_use")),
         **_official_source_tree_provenance(source),
         **_orchestrator_provenance(),
     }
     provenance["tracker_fingerprint"] = object_fingerprint(provenance)
-    kwargs: dict[str, Any] = {"checkpoint_path": str(checkpoint)}
-    if sam3_cfg.get("gpus_to_use") is not None:
-        kwargs["gpus_to_use"] = list(sam3_cfg["gpus_to_use"])
-    predictor = builder(**kwargs)
+    model = builder(
+        checkpoint_path=str(checkpoint),
+        load_from_HF=False,
+        device=str(sam3_cfg.get("device", "cuda")),
+    )
+    predictor = _OfficialSam3InstanceTracker(model)
     return predictor, provenance
 
 
-def _parse_predictor_row(
-    row: Any,
+def _parse_tracker_frame(
+    frame_value: Any,
+    obj_ids: Any,
+    video_res_masks: Any,
+    obj_score_logits: Any,
     width: int,
     height: int,
 ) -> tuple[int, dict[int, dict[str, Any]]]:
-    if not isinstance(row, dict):
-        raise ValueError("SAM3 returned a non-mapping frame result")
-    frame_value = row.get("frame_index")
-    if isinstance(frame_value, bool) or not isinstance(frame_value, (int, np.integer)):
-        raise ValueError("SAM3 frame_index is malformed")
-    frame_index = int(frame_value)
-    outputs = row.get("outputs")
-    if not isinstance(outputs, dict):
-        raise ValueError("SAM3 frame result lacks nested outputs")
-    required = ("out_obj_ids", "out_probs", "out_boxes_xywh", "out_binary_masks")
-    if any(name not in outputs for name in required):
-        raise ValueError("SAM3 output is missing an official out_* array")
-    ids = np.asarray(outputs["out_obj_ids"])
-    probs = np.asarray(outputs["out_probs"])
-    boxes = np.asarray(outputs["out_boxes_xywh"])
-    masks = np.asarray(outputs["out_binary_masks"])
-    if ids.ndim != 1:
-        raise ValueError("SAM3 out_obj_ids must have shape [N]")
-    count = int(ids.shape[0])
-    if (
-        count < 1
-        or probs.shape != (count,)
-        or boxes.shape != (count, 4)
-        or masks.shape != (count, height, width)
+    """Parse the official SAM2-style tracker tuple, never dense detector rows."""
+
+    if isinstance(frame_value, bool) or not isinstance(
+        frame_value, (int, np.integer)
     ):
-        raise ValueError("SAM3 official output arrays have inconsistent lengths/shapes")
+        raise ValueError("SAM3 tracker frame index is malformed")
+    frame_index = int(frame_value)
+    ids = _to_numpy(obj_ids)
+    if ids.ndim != 1:
+        raise ValueError("SAM3 tracker object ids must have shape [N]")
+    count = int(ids.shape[0])
+    if count < 1:
+        raise ValueError("SAM3 instance tracker returned no locked object id")
+
+    masks = _to_numpy(video_res_masks, force_float=True)
+    if masks.ndim == 4 and masks.shape[1] == 1:
+        masks = masks[:, 0]
+    elif masks.ndim == 2 and count == 1:
+        masks = masks[None, :, :]
+    if masks.shape != (count, height, width):
+        raise ValueError(
+            "SAM3 instance tracker masks do not match [N, video_height, video_width]"
+        )
+
+    scores: np.ndarray | None = None
+    if obj_score_logits is not None:
+        scores = _to_numpy(obj_score_logits, force_float=True)
+        if scores.size != count:
+            raise ValueError("SAM3 instance tracker scores do not match object ids")
+        scores = scores.reshape(count)
+
     parsed_ids: list[int] = []
     result: dict[int, dict[str, Any]] = {}
     for index in range(count):
         obj_value = ids[index]
         if isinstance(obj_value, (bool, np.bool_)):
-            raise ValueError("SAM3 object id is boolean")
+            raise ValueError("SAM3 tracker object id is boolean")
         try:
             obj_id = int(obj_value)
         except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("SAM3 object id is not integral") from exc
+            raise ValueError("SAM3 tracker object id is not integral") from exc
         if float(obj_id) != float(obj_value):
-            raise ValueError("SAM3 object id is not integral")
+            raise ValueError("SAM3 tracker object id is not integral")
         parsed_ids.append(obj_id)
-        score = float(probs[index])
-        box = np.asarray(boxes[index], dtype=np.float64)
-        if not math.isfinite(score) or not np.isfinite(box).all():
-            raise ValueError("SAM3 score/box contains NaN or infinity")
-        x, y, box_width, box_height = [float(value) for value in box]
-        tolerance = 1e-6
-        if (
-            x < -tolerance
-            or y < -tolerance
-            or box_width <= 0
-            or box_height <= 0
-            or x + box_width > 1 + tolerance
-            or y + box_height > 1 + tolerance
-        ):
-            raise ValueError("SAM3 out_boxes_xywh is not valid normalized xywh")
-        mask = np.asarray(masks[index]).astype(bool)
+
+        if scores is None:
+            score = 1.0
+        else:
+            logit = float(scores[index])
+            if not math.isfinite(logit):
+                raise ValueError("SAM3 tracker object score contains NaN or infinity")
+            score = float(1.0 / (1.0 + np.exp(-np.clip(logit, -80.0, 80.0))))
+
+        mask = np.asarray(masks[index] > 0.0, dtype=bool)
         ys, xs = np.nonzero(mask)
-        if xs.size == 0 or ys.size == 0:
-            raise ValueError("SAM3 returned an empty object mask")
-        bbox = [
-            float(xs.min()),
-            float(ys.min()),
-            float(xs.max() + 1),
-            float(ys.max() + 1),
-        ]
+        visible = bool(xs.size and ys.size)
+        bbox = (
+            [
+                float(xs.min()),
+                float(ys.min()),
+                float(xs.max() + 1),
+                float(ys.max() + 1),
+            ]
+            if visible
+            else None
+        )
         result[obj_id] = {
             "obj_id": obj_id,
             "score": score,
             "bbox_xyxy": bbox,
+            "visible": visible,
             "_mask": mask,
         }
     if len(set(parsed_ids)) != len(parsed_ids):
-        raise ValueError("SAM3 returned duplicate object ids in one frame")
+        raise ValueError("SAM3 tracker returned duplicate object ids in one frame")
     return frame_index, result
 
 
@@ -1729,68 +1808,110 @@ def _run_visual_propagation(
     required_indices = {
         int(frame["source_frame_index"]) for frame in request["key_frames"]
     }
+    terminal_indices: set[int] = set()
     for binding in request["model_frame_bindings"].values():
-        required_indices.add(int(binding["terminal"]["source_frame_index"]))
+        index = int(binding["terminal"]["source_frame_index"])
+        terminal_indices.add(index)
+        required_indices.add(index)
+
     bbox = [float(value) for value in candidate["bbox_xyxy"]]
     x1, y1, x2, y2 = bbox
-    normalized_xywh = [
-        x1 / width,
-        y1 / height,
-        (x2 - x1) / width,
-        (y2 - y1) / height,
-    ]
-    session_id: Any = None
+    normalized_xyxy = np.asarray(
+        [[x1 / width, y1 / height, x2 / width, y2 / height]],
+        dtype=np.float32,
+    )
+    locked_obj_id = 1
+    inference_state: Any = None
+    stream: Any = None
     pending_error: Exception | None = None
     result: dict[str, Any] | None = None
     try:
-        start = predictor.handle_request(
-            {
-                "type": "start_session",
-                "resource_path": request["video"]["path"],
-            }
+        inference_state = predictor.init_state(
+            video_path=request["video"]["path"],
+            offload_video_to_cpu=bool(
+                sam3_cfg.get("offload_video_to_cpu", True)
+            ),
+            offload_state_to_cpu=bool(
+                sam3_cfg.get("offload_state_to_cpu", False)
+            ),
+            async_loading_frames=bool(
+                sam3_cfg.get("async_loading_frames", False)
+            ),
         )
-        if not isinstance(start, dict) or not start.get("session_id"):
-            raise RuntimeError("SAM3 start_session did not return session_id")
-        session_id = start["session_id"]
-        anchor_row = predictor.handle_request(
-            {
-                "type": "add_prompt",
-                "session_id": session_id,
-                "frame_index": 0,
-                "text": None,
-                "bounding_boxes": [normalized_xywh],
-                "bounding_box_labels": [1],
-            }
+        if not isinstance(inference_state, Mapping):
+            raise RuntimeError("SAM3 instance tracker returned a malformed state")
+        if int(inference_state.get("num_frames", -1)) != frame_count:
+            raise ValueError(
+                "SAM3 instance tracker frame count differs from the frozen request"
+            )
+        if (
+            int(inference_state.get("video_width", -1)) != width
+            or int(inference_state.get("video_height", -1)) != height
+        ):
+            raise ValueError(
+                "SAM3 instance tracker video dimensions differ from the frozen request"
+            )
+
+        anchor_output = predictor.add_new_points_or_box(
+            inference_state=inference_state,
+            frame_idx=0,
+            obj_id=locked_obj_id,
+            box=normalized_xyxy,
         )
-        anchor_index, anchor_objects = _parse_predictor_row(anchor_row, width, height)
-        if anchor_index != 0:
-            raise ValueError("SAM3 visual anchor was not evaluated at frame 0")
+        if not isinstance(anchor_output, tuple) or len(anchor_output) != 4:
+            raise RuntimeError(
+                "SAM3 add_new_points_or_box returned an unexpected structure"
+            )
+        anchor_index, anchor_ids, _, anchor_masks = anchor_output
+        anchor_index, anchor_objects = _parse_tracker_frame(
+            anchor_index,
+            anchor_ids,
+            anchor_masks,
+            None,
+            width,
+            height,
+        )
+        if anchor_index != 0 or set(anchor_objects) != {locked_obj_id}:
+            raise ValueError(
+                "SAM3 bbox prompt did not lock exactly one object id on frame 0"
+            )
+        if not anchor_objects[locked_obj_id]["visible"]:
+            raise ValueError("SAM3 bbox prompt returned an empty anchor mask")
         threshold = float(sam3_cfg.get("anchor_match_iou", 0.1))
-        matching = [
-            obj_id
-            for obj_id, value in anchor_objects.items()
-            if _bbox_iou(value["bbox_xyxy"], bbox) >= threshold
-        ]
-        if len(matching) != 1:
-            raise ValueError("Visual anchor does not uniquely identify one SAM3 object id")
-        locked_obj_id = matching[0]
+        if (
+            _bbox_iou(anchor_objects[locked_obj_id]["bbox_xyxy"], bbox)
+            < threshold
+        ):
+            raise ValueError("SAM3 anchor mask does not overlap the proposal bbox")
 
         observed: list[int] = []
         duplicate: list[int] = []
         locked_missing: list[int] = []
+        empty_masks: list[int] = []
         seen: set[int] = set()
         frame_states: dict[int, dict[str, Any]] = {}
-        stream = predictor.handle_stream_request(
-            {
-                "type": "propagate_in_video",
-                "session_id": session_id,
-                "propagation_direction": "forward",
-                "start_frame_index": 0,
-                "max_frame_num_to_track": frame_count,
-            }
+        stream = predictor.propagate_in_video(
+            inference_state,
+            start_frame_idx=0,
+            max_frame_num_to_track=frame_count,
+            reverse=False,
+            tqdm_disable=True,
+            propagate_preflight=True,
         )
-        for frame_row in stream:
-            frame_index, objects = _parse_predictor_row(frame_row, width, height)
+        for frame_output in stream:
+            if not isinstance(frame_output, tuple) or len(frame_output) != 5:
+                raise ValueError(
+                    "SAM3 propagate_in_video returned an unexpected structure"
+                )
+            frame_index, obj_ids, _, video_res_masks, obj_scores = frame_output
+            frame_index, objects = _parse_tracker_frame(
+                frame_index,
+                obj_ids,
+                video_res_masks,
+                obj_scores,
+                width,
+                height,
+            )
             if frame_index < 0 or frame_index > terminal:
                 raise ValueError("SAM3 propagated an out-of-range frame index")
             if frame_index in seen:
@@ -1798,11 +1919,13 @@ def _run_visual_propagation(
                 continue
             seen.add(frame_index)
             observed.append(frame_index)
-            if locked_obj_id not in objects:
+            if set(objects) != {locked_obj_id}:
                 locked_missing.append(frame_index)
                 continue
+            state = objects[locked_obj_id]
+            if not state["visible"]:
+                empty_masks.append(frame_index)
             if frame_index in required_indices:
-                state = objects[locked_obj_id]
                 mask_path, mask_sha = _write_track_mask(
                     cache_dir / "masks" / f"frame_{frame_index:06d}.png",
                     state["_mask"],
@@ -1814,7 +1937,9 @@ def _run_visual_propagation(
                     "mask_sha256": mask_sha,
                     "obj_id": locked_obj_id,
                     "score": state["score"],
+                    "visible": bool(state["visible"]),
                 }
+
         expected_indices = list(range(frame_count))
         observed_sorted = sorted(observed)
         missing = sorted(set(expected_indices) - set(observed_sorted))
@@ -1824,7 +1949,13 @@ def _run_visual_propagation(
             raise ValueError(f"SAM3 propagation omitted frames: {missing[:10]}")
         if locked_missing:
             raise ValueError(
-                f"Locked SAM3 object id disappeared at frames: {locked_missing[:10]}"
+                f"Locked SAM3 object id changed at frames: {locked_missing[:10]}"
+            )
+        invisible_terminals = sorted(terminal_indices.intersection(empty_masks))
+        if invisible_terminals:
+            raise ValueError(
+                "SAM3 terminal mask is empty at frames: "
+                f"{invisible_terminals}"
             )
         absent_keyframes = sorted(required_indices - set(frame_states))
         if absent_keyframes:
@@ -1842,6 +1973,7 @@ def _run_visual_propagation(
                 "duplicate_frame_indices": [],
                 "locked_obj_id": locked_obj_id,
                 "locked_id_missing_frame_indices": [],
+                "empty_mask_frame_indices": empty_masks,
                 "id_switch_detected": False,
                 "frame_coverage_complete": True,
             },
@@ -1851,17 +1983,26 @@ def _run_visual_propagation(
     except Exception as exc:
         pending_error = exc
     finally:
-        if session_id is not None:
+        if stream is not None and callable(getattr(stream, "close", None)):
             try:
-                predictor.handle_request(
-                    {
-                        "type": "close_session",
-                        "session_id": session_id,
-                    }
-                )
+                stream.close()
             except Exception as exc:
                 if pending_error is None:
-                    pending_error = RuntimeError(f"SAM3 close_session failed: {exc}")
+                    pending_error = RuntimeError(
+                        f"SAM3 propagation stream close failed: {exc}"
+                    )
+        if inference_state is not None:
+            try:
+                release = getattr(predictor, "release_state", None)
+                if callable(release):
+                    release(inference_state)
+                elif isinstance(inference_state, dict):
+                    inference_state.clear()
+            except Exception as exc:
+                if pending_error is None:
+                    pending_error = RuntimeError(
+                        f"SAM3 instance state release failed: {exc}"
+                    )
     if pending_error is not None:
         raise pending_error
     if result is None:
@@ -1926,6 +2067,7 @@ def _track_candidate(
                 "mask_sha256": state["mask_sha256"],
                 "obj_id": int(state["obj_id"]),
                 "score": float(state["score"]),
+                "visible": bool(state["visible"]),
             }
         )
     terminal_by_model: dict[str, dict[str, Any]] = {}
@@ -1947,6 +2089,7 @@ def _track_candidate(
             "mask_sha256": state["mask_sha256"],
             "obj_id": int(state["obj_id"]),
             "score": float(state["score"]),
+            "visible": bool(state["visible"]),
         }
     provenance = copy.deepcopy(dict(predictor_provenance))
     provenance.update(
@@ -2242,8 +2385,20 @@ def _read_manifest(path: Path) -> dict[str, Any]:
 def run_tracked_grounding(
     config: dict[str, Any],
     retry_failed: bool = False,
+    *,
+    shard_id: int | None = None,
+    num_shards: int | None = None,
 ) -> Path:
     """Propose on frame zero and propagate every retained target candidate."""
+    if (shard_id is None) != (num_shards is None):
+        raise ValueError("shard_id and num_shards must be provided together")
+    if shard_id is not None and (
+        num_shards is None
+        or num_shards < 1
+        or shard_id < 0
+        or shard_id >= num_shards
+    ):
+        raise ValueError("tracking shard must satisfy 0 <= shard_id < num_shards")
     cfg, sam3_cfg = _cfg(config)
     output_dir = Path(str(cfg["output_dir"])).expanduser().resolve()
     requests_path = output_dir / "requests.jsonl"
@@ -2259,6 +2414,11 @@ def run_tracked_grounding(
     previous = _latest_artifacts(tracks_path)
     pending: list[tuple[dict[str, Any], int]] = []
     for request in requests:
+        if shard_id is not None and stable_shard(
+            str(request["video"]["sha256"]),
+            int(num_shards),
+        ) != shard_id:
+            continue
         old = previous.get(str(request["example_id"]))
         if old and old.get("request_fingerprint") == request["request_fingerprint"]:
             if old.get("status") in {"ok", "needs_review"}:
@@ -2343,6 +2503,17 @@ def run_tracked_grounding(
             except Exception as exc:
                 shutdown_error = exc
 
+    if shard_id is not None:
+        if shutdown_error is not None:
+            raise RuntimeError(
+                f"SAM3 predictor shutdown failed: {shutdown_error}"
+            )
+        if provider_shutdown_error is not None:
+            raise RuntimeError(
+                "SAM3 candidate provider shutdown failed: "
+                f"{provider_shutdown_error}"
+            )
+        return tracks_path
     latest = _latest_artifacts(tracks_path)
     counts = Counter(str(row.get("status")) for row in latest.values())
     expected_ids = {str(request["example_id"]) for request in requests}
@@ -2362,7 +2533,7 @@ def run_tracked_grounding(
     tracker = None
     if predictor_provenance is not None:
         tracker = {
-            "backend": "official_sam3_video_predictor",
+            "backend": "official_sam3_sam2_style_instance_tracker",
             "official_source_path": predictor_provenance["official_source_path"],
             "checkpoint_path": predictor_provenance["checkpoint_path"],
             "tracker_fingerprint": predictor_provenance["tracker_fingerprint"],
@@ -2370,7 +2541,7 @@ def run_tracked_grounding(
     elif isinstance(manifest.get("tracker"), dict):
         tracker = manifest["tracker"]
     if predictor_error is not None:
-        tracker = {"backend": "official_sam3_video_predictor", "error": str(predictor_error)}
+        tracker = {"backend": "official_sam3_sam2_style_instance_tracker", "error": str(predictor_error)}
     manifest.update(
         {
             "status": "complete"
