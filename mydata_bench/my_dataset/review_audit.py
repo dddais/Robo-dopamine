@@ -777,13 +777,79 @@ def _tracking_validate_selected_track(
         value.get("source_frame_index") if isinstance(value, Mapping) else None
         for value in frames
     ]
-    if actual_indices != sorted(expected_keyframes):
+    expected_review_indices = set(expected_keyframes)
+    expected_reason_codes: dict[int, list[str]] = {}
+    if "drift_review_frames_materialized" in continuity:
+        if continuity.get("drift_review_frames_materialized") is not True:
+            raise ValueError("selected track did not materialize drift-review frames")
+        raw_drift_indices = continuity.get("drift_review_frame_indices")
+        if not isinstance(raw_drift_indices, list):
+            raise ValueError("selected track drift-review frame indices are missing")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value >= frame_count
+            for value in raw_drift_indices
+        ):
+            raise ValueError("selected track drift-review frame index is invalid")
+        if raw_drift_indices != sorted(set(raw_drift_indices)):
+            raise ValueError(
+                "selected track drift-review frame indices are not ordered/unique"
+            )
+
+        reason_rows = continuity.get("quality_reason_frame_indices")
+        if not isinstance(reason_rows, Mapping):
+            raise ValueError("selected track drift-review reasons are missing")
+        allowed_reason_codes = {
+            "invisible_mask",
+            "low_tracker_score",
+            "anchor_area_ratio_outlier",
+            "consecutive_area_jump",
+            "consecutive_center_jump",
+        }
+        if any(str(reason) not in allowed_reason_codes for reason in reason_rows):
+            raise ValueError("selected track has an unknown drift-review reason")
+        reason_union: set[int] = set()
+        for reason, values in reason_rows.items():
+            if not isinstance(values, list) or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                or value >= frame_count
+                for value in values
+            ):
+                raise ValueError("selected track drift-review reason indices are invalid")
+            if values != sorted(set(values)) or not values:
+                raise ValueError(
+                    "selected track drift-review reason indices are not ordered/unique"
+                )
+            for frame_index in values:
+                reason_union.add(frame_index)
+                expected_reason_codes.setdefault(frame_index, []).append(str(reason))
+        drift_indices = set(raw_drift_indices)
+        if reason_union != drift_indices:
+            raise ValueError(
+                "selected track drift-review frames differ from diagnostic reasons"
+            )
+        if continuity.get("drift_review_required") is not bool(drift_indices):
+            raise ValueError("selected track drift-review required flag is inconsistent")
+        expected_review_indices.update(drift_indices)
+
+    if actual_indices != sorted(expected_review_indices):
         raise ValueError("selected track key-frame coverage/order differs from request")
     for value in frames:
         index = int(value["source_frame_index"])
+        expected = expected_keyframes.get(index)
+        if expected is None:
+            expected = {
+                "source_frame_index": index,
+                "image_path": value.get("image_path"),
+                "image_sha256": value.get("image_sha256"),
+            }
         _tracking_asset(
             value,
-            expected_keyframes[index],
+            expected,
             identity=f"{example_id}/track_frame/{index}",
             bbox_field="bbox_xyxy",
             locked_obj_id=locked_obj_id,
@@ -791,6 +857,18 @@ def _tracking_validate_selected_track(
             image_size_cache=image_size_cache,
             allow_invisible=True,
         )
+        if "drift_review_frames_materialized" in continuity:
+            actual_reason_codes = value.get("review_reason_codes")
+            if (
+                not isinstance(actual_reason_codes, list)
+                or actual_reason_codes != sorted(set(actual_reason_codes))
+                or any(not isinstance(reason, str) for reason in actual_reason_codes)
+                or actual_reason_codes
+                != sorted(expected_reason_codes.get(index, []))
+            ):
+                raise ValueError(
+                    f"selected track frame {index} drift-review reasons are inconsistent"
+                )
 
     terminals = track.get("terminal_by_model")
     bindings = request.get("model_frame_bindings")

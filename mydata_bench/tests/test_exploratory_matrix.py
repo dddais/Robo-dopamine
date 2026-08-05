@@ -47,10 +47,14 @@ class _FakeRuntime:
     def collect_mass(self, sample: dict) -> dict:
         self.mass_calls.append(sample["example_id"])
         order = int(sample["ranking_order"])
-        values = np.zeros((16, 8), dtype=np.float64)
+        # Keep every selected layer represented in the top-K while leaving an
+        # equal number of lower-ranked, non-overlapping heads in that layer.
+        # This makes the fixture capable of exercising the exact layer-matched
+        # low-rank control even at K=64.
+        values = np.zeros((16, 16), dtype=np.float64)
         for layer in range(values.shape[0]):
             for head in range(values.shape[1]):
-                values[layer, head] = layer + head / 10.0 + order / 1000.0
+                values[layer, head] = head + layer / 100.0 + order / 1000.0
         return {
             "example_id": sample["example_id"],
             "excess_mass": values.tolist(),
@@ -65,6 +69,18 @@ class _FakeRuntime:
     def target_positions(self, _sample: dict, _prepared: _Prepared) -> list[int]:
         return [1]
 
+    def visual_positions_for_scope(
+        self, _prepared: _Prepared, scope: str
+    ) -> list[int]:
+        assert scope in {"target_slot_only", "all_visual"}
+        return [1, 2, 3, 4]
+
+    def wrong_control_positions(
+        self, _prepared: _Prepared, target_positions: list[int]
+    ) -> tuple[list[int], str]:
+        assert target_positions == [1]
+        return [2], "fixture_same_target_span"
+
     def generate(
         self,
         sample: dict,
@@ -77,11 +93,13 @@ class _FakeRuntime:
         query_scope,
     ) -> dict:
         assert isinstance(prepared, _Prepared)
-        assert selected_positions == [1]
+        assert selected_positions in ([1], [2])
         assert visual_positions == [1, 2, 3, 4]
         call = {
             "example_id": sample["example_id"],
             "heads": list(heads),
+            "selected_positions": list(selected_positions),
+            "visual_positions": list(visual_positions),
             "bias": bias,
             "query_scope": query_scope,
         }
@@ -91,7 +109,17 @@ class _FakeRuntime:
             layer_heads = sorted(head.head for head in heads if head.layer == layer)
             per_layer[str(layer)] = {
                 "calls": 1,
+                "prefill_calls": 1,
+                "decode_calls": 0,
+                "observed_query_rows": 4,
+                "prefill_query_rows": 4,
+                "decode_query_rows": 0,
                 "applied_calls": 1,
+                "prefill_applied_calls": 1,
+                "decode_applied_calls": 0,
+                "applied_query_rows": 4,
+                "prefill_applied_query_rows": 4,
+                "decode_applied_query_rows": 0,
                 "skipped_calls": 0,
                 "missing_mask_calls": 0,
                 "selected_heads": layer_heads,
@@ -202,6 +230,7 @@ def _bind_reviewed_input_chain(
     tmp_path: Path,
     *,
     tracking: bool = False,
+    review_source_kind: str = "tracked_grounding_v2",
     model_family: str = "qwen",
     source_content_order: str = "text_then_video",
     processor_contract: dict | None = None,
@@ -300,7 +329,7 @@ def _bind_reviewed_input_chain(
             attention_manifest.pop(field)
         attention_manifest.update(
             {
-                "review_source_kind": "tracked_grounding_v2",
+                "review_source_kind": review_source_kind,
                 "tracking_artifact_sha256": provenance[
                     "tracking_artifact_sha256"
                 ],
@@ -358,7 +387,7 @@ def _bind_reviewed_input_chain(
         selection_manifest.pop("review_provenance")
         selection_manifest.update(
             {
-                "review_source_kind": "tracked_grounding_v2",
+                "review_source_kind": review_source_kind,
                 "tracking_review_provenance": provenance,
                 "target_grounding_scope": "terminal_only",
                 "control_region_policy": "none",
@@ -455,7 +484,7 @@ def test_matrix_mass_rank_grid_resume_retry_and_fingerprint(
     assert len(first.mass_calls) == 20
     assert len(set(first.mass_calls)) == 20
     assert first.prepare_calls == ["eval-000", "eval-001"]
-    assert len(first.generate_calls) == 20
+    assert len(first.generate_calls) == 56
 
     mass = list(read_jsonl(output_dir / "ranking" / "mass.jsonl"))
     assert len(mass) == 20
@@ -477,7 +506,7 @@ def test_matrix_mass_rank_grid_resume_retry_and_fingerprint(
         artifact = json.loads(path.read_text(encoding="utf-8"))
         assert artifact["sample_count"] == size
         assert artifact["ranking_n"] == size
-        assert len(artifact["ranking"]) == 64
+        assert len(artifact["ranking"]) == 128
         assert min(row["layer"] for row in artifact["ranking"]) >= 8
         assert artifact["grounding_status"] == "mixed"
         assert artifact["grounding_resolution"] == "mixed"
@@ -487,15 +516,17 @@ def test_matrix_mass_rank_grid_resume_retry_and_fingerprint(
 
     records_path = output_dir / "steering" / "records.jsonl"
     records = list(read_jsonl(records_path))
-    assert len(records) == 2 * 10
+    assert len(records) == 2 * 28
     assert {row["schema_version"] for row in records} == {MATRIX_SCHEMA_VERSION}
     for example_id in ("eval-000", "eval-001"):
         rows = [row for row in records if row["example_id"] == example_id]
         source = evaluation_inputs[example_id]
-        assert len(rows) == 10
+        assert len(rows) == 28
         assert {row["condition_kind"] for row in rows} == {
             "baseline",
             "candidate_target",
+            "candidate_wrong_region",
+            "low_rank_target",
         }
         assert {row["grounding_status"] for row in rows} == {
             source["grounding_status"]
@@ -554,15 +585,29 @@ def test_matrix_mass_rank_grid_resume_retry_and_fingerprint(
     generation = manifest["run_fingerprint_components"]["model"]["runtime"][
         "generation_contract"
     ]
+    library_versions = manifest["run_fingerprint_components"]["model"][
+        "runtime"
+    ]["library_versions"]
+    assert set(library_versions) == {
+        "python",
+        "torch",
+        "transformers",
+        "numpy",
+        "pillow",
+    }
+    assert all(isinstance(value, str) and value for value in library_versions.values())
     assert generation["attn_implementation"] == "eager"
     assert generation["decoding"] == "greedy"
     assert generation["do_sample"] is False
     assert generation["use_cache"] is True
-    assert manifest["steering"]["condition_count"] == 10
-    assert manifest["steering"]["controls"] == []
+    assert manifest["steering"]["condition_count"] == 28
+    assert manifest["steering"]["controls"] == [
+        "candidate_wrong_region",
+        "layer_matched_low_rank_target",
+    ]
 
     # A partial records file resumes only its missing (example, condition)
-    # without recollecting ranking mass or rerunning the other nine conditions.
+    # without recollecting ranking mass or rerunning the other 27 conditions.
     write_jsonl(records_path, records[:-1])
     partial = _FakeRuntime()
     monkeypatch.setattr(causal_runner, "_runtime", lambda _cfg: partial)
@@ -651,7 +696,7 @@ def test_matrix_resume_rejects_same_fingerprint_tampered_ordered_heads(
         raise AssertionError("model must not load before resume head validation")
 
     monkeypatch.setattr(causal_runner, "_runtime", must_not_load)
-    with pytest.raises(RuntimeError, match="Ordered Top-8 heads mismatch"):
+    with pytest.raises(RuntimeError, match="Frozen heads mismatch"):
         run_exploratory_matrix(config)
 
 
@@ -744,7 +789,7 @@ def test_matrix_accepts_only_explicit_reviewed_contract_and_auto_count(
     assert manifest["reference_variant_id"] == "fixture-qwen-unreviewed"
     assert manifest["review_provenance"] == provenance
     assert manifest["reviewed_input_chain"]["review_provenance"] == provenance
-    assert manifest["steering"]["expected_record_count"] == 20
+    assert manifest["steering"]["expected_record_count"] == 56
     assert manifest["grounding_composition"]["evaluation"] == {
         "human_audited_count": 2,
         "total": 2,
@@ -779,9 +824,13 @@ def test_matrix_accepts_only_explicit_reviewed_contract_and_auto_count(
     }
 
 
-def test_tracking_reviewed_matrix_propagates_v2_contract(
+@pytest.mark.parametrize(
+    "review_source_kind", ("tracked_grounding_v2", "tracked_grounding_v3")
+)
+def test_tracking_reviewed_matrix_propagates_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    review_source_kind: str,
 ) -> None:
     config, output_dir = _fixture(tmp_path)
     cfg = config["my_dataset_exploratory_matrix"]
@@ -796,13 +845,17 @@ def test_tracking_reviewed_matrix_propagates_v2_contract(
         }
     )
     provenance = _bind_reviewed_input_chain(
-        config, tmp_path, tracking=True
+        config,
+        tmp_path,
+        tracking=True,
+        review_source_kind=review_source_kind,
     )
     _bind_reviewed_checkpoint(config, tmp_path)
     monkeypatch.setattr(causal_runner, "_runtime", lambda _cfg: _FakeRuntime())
 
     manifest_path = run_exploratory_matrix(config)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["review_source_kind"] == review_source_kind
     assert manifest["tracking_review_provenance"] == provenance
     assert manifest["target_grounding_scope"] == "terminal_only"
     assert manifest["control_region_policy"] == "none"
@@ -1213,9 +1266,19 @@ def test_hook_assertion_rejects_any_unapplied_scope_all_call() -> None:
             "hook_active": True,
             "per_layer": {
                 "8": {
-                    "calls": 2,
-                    "applied_calls": 1,
-                    "skipped_calls": 1,
+                        "calls": 2,
+                        "prefill_calls": 1,
+                        "decode_calls": 0,
+                        "observed_query_rows": 3,
+                        "prefill_query_rows": 3,
+                        "decode_query_rows": 0,
+                        "applied_calls": 1,
+                        "prefill_applied_calls": 1,
+                        "decode_applied_calls": 0,
+                        "applied_query_rows": 3,
+                        "prefill_applied_query_rows": 3,
+                        "decode_applied_query_rows": 0,
+                        "skipped_calls": 1,
                     "missing_mask_calls": 1,
                     "selected_heads": [3],
                     "selected_token_count": 1,

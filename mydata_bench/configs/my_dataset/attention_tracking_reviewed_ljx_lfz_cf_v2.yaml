@@ -20,6 +20,7 @@ my_dataset_attention:
   output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/attention_tracking_reviewed_v2
   accepted_review_statuses: [eligible]
   expected_input_count: 755
+  native_video_temporal_patch_size: 2
   include_all: true
   complete_groups_only: true
   require_all_inputs: false

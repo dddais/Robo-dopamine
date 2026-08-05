@@ -22,6 +22,9 @@ from ..io import object_fingerprint, sha256_file
 REVIEW_PROVENANCE_SCHEMA = "my_dataset.review_provenance.v1"
 TRACKING_REVIEW_PROVENANCE_SCHEMA = "my_dataset.tracking_review_provenance.v2"
 ATTENTION_MANIFEST_SCHEMA = "my_dataset.attention_input.v1"
+TRACKED_REVIEW_SOURCE_KINDS = frozenset(
+    {"tracked_grounding_v2", "tracked_grounding_v3"}
+)
 _PROVENANCE_FIELDS = frozenset(
     {
         "schema_version",
@@ -205,7 +208,7 @@ def validate_attention_review_manifest(
             "tracking_review_provenance"
         )
     if has_tracking:
-        if manifest.get("review_source_kind") != "tracked_grounding_v2":
+        if manifest.get("review_source_kind") not in TRACKED_REVIEW_SOURCE_KINDS:
             raise ValueError(f"{identity}.review_source_kind is invalid")
         provenance = validate_tracking_review_provenance(
             manifest.get("tracking_review_provenance"),

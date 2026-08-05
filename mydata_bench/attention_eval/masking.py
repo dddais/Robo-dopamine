@@ -201,6 +201,8 @@ def make_attention_mask_hook(
     other = sorted({int(value) for value in other_visual_positions})
     if any(value < 0 or value >= num_query_heads for value in heads):
         raise ValueError("Selected head index is outside query-head range")
+    if set(selected) & set(other):
+        raise ValueError("Selected and other visual positions must be disjoint")
     base_length = max(selected + other, default=-1) + 1
     base = torch.zeros((1, num_query_heads, 1, base_length), dtype=torch.float32)
     for head in heads:
@@ -215,11 +217,16 @@ def make_attention_mask_hook(
             "missing_mask_calls": 0,
             "prefill_calls": 0,
             "decode_calls": 0,
+            "observed_query_rows": 0,
+            "prefill_query_rows": 0,
+            "decode_query_rows": 0,
             "applied_calls": 0,
             "skipped_calls": 0,
             "prefill_applied_calls": 0,
             "decode_applied_calls": 0,
             "applied_query_rows": 0,
+            "prefill_applied_query_rows": 0,
+            "decode_applied_query_rows": 0,
             "selected_heads": heads,
             # Per-record outputs retain the selected/visual token positions.
             # Keep only compact evidence here because this dictionary is
@@ -240,12 +247,33 @@ def make_attention_mask_hook(
             diagnostics["missing_mask_calls"] += 1
             diagnostics["skipped_calls"] += 1
             return None
+        if mask.ndim != 4:
+            raise RuntimeError(
+                f"Attention hook requires a 4D additive mask, got shape={tuple(mask.shape)}"
+            )
+        if int(mask.shape[0]) != 1 or int(mask.shape[1]) not in {
+            1,
+            num_query_heads,
+        }:
+            raise RuntimeError(
+                "Attention hook received an incompatible batch/head mask shape: "
+                f"{tuple(mask.shape)}"
+            )
         query_length = int(mask.shape[-2])
+        key_length = int(mask.shape[-1])
+        if query_length < 1 or key_length < base_length:
+            raise RuntimeError(
+                "Attention hook mask does not contain every declared query/key "
+                f"position: shape={tuple(mask.shape)}, required_keys={base_length}"
+            )
         is_decode = query_length == 1
+        diagnostics["observed_query_rows"] += query_length
         if is_decode:
             diagnostics["decode_calls"] += 1
+            diagnostics["decode_query_rows"] += query_length
         else:
             diagnostics["prefill_calls"] += 1
+            diagnostics["prefill_query_rows"] += query_length
         should_apply = (
             query_scope == "all"
             or (query_scope in {"prefill", "last_prompt"} and not is_decode)
@@ -255,11 +283,8 @@ def make_attention_mask_hook(
             diagnostics["skipped_calls"] += 1
             return None
         bias = base.to(device=mask.device, dtype=mask.dtype)
-        key_length = int(mask.shape[-1])
         if key_length > base_length:
             bias = torch.nn.functional.pad(bias, (0, key_length - base_length))
-        else:
-            bias = bias[..., :key_length]
         if query_scope == "last_prompt":
             scoped = torch.zeros(
                 (1, num_query_heads, query_length, key_length),
@@ -275,8 +300,10 @@ def make_attention_mask_hook(
         diagnostics["applied_query_rows"] += applied_rows
         if is_decode:
             diagnostics["decode_applied_calls"] += 1
+            diagnostics["decode_applied_query_rows"] += applied_rows
         else:
             diagnostics["prefill_applied_calls"] += 1
+            diagnostics["prefill_applied_query_rows"] += applied_rows
         new_kwargs = dict(kwargs)
         new_kwargs["attention_mask"] = mask + bias
         return args, new_kwargs

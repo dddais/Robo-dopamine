@@ -7,6 +7,7 @@ import pytest
 
 from mydata_bench.io import read_jsonl, write_json, write_jsonl
 from mydata_bench.my_dataset.attention_manifest import build_attention_manifests
+from mydata_bench.my_dataset.attention_manifest import _configured_sha256
 from mydata_bench.my_dataset.causal_metrics import score_steering
 from mydata_bench.my_dataset.media import grm_multiview_image_paths
 from mydata_bench.my_dataset.roles import parse_instruction
@@ -201,6 +202,32 @@ def test_attention_manifests_are_model_specific_and_label_free(tmp_path: Path) -
     serialized = json.dumps([grm, qwen])
     assert "protocol_reward" not in serialized
     assert "instruction_video_match" not in serialized
+
+
+def test_tracking_expected_sha_can_bind_directly_to_review_audit() -> None:
+    digest = "a" * 64
+    assert _configured_sha256(
+        {"expected_requests_sha256": "from_audit"},
+        "expected_requests_sha256",
+        required=True,
+        audit={"requests_sha256": digest},
+        audit_field="requests_sha256",
+    ) == digest
+    assert _configured_sha256(
+        {"expected_manual_tracking_artifact_sha256": "from_audit"},
+        "expected_manual_tracking_artifact_sha256",
+        required=False,
+        audit={"manual_tracking_artifact_sha256": None},
+        audit_field="manual_tracking_artifact_sha256",
+    ) is None
+    with pytest.raises(ValueError, match="64-character"):
+        _configured_sha256(
+            {"expected_requests_sha256": "from_audit"},
+            "expected_requests_sha256",
+            required=True,
+            audit={"requests_sha256": "stale"},
+            audit_field="requests_sha256",
+        )
 
 
 def test_legacy_attention_checks_request_metadata_only_when_present(

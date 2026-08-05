@@ -16,6 +16,7 @@ from ..io import object_fingerprint, read_jsonl, sha256_file, write_json, write_
 from .data import FORBIDDEN_MODEL_FIELDS, load_model_inputs
 from .grounding_contract import AUTO_UNREVIEWED, HUMAN_REVIEWED
 from .review_provenance import (
+    TRACKED_REVIEW_SOURCE_KINDS,
     build_review_provenance,
     build_tracking_review_provenance,
 )
@@ -77,8 +78,14 @@ def _configured_sha256(
     field: str,
     *,
     required: bool,
+    audit: Mapping[str, Any] | None = None,
+    audit_field: str | None = None,
 ) -> str | None:
     raw = cfg.get(field)
+    if raw == "from_audit":
+        if audit is None:
+            raise ValueError(f"{field}=from_audit requires a loaded review audit")
+        raw = audit.get(audit_field or field)
     if raw in (None, ""):
         if required:
             raise ValueError(f"{field} is required for audited human grounding")
@@ -323,18 +330,84 @@ def _unique_index(path: Path, kind: str) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _tracked_artifacts_by_fingerprint(
+    *paths: Path | None,
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        if path is None:
+            continue
+        for row in read_jsonl(path):
+            if not isinstance(row, dict):
+                raise ValueError(f"Tracked artifact in {path} is not an object")
+            fingerprint = str(row.get("fingerprint", ""))
+            view = dict(row)
+            view.pop("fingerprint", None)
+            if not fingerprint or fingerprint != object_fingerprint(view):
+                raise ValueError(f"Tracked artifact fingerprint is invalid in {path}")
+            if fingerprint in result and result[fingerprint] != row:
+                raise ValueError(f"Conflicting tracked artifact fingerprint {fingerprint}")
+            result[fingerprint] = row
+    return result
+
+
+def _review_selected_track(
+    review: Mapping[str, Any],
+    artifacts: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    decision = review.get("decision")
+    provenance = (
+        decision.get("track_provenance")
+        if isinstance(decision, Mapping)
+        else None
+    )
+    if not isinstance(provenance, Mapping):
+        raise ValueError("Eligible tracked review has no track provenance")
+    artifact_fp = str(provenance.get("artifact_fingerprint", ""))
+    track_fp = str(provenance.get("track_fingerprint", ""))
+    artifact = artifacts.get(artifact_fp)
+    if not isinstance(artifact, Mapping):
+        raise ValueError("Reviewed tracking artifact fingerprint is unavailable")
+    if artifact.get("example_id") != review.get("example_id"):
+        raise ValueError("Reviewed tracking artifact belongs to another example")
+    tracks = artifact.get("candidate_tracks")
+    matches = [
+        track
+        for track in tracks
+        if isinstance(track, Mapping)
+        and track.get("fingerprint") == track_fp
+        and track.get("candidate_id") == review.get("selected_candidate_id")
+        and track.get("status") == "ok"
+    ] if isinstance(tracks, list) else []
+    if len(matches) != 1:
+        raise ValueError("Reviewed selected track is missing or ambiguous")
+    return matches[0]
+
+
+
 def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
+    review_source_kind = str(cfg.get("review_source_kind", ""))
+    if review_source_kind not in TRACKED_REVIEW_SOURCE_KINDS:
+        raise ValueError(
+            "review_source_kind must be one of "
+            f"{sorted(TRACKED_REVIEW_SOURCE_KINDS)}"
+        )
     if _accepted_statuses(cfg) != ["eligible"]:
-        raise ValueError("tracked_grounding_v2 accepts only status=eligible")
+        raise ValueError("tracked grounding accepts only status=eligible")
     if not bool(cfg.get("require_review_audit", False)):
-        raise ValueError("tracked_grounding_v2 requires the strict review audit")
+        raise ValueError("tracked grounding requires the strict review audit")
     if not bool(cfg.get("include_all", False)) or not bool(
         cfg.get("complete_groups_only", False)
     ):
         raise ValueError(
-            "tracked_grounding_v2 requires include_all and complete_groups_only"
+            "tracked grounding requires include_all and complete_groups_only"
         )
 
+    native_temporal_patch_size = int(
+        cfg.get("native_video_temporal_patch_size", 0)
+    )
+    if native_temporal_patch_size < 1:
+        raise ValueError("native_video_temporal_patch_size must be positive")
     inputs_path = Path(cfg["inputs_path"]).resolve()
     split_path = Path(cfg["split_path"]).resolve()
     requests_path = Path(cfg["grounding_requests_path"]).resolve()
@@ -365,17 +438,37 @@ def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
     if tracking_manifest_path != tracking_path.parent / "manifest.json":
         raise ValueError("tracking_manifest_path must bind the tracking run directory")
 
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    if not isinstance(audit, Mapping):
+        raise ValueError("Tracked review audit must be a JSON object")
+
     expected_requests = _configured_sha256(
-        cfg, "expected_requests_sha256", required=True
+        cfg,
+        "expected_requests_sha256",
+        required=True,
+        audit=audit,
+        audit_field="requests_sha256",
     )
     expected_tracking = _configured_sha256(
-        cfg, "expected_tracking_artifact_sha256", required=True
+        cfg,
+        "expected_tracking_artifact_sha256",
+        required=True,
+        audit=audit,
+        audit_field="tracking_artifact_sha256",
     )
     expected_manifest = _configured_sha256(
-        cfg, "expected_tracking_manifest_sha256", required=True
+        cfg,
+        "expected_tracking_manifest_sha256",
+        required=True,
+        audit=audit,
+        audit_field="tracking_manifest_sha256",
     )
     expected_manual = _configured_sha256(
-        cfg, "expected_manual_tracking_artifact_sha256", required=False
+        cfg,
+        "expected_manual_tracking_artifact_sha256",
+        required=False,
+        audit=audit,
+        audit_field="manual_tracking_artifact_sha256",
     )
     requests_sha = sha256_file(requests_path)
     reviews_sha = sha256_file(reviews_path)
@@ -410,6 +503,9 @@ def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
     }
     requests = _unique_index(requests_path, "tracked grounding request")
     reviews = _unique_index(reviews_path, "tracked grounding review")
+    tracked_artifacts = _tracked_artifacts_by_fingerprint(
+        tracking_path, manual_path
+    )
     partition = _partition_map(
         json.loads(split_path.read_text(encoding="utf-8"))
     )
@@ -430,7 +526,6 @@ def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
         if ids != expected_ids:
             raise ValueError(f"tracked {name} IDs differ from model inputs")
 
-    audit = json.loads(audit_path.read_text(encoding="utf-8"))
     fingerprint_view = dict(audit) if isinstance(audit, dict) else {}
     fingerprint = str(fingerprint_view.pop("fingerprint", ""))
     if not fingerprint or fingerprint != object_fingerprint(fingerprint_view):
@@ -576,6 +671,27 @@ def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
             or review.get("human_reviewed") is not True
         ):
             raise ValueError(f"{example_id}: tracked review contract mismatch")
+        selected_track = _review_selected_track(review, tracked_artifacts)
+        raw_track_frames = selected_track.get("frames")
+        if not isinstance(raw_track_frames, list):
+            raise ValueError(f"{example_id}: selected track frames are missing")
+        track_frames_by_index: dict[int, Mapping[str, Any]] = {}
+        for track_frame in raw_track_frames:
+            index = (
+                track_frame.get("source_frame_index")
+                if isinstance(track_frame, Mapping)
+                else None
+            )
+            if (
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or index in track_frames_by_index
+            ):
+                raise ValueError(
+                    f"{example_id}: selected track frame index is invalid/duplicate"
+                )
+            track_frames_by_index[index] = track_frame
+
         models = review.get("models")
         bindings = request.get("model_frame_bindings")
         if (
@@ -679,7 +795,7 @@ def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
                     raise ValueError(f"{example_id}/{model}: content_order invalid")
                 if (
                     not isinstance(grid, list)
-                    or not grid
+                    or len(grid) != 1
                     or any(
                         not isinstance(item, (list, tuple))
                         or len(item) != 3
@@ -693,6 +809,56 @@ def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
                     )
                 ):
                     raise ValueError(f"{example_id}/{model}: video_grid_thw invalid")
+                temporal_grid_size = int(grid[0][0])
+                expected_temporal_grid_size = (
+                    len(sampled) + native_temporal_patch_size - 1
+                ) // native_temporal_patch_size
+                if temporal_grid_size != expected_temporal_grid_size:
+                    raise ValueError(
+                        f"{example_id}/{model}: sampled frames, temporal patch size, "
+                        "and video_grid_thw disagree"
+                    )
+                tracked_processor_frames: list[dict[str, Any]] = []
+                for raw_index in sampled:
+                    if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+                        raise ValueError(
+                            f"{example_id}/{model}: sampled frame index is invalid"
+                        )
+                    frame_index = int(raw_index)
+                    track_frame = track_frames_by_index.get(frame_index)
+                    if track_frame is None:
+                        raise ValueError(
+                            f"{example_id}/{model}: reviewed track lacks sampled frame "
+                            f"{frame_index}"
+                        )
+                    visible = track_frame.get("visible") is True
+                    raw_bbox = track_frame.get("bbox_xyxy")
+                    tracked_bbox = (
+                        _bbox(
+                            raw_bbox,
+                            f"{example_id}/{model}/tracked_frame/{frame_index}",
+                        )
+                        if visible
+                        else None
+                    )
+                    if not visible and raw_bbox is not None:
+                        raise ValueError(
+                            f"{example_id}/{model}: invisible tracked frame has bbox"
+                        )
+                    tracked_processor_frames.append(
+                        {
+                            "source_frame_index": frame_index,
+                            "image_path": str(track_frame["image_path"]),
+                            "image_sha256": str(track_frame["image_sha256"]),
+                            "bbox_xyxy": tracked_bbox,
+                            "mask_path": str(track_frame["mask_path"]),
+                            "mask_sha256": str(track_frame["mask_sha256"]),
+                            "score": float(track_frame["score"]),
+                            "visible": visible,
+                            "obj_id": int(track_frame["obj_id"]),
+                        }
+                    )
+
                 base.update(
                     {
                         "input_layout": "native_front_video",
@@ -701,10 +867,17 @@ def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
                         ),
                         "video_sha256": str(input_row["view_sha256"]["front"]),
                         "processor_frame_indices": list(sampled),
+                        "tracked_processor_frames": tracked_processor_frames,
+                        "target_token_grounding_scope": (
+                            "terminal_temporal_patch_tracked_bbox_union"
+                        ),
                         "content_order": content_order,
                         "processor_video_grid_thw": [
                             list(item) for item in grid
                         ],
+                        "processor_temporal_patch_size": (
+                            native_temporal_patch_size
+                        ),
                     }
                 )
                 processor_contract = validate_processor_content_order_contract(
@@ -736,6 +909,9 @@ def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
                         "input_layout": "grm_native_three_view_endpoints_v1",
                         "video_sha256": str(input_row["group_media_sha256"]),
                         "image_paths": list(image_paths),
+                        "target_token_grounding_scope": (
+                            "after_cam_high_terminal_frame"
+                        ),
                         "first": {
                             "provenance": {"image_path": image_paths[2]}
                         },
@@ -791,7 +967,7 @@ def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
     included = len(eligible)
     manifest: dict[str, Any] = {
         "schema_version": ATTENTION_INPUT_SCHEMA,
-        "review_source_kind": "tracked_grounding_v2",
+        "review_source_kind": review_source_kind,
         "inputs_sha256": sha256_file(inputs_path),
         "split_sha256": sha256_file(split_path),
         "grounding_requests_sha256": requests_sha,
@@ -860,7 +1036,7 @@ def _build_tracked_attention_manifests(cfg: dict[str, Any]) -> Path:
 
 def build_attention_manifests(config: dict[str, Any]) -> Path:
     cfg = section(config, "my_dataset_attention")
-    if cfg.get("review_source_kind") == "tracked_grounding_v2":
+    if cfg.get("review_source_kind") in TRACKED_REVIEW_SOURCE_KINDS:
         return _build_tracked_attention_manifests(cfg)
     inputs_path = Path(cfg["inputs_path"]).resolve()
     requests_path = Path(cfg["grounding_requests_path"]).resolve()

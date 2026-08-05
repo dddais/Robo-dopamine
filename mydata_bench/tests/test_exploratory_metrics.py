@@ -79,6 +79,12 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                 },
                 "human_reviewed": False,
                 "status": "ok",
+                "target_positions": [1, 2],
+                "wrong_region_positions": [5, 6],
+                "selected_positions": [1, 2],
+                "visual_positions": [1, 2, 3, 4, 5, 6, 7, 8],
+                "ranking_visual_scope": "target_slot_only",
+                "intervention_visual_scope": "target_slot_only",
             }
             records.append(
                 {
@@ -90,10 +96,15 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                 }
             )
             for condition in GRID_CONDITIONS:
+                condition_kind = condition.split("__", 1)[0]
                 ranking_n = int(condition.split("rank_n", 1)[1][:3])
                 top_k = int(condition.split("top_k", 1)[1])
                 candidate_prediction = baseline_prediction
-                if ranking_n == 5 and top_k == 8:
+                if (
+                    condition_kind == "candidate_target"
+                    and ranking_n == 5
+                    and top_k == 8
+                ):
                     candidate_prediction = {
                         "group-a": {"suc": 4, "fail": 1},
                         "group-b": {"suc": 5, "fail": 1},
@@ -103,23 +114,36 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                 row = {
                     **base,
                     "condition": condition,
-                    "condition_kind": "candidate_target",
+                    "condition_kind": condition_kind,
                     "ranking_n": ranking_n,
                     "top_k": top_k,
                     "heads": [
-                        {"layer": 8 + index // 8, "head": index % 8}
+                        {
+                            "layer": 8 + index // 8,
+                            "head": (
+                                index % 8
+                                if condition_kind != "low_rank_target"
+                                else 100 + index % 8
+                            ),
+                        }
                         for index in range(top_k)
                     ],
                     "bias": 6.0,
                     "scope": "all",
                     "hook_assertion": {"passed": True},
                     "ranking_fingerprint": f"ranking-{ranking_n}",
+                    "selected_positions": (
+                        [5, 6]
+                        if condition_kind == "candidate_wrong_region"
+                        else [1, 2]
+                    ),
                 }
                 # Exercise both prediction paths.  The common-unseen failure is
                 # deliberately a signed-score-only record.
                 if (
                     ranking_n == 5
                     and top_k == 8
+                    and condition_kind == "candidate_target"
                     and group_id == "group-d"
                     and suffix == "fail"
                 ):
@@ -177,8 +201,8 @@ def test_exploratory_matrix_scopes_and_paired_deltas(tmp_path: Path) -> None:
     )
 
     assert result["completion"]["complete"] is True
-    assert result["completion"]["input_record_count"] == 81
-    assert result["completion"]["latest_record_count"] == 80
+    assert result["completion"]["input_record_count"] == 225
+    assert result["completion"]["latest_record_count"] == 224
     assert result["scope_expected_counts"] == {
         "all_including_rank_sources": 8,
         "common_unseen_s20": 2,
@@ -247,13 +271,13 @@ def test_exploratory_matrix_scopes_and_paired_deltas(tmp_path: Path) -> None:
     assert ranking_only["versus_baseline"]["fail_correction_rate"] == 1.0
     assert ranking_only["versus_baseline"]["suc_harm_rate"] == 1.0
 
-    assert len(list(read_jsonl(output_dir / "condition_metrics.jsonl"))) == 9
+    assert len(list(read_jsonl(output_dir / "condition_metrics.jsonl"))) == 27
     joined = list(read_jsonl(output_dir / "joined_conditions.jsonl"))
-    assert len(joined) == 72
+    assert len(joined) == 216
     proxy_rows = [
         row for row in joined if row["grounding_resolution"] == "proxy"
     ]
-    assert len(proxy_rows) == 9
+    assert len(proxy_rows) == 27
     assert {row["example_id"] for row in proxy_rows} == {"group-d-fail"}
     assert {row["grounding_status"] for row in proxy_rows} == {
         "auto_proxy_unreviewed"
@@ -271,9 +295,9 @@ def test_exploratory_matrix_scopes_and_paired_deltas(tmp_path: Path) -> None:
         "ranking/eval overlap",
         "in-sample contaminated",
         "cross-N main comparison",
-        "wrong-target",
-        "low-rank",
-        "layer-matched-random",
+            "wrong-region control",
+            "low-rank-head target control",
+            "spatial/head specificity",
         "共享 baseline 汇总",
         "Overall exact",
         "Suc reward5 exact",

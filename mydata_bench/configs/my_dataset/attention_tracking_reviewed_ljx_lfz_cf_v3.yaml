@@ -1,0 +1,24 @@
+# v3 只读取 v3 tracking 与 v3 人工审核产物。from_audit 会从已通过的
+# review_audit.json 读取预期 SHA，并继续对配置路径的实际文件重新计算校验。
+my_dataset_attention:
+  review_source_kind: tracked_grounding_v3
+  inputs_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/model_inputs/inputs.jsonl
+  split_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/whitebox_split/split.json
+  grounding_requests_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_v3/requests.jsonl
+  grounding_reviews_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_reviewed_v3/reviews.jsonl
+  tracking_artifact_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_v3/tracks.jsonl
+  tracking_manifest_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_v3/manifest.json
+  manual_tracking_artifact_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_v3/manual_tracks.jsonl
+  review_audit_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/grounding_tracking_reviewed_v3/review_audit.json
+  expected_requests_sha256: from_audit
+  expected_tracking_artifact_sha256: from_audit
+  expected_tracking_manifest_sha256: from_audit
+  expected_manual_tracking_artifact_sha256: from_audit
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/attention_tracking_reviewed_v3
+  accepted_review_statuses: [eligible]
+  expected_input_count: 755
+  native_video_temporal_patch_size: 2
+  include_all: true
+  complete_groups_only: true
+  require_all_inputs: false
+  require_review_audit: true

@@ -1,4 +1,4 @@
-"""Loopback-only reviewer for the current tracking-v2 grounding workflow.
+"""Loopback-only reviewer for versioned tracked-grounding workflows.
 
 The reviewer consumes the requests and tracks produced by
 ``ground-track-prepare``/``ground-track-run``. Every decision is appended to
@@ -1190,6 +1190,14 @@ class TrackedGroundingReviewStore:
                     "visible": visible,
                 }
             )
+            reason_codes = value.get("review_reason_codes", [])
+            if (
+                not isinstance(reason_codes, list)
+                or any(not isinstance(code, str) or not code for code in reason_codes)
+                or len(reason_codes) != len(set(reason_codes))
+            ):
+                raise ValueError(f"{identity}: invalid review_reason_codes")
+            result["review_reason_codes"] = list(reason_codes)
             mask_path, mask_sha = value.get("mask_path"), value.get("mask_sha256")
             if (mask_path is None) != (mask_sha is None):
                 raise ValueError(f"{identity}: mask path/SHA mismatch")
@@ -1330,6 +1338,33 @@ class TrackedGroundingReviewStore:
             locked_obj_id is None or isinstance(locked_obj_id, bool)
         ):
             raise ValueError(f"{identity}: valid track has no locked_obj_id")
+        continuity = value.get("continuity")
+        materialized_drift_frames = (
+            isinstance(continuity, Mapping)
+            and continuity.get("drift_review_frames_materialized") is True
+        )
+        drift_indices_raw = (
+            continuity.get("drift_review_frame_indices", [])
+            if isinstance(continuity, Mapping)
+            else []
+        )
+        if (
+            not isinstance(drift_indices_raw, list)
+            or any(
+                isinstance(index, bool) or not isinstance(index, int) or index < 0
+                for index in drift_indices_raw
+            )
+            or len(drift_indices_raw) != len(set(drift_indices_raw))
+        ):
+            raise ValueError(f"{identity}: invalid drift review frame indices")
+        drift_indices = set(drift_indices_raw)
+        reason_indices = (
+            continuity.get("quality_reason_frame_indices", {})
+            if isinstance(continuity, Mapping)
+            else {}
+        )
+        if not isinstance(reason_indices, Mapping):
+            raise ValueError(f"{identity}: invalid drift reason mapping")
         frames_raw = value.get("frames")
         if not isinstance(frames_raw, list):
             raise ValueError(f"{identity}: frames must be a list")
@@ -1346,15 +1381,39 @@ class TrackedGroundingReviewStore:
             int(frame["source_frame_index"]): frame
             for frame in request.get("key_frames", [])
         }
+        frame_indices = [frame["source_frame_index"] for frame in frames]
+        if len(frame_indices) != len(set(frame_indices)):
+            raise ValueError(f"{identity}: duplicate materialized track frame")
         for frame in frames:
             expected = expected_frames.get(frame["source_frame_index"])
-            if (
-                expected is None
-                or frame["image_sha256"] != expected.get("image_sha256")
+            if expected is not None and (
+                frame["image_sha256"] != expected.get("image_sha256")
                 or frame["image_path"]
                 != str(Path(str(expected.get("image_path", ""))).resolve())
             ):
                 raise ValueError(f"{identity}: track frame differs from request")
+            if expected is None and not (
+                materialized_drift_frames
+                and frame["source_frame_index"] in drift_indices
+            ):
+                raise ValueError(f"{identity}: unbound extra track frame")
+            if materialized_drift_frames:
+                expected_reasons = sorted(
+                    str(reason)
+                    for reason, indices in reason_indices.items()
+                    if isinstance(indices, list)
+                    and frame["source_frame_index"] in indices
+                )
+                if frame["review_reason_codes"] != expected_reasons:
+                    raise ValueError(
+                        f"{identity}: materialized frame/reason mismatch"
+                    )
+        if materialized_drift_frames and set(frame_indices) != (
+            set(expected_frames) | drift_indices
+        ):
+            raise ValueError(
+                f"{identity}: key/drift review frame coverage is incomplete"
+            )
         if any(frame["obj_id"] != locked_obj_id for frame in frames):
             raise ValueError(f"{identity}: obj_id changed within locked track")
         terminals_raw = value.get("terminal_by_model")
@@ -1391,7 +1450,6 @@ class TrackedGroundingReviewStore:
                     raise ValueError(
                         f"{identity}/{model}: terminal differs from request/locked track"
                     )
-        continuity = value.get("continuity")
         continuity_ok = (
             isinstance(continuity, Mapping)
             and continuity.get("frame_coverage_complete") is True
@@ -1486,7 +1544,10 @@ class TrackedGroundingReviewStore:
             not isinstance(target_rows, list)
             or not isinstance(reference_rows, list)
             or not isinstance(options_raw, list)
-            or len(options_raw) > 3
+            or (
+                len(options_raw) > 3
+                and proposal.get("pretrack_identity_selection") is not True
+            )
         ):
             raise ValueError(f"{example_id}: invalid proposal candidate lists")
 
@@ -1538,6 +1599,23 @@ class TrackedGroundingReviewStore:
                 )
             option["selection"] = selection
             options.append(option)
+        tracked_option_ids = [row["candidate_id"] for row in options]
+        pretrack_identity_selection = (
+            proposal.get("pretrack_identity_selection") is True
+        )
+        expected_track_ids = (
+            [] if pretrack_identity_selection else tracked_option_ids
+        )
+        identity_strategy = str(proposal.get("strategy", ""))
+        if identity_strategy in {
+            "ordinal_position", "left_right_relation", "distance_relation"
+        }:
+            for candidate_id, candidate in targets.items():
+                if candidate_id in tracked_option_ids:
+                    continue
+                item = copy.deepcopy(candidate)
+                item["selection"] = "untracked_candidate"
+                options.append(item)
         option_ids = [row["candidate_id"] for row in options]
         if len(option_ids) != len(set(option_ids)):
             raise ValueError(f"{example_id}: duplicate proposal option")
@@ -1562,6 +1640,7 @@ class TrackedGroundingReviewStore:
             )
         if (
             default_id is not None
+            and not pretrack_identity_selection
             and sum(row["selection"] == "alternative" for row in options) > 2
         ):
             raise ValueError(f"{example_id}: more than two default alternatives")
@@ -1583,18 +1662,21 @@ class TrackedGroundingReviewStore:
             ):
                 raise ValueError(f"{example_id}: duplicate or stale candidate track")
             tracks[track["candidate_id"]] = track
-        if set(tracks) != set(option_ids):
+        if set(tracks) != set(expected_track_ids):
             raise ValueError(f"{example_id}: track coverage differs from review options")
         for option in options:
-            option["track"] = tracks[option["candidate_id"]]
-            if option["track"]["anchor_bbox"] != option["bbox"]:
+            option["track"] = tracks.get(option["candidate_id"])
+            if (
+                option["track"] is not None
+                and option["track"]["anchor_bbox"] != option["bbox"]
+            ):
                 raise ValueError(f"{example_id}: track anchor differs from option bbox")
 
         selection_source = artifact.get("selection_source")
         selected_id = artifact.get("selected_candidate_id")
         if selection_source == "algorithmic_default":
             if (
-                artifact.get("status") != "ok"
+                artifact.get("status") not in {"ok", "needs_review"}
                 or selected_id != default_id
                 or default_id not in tracks
                 or tracks[default_id]["valid"] is not True
@@ -1698,6 +1780,7 @@ class TrackedGroundingReviewStore:
             "proposal_fingerprint": proposal_fingerprint,
             "proposal_status": proposal.get("status"),
             "review_reasons": list(proposal.get("review_reasons", [])),
+            "pretrack_identity_selection": pretrack_identity_selection,
             "default_candidate_id": default_id,
             "options": options,
             "references": references,
@@ -1780,6 +1863,7 @@ class TrackedGroundingReviewStore:
             "artifact_fingerprint": value["artifact_fingerprint"],
             "proposal_status": value["proposal_status"],
             "review_reasons": value["review_reasons"],
+            "pretrack_identity_selection": value["pretrack_identity_selection"],
             "first_frame": first,
             "default_candidate_id": value["default_candidate_id"],
             "options": [
@@ -1929,7 +2013,7 @@ class TrackedGroundingReviewStore:
             or "wrong_region" in payload
         ):
             raise ValueError(
-                "tracking v2 accepts no free text or wrong_region"
+                "tracked grounding accepts no free text or wrong_region"
             )
         status = str(payload.get("status", "")).strip()
         if status not in TRACKING_REVIEW_STATUSES:
@@ -2150,7 +2234,7 @@ load();
 
 TRACKING_PAGE = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Tracked grounding v2 人工审核</title>
+<title>Tracked grounding 人工审核</title>
 <style>
 body{font-family:system-ui,sans-serif;margin:18px;background:#f4f6f8;color:#18202a}
 button,input{font:inherit}.card{background:#fff;padding:14px;border-radius:10px;box-shadow:0 1px 4px #0002;margin:12px 0}
@@ -2159,29 +2243,31 @@ button,input{font:inherit}.card{background:#fff;padding:14px;border-radius:10px;
 canvas{width:100%;height:auto;background:#111}.draw{cursor:crosshair}.toolbar button,.nav button,.action{padding:7px 12px;margin:3px;border:1px solid #9ba8b7;border-radius:6px;cursor:pointer}
 .option{padding:10px;margin:8px 0;border:2px solid #ccd3dc;border-radius:8px}.option.active{box-shadow:0 0 0 3px #0002}
 .option.default{border-color:#16a34a}.option.preselect{border-color:#16a34a;background:#f0fdf4}
-.option.alt1{border-color:#2563eb}.option.alt2{border-color:#f59e0b}.reference{color:#7e22ce}
+.option.alt1{border-color:#2563eb}.option.alt2{border-color:#f59e0b}.option.neutral{border-color:#94a3b8;background:#fff}.reference{color:#7e22ce}
 .primary{background:#16803b;color:#fff}.secondary{background:#245fa5;color:#fff}.danger{background:#a82929;color:#fff}
 .warning{color:#a43d00}.ok{color:#237a38}.muted{color:#647181}.frozen{background:#fff4df;padding:8px;border-radius:6px}
 #gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
 .frame{background:#fff;padding:8px;border:1px solid #d8dee6;border-radius:8px}.frame canvas{display:block}
 .badge{display:inline-block;padding:2px 7px;border-radius:999px;background:#e8edf3;margin-left:5px;font-size:.84rem}
 button:disabled{opacity:.48;cursor:not-allowed}@media(max-width:900px){#layout{grid-template-columns:1fr}}
-</style></head><body><h1>Tracked grounding v2 人工审核</h1><div id="app">加载中…</div>
+</style></head><body><h1>Tracked grounding 人工审核（版本由冻结 manifest 决定）</h1><div id="app">加载中…</div>
 <script>
 let state=null,busy=false,dirty=false,loadedId=null,selectedId=null,manualBox=null,drawing=false,dragStart=null;
-const COLORS=['#16a34a','#2563eb','#f59e0b'];
+const COLORS=['#2563eb','#dc2626','#059669','#7c3aed','#ea580c','#0891b2','#be123c','#4f46e5','#65a30d','#c026d3','#0f766e','#b45309','#1d4ed8','#a21caf','#15803d','#9f1239','#4338ca','#047857','#c2410c','#0369a1'];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function point(e,c){const r=c.getBoundingClientRect();return[(e.clientX-r.left)*c.width/r.width,(e.clientY-r.top)*c.height/r.height]}
 function drawBox(ctx,b,color,label,width=3,dashed=false){ctx.save();ctx.strokeStyle=color;ctx.lineWidth=width;ctx.setLineDash(dashed?[9,6]:[]);ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);ctx.setLineDash([]);ctx.fillStyle=color;ctx.font='16px sans-serif';ctx.fillText(label,b[0]+3,Math.max(16,b[1]-4));ctx.restore()}
-function optionColor(c,o,i){if(c.default_candidate_id)return o.candidate_id===c.default_candidate_id?COLORS[0]:COLORS[Math.min(i,2)];return i===0?COLORS[0]:COLORS[Math.min(i,2)]}
-function optionClass(c,o,i){if(c.default_candidate_id&&o.candidate_id===c.default_candidate_id)return'default';if(!c.default_candidate_id&&i===0)return'preselect';return i===1?'alt1':'alt2'}
-function optionLabel(c,o,i){if(c.default_candidate_id&&o.candidate_id===c.default_candidate_id)return'算法默认';if(!c.default_candidate_id&&i===0)return'人工预选（不是算法默认）';return'备选'}
+function neutralCandidateReview(c){return c.pretrack_identity_selection===true||!c.default_candidate_id}
+function optionColor(c,o,i){if(neutralCandidateReview(c))return COLORS[i%COLORS.length];return o.candidate_id===c.default_candidate_id?'#16a34a':COLORS[i%COLORS.length]}
+function optionClass(c,o,i){if(neutralCandidateReview(c))return'neutral';if(o.candidate_id===c.default_candidate_id)return'default';return i===1?'alt1':i===2?'alt2':'neutral'}
+function optionLabel(c,o,i){if(neutralCandidateReview(c))return'候选 #'+(i+1);if(o.candidate_id===c.default_candidate_id)return'算法默认';return'备选 #'+(i+1)}
 function allOptions(){const c=state.current;return c.manual_track?[...c.options,c.manual_track]:c.options}
 function selectedOption(){return allOptions().find(o=>o.candidate_id===selectedId)||null}
 async function load(exampleId=null,pos=null){if(busy)return;if(dirty&&!confirm('当前手画框尚未保存，确定离开吗？'))return;busy=true;try{const q=exampleId?'?example_id='+encodeURIComponent(exampleId):pos!==null?'?position='+pos:'';const r=await fetch('/api/state'+q),v=await r.json();if(!r.ok)throw new Error(v.error||'加载失败');state=v;dirty=false;render()}catch(e){document.querySelector('#app').innerHTML='<div class="card warning">'+esc(e.message)+'</div>'}finally{busy=false}}
 function render(){const app=document.querySelector('#app');if(state.done){loadedId=null;const message=state.phase==='awaiting_manual_retrack'?'初审已完成；请批量运行 manual retrack，再用同一审核目录重启本页面。':'已完成 '+state.completed+'/'+state.total;app.innerHTML='<div class="card '+(state.phase==='awaiting_manual_retrack'?'warning':'ok')+'">'+message+'</div><div class="nav"><button onclick="goPrev()">上一条</button></div>';return}
-const c=state.current;if(loadedId!==c.example_id){loadedId=c.example_id;manualBox=state.saved_review?.status==='needs_retrack'?state.saved_review.decision?.first_bbox:null;const resumedManual=state.saved_review?.status==='needs_retrack'&&c.manual_track?c.manual_track.candidate_id:null;selectedId=state.saved_review?.selected_candidate_id||resumedManual||c.default_candidate_id||(c.options[0]?.candidate_id)||c.manual_track?.candidate_id||null;drawing=false}
-const d=state.dispositions,saved=state.saved_review;const roles=c.roles||{};const noDefault=!c.default_candidate_id&&c.options.length>0;
+const c=state.current;if(loadedId!==c.example_id){loadedId=c.example_id;manualBox=state.saved_review?.status==='needs_retrack'?state.saved_review.decision?.first_bbox:null;const resumedManual=state.saved_review?.status==='needs_retrack'&&c.manual_track?c.manual_track.candidate_id:null;const initialCandidate=neutralCandidateReview(c)?null:c.default_candidate_id;selectedId=state.saved_review?.selected_candidate_id||resumedManual||c.manual_track?.candidate_id||initialCandidate;drawing=false}
+const d=state.dispositions,saved=state.saved_review;const roles=c.roles||{};const noDefault=!c.pretrack_identity_selection&&!c.default_candidate_id&&c.options.length>0;
+const identityReview=c.pretrack_identity_selection===true||['ordinal_position','left_right_relation','distance_relation'].includes(roles.grounding_strategy)||(c.review_reasons||[]).includes('instance_identity_requires_human_review');
 const options=c.options.map((o,i)=>renderOption(c,o,i)).join('');
 const manual=c.manual_track?renderManual(c.manual_track):'';
 const frozen=state.manual_artifact_frozen?'<div class="frozen warning">manual artifact 已冻结：已有人工 track 被批准，不能再新增或修改手画框。</div>':'';
@@ -2190,7 +2276,8 @@ const phaseText=state.phase==='awaiting_manual_retrack'?'<div class="card warnin
 app.innerHTML=`${phaseText}<div id="meta">${state.position}/${state.total} · 已完成 ${state.completed} · eligible ${d.eligible||0} · needs_retrack ${d.needs_retrack||0} · skipped ${d.skipped||0} · ${esc(c.partition)} / ${esc(c.task_id)} ${savedText}</div>
 <div id="instruction">${esc(c.instruction)}</div>
 <div>目标：<b>${esc(roles.target_phrase)}</b>；策略：${esc(roles.grounding_strategy)}。本决定跨 RoboReward/Qwen/GRM 共享，但 terminal 逐模型冻结。</div>
-${noDefault?'<div class="card warning">没有唯一 algorithmic_default；绿色框只是人工预选，确认后仍记录为 select_alternative。</div>':''}
+${noDefault?'<div class="card warning">没有唯一 algorithmic_default；所有候选等权展示，请人工选择后再确认。</div>':''}
+${identityReview?'<div class="card warning">关系/顺序目标必须人工确认实例身份。所有候选均为中性提示，不做默认选择；请选择正确候选作为 manual anchor，再进行全视频 retrack。</div>':''}
 ${frozen}
 <div id="layout"><div class="card"><h3>首帧（source frame ${c.first_frame.source_frame_index}）</h3><canvas id="firstCanvas" class="${drawing?'draw':''}"></canvas>
 <div class="toolbar"><button ${state.manual_artifact_frozen?'disabled':''} onclick="startDraw()">首帧手画</button><button ${manualBox&& !state.manual_artifact_frozen?'':'disabled'} onclick="saveManual()">保存手画框 → needs_retrack</button><button ${manualBox&& !state.manual_artifact_frozen?'':'disabled'} onclick="clearManual()">清除手画框</button></div>
@@ -2200,13 +2287,21 @@ ${frozen}
 <div class="card"><button class="danger action" onclick="skip()">跳过</button></div>
 <div class="nav"><button ${state.previous_example_id?'':'disabled'} onclick="goPrev()">← 上一条</button><button ${state.next_example_id?'':'disabled'} onclick="goNext()">下一条 →</button><label> 跳到 <input id="jump" type="number" min="1" max="${state.total}" value="${state.position}" style="width:6em"><button onclick="load(null,Number(document.querySelector('#jump').value))">Go</button></label></div>`;
 setupFirst();renderGallery()}
-function renderOption(c,o,i){const valid=o.track?.valid===true,color=optionColor(c,o,i),klass=optionClass(c,o,i),label=optionLabel(c,o,i);const source=o.selection==='algorithmic_default'?'accept_default':'select_alternative';const button=o.selection==='algorithmic_default'?'Yes，接受默认':'选择此候选';return `<div class="option ${klass} ${selectedId===o.candidate_id?'active':''}"><b style="color:${color}">${esc(label)}</b> · ${esc(o.candidate_id)}<br>score=${Number(o.score).toFixed(3)} · ${esc(o.query)}<br><button onclick="selectTrack('${o.candidate_id}')">查看 track</button><button class="${o.selection==='algorithmic_default'?'primary':'secondary'}" ${valid?'':'disabled'} onclick="accept('${o.candidate_id}','${source}')">${button}</button>${valid?'':'<span class="warning"> 无完整有效 track，不能 eligible</span>'}</div>`}
+function renderOption(c,o,i){
+const valid=o.track?.valid===true,color=optionColor(c,o,i),klass=optionClass(c,o,i),label=optionLabel(c,o,i),pretrack=c.pretrack_identity_selection===true;
+const source=pretrack?'select_alternative':o.selection==='algorithmic_default'?'accept_default':'select_alternative';
+const button=pretrack?'需先 retrack':o.selection==='algorithmic_default'?'Yes，接受默认':'选择此候选';
+const canAccept=valid&&!pretrack;
+const seed=!valid&&!state.manual_artifact_frozen?`<button class="secondary" onclick="useCandidateBBox('${o.candidate_id}')">用此框进行 manual retrack</button>`:'';
+return `<div class="option ${klass} ${selectedId===o.candidate_id?'active':''}"><b style="color:${color}">${esc(label)}</b> · ${esc(o.candidate_id)}<br>score=${Number(o.score).toFixed(3)} · ${esc(o.query)}<br><button onclick="selectTrack('${o.candidate_id}')">查看 track</button><button class="${o.selection==='algorithmic_default'&&!pretrack?'primary':'secondary'}" ${canAccept?'':'disabled'} onclick="accept('${o.candidate_id}','${source}')">${button}</button>${seed}${valid&&!pretrack?'':'<span class="warning"> 需完成并审核全视频 tracking 后才能 eligible</span>'}</div>`
+}
 function renderManual(o){const valid=o.track?.valid===true;return `<div class="option ${selectedId===o.candidate_id?'active':''}" style="border-color:#0891b2"><b style="color:#08768d">人工框传播结果</b> · ${esc(o.candidate_id)}<br><button onclick="selectTrack('${o.candidate_id}')">查看 track</button><button class="primary" ${valid?'':'disabled'} onclick="accept('${o.candidate_id}','accept_manual_track')">Yes，接受人工 track</button>${valid?'':'<span class="warning"> propagation 无效，不能 eligible</span>'}</div>`}
 function setupFirst(){const c=state.current,canvas=document.querySelector('#firstCanvas'),img=new Image();img.onload=()=>{canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const x=canvas.getContext('2d');x.drawImage(img,0,0,canvas.width,canvas.height);c.options.forEach((o,i)=>drawBox(x,o.bbox,optionColor(c,o,i),optionLabel(c,o,i),o.candidate_id===selectedId?4:2));c.reference_candidates.forEach((o,i)=>drawBox(x,o.bbox,'#7e22ce','REF '+(i+1),2,true));if(c.manual_track)drawBox(x,c.manual_track.bbox,'#0891b2','MANUAL TRACK',3);if(manualBox)drawBox(x,manualBox,'#dc2626','MANUAL NEW',4)};img.src=c.first_frame.image_url;canvas.onpointerdown=e=>{if(!drawing||state.manual_artifact_frozen)return;dragStart=point(e,canvas)};canvas.onpointerup=e=>{if(!drawing||!dragStart)return;const p=point(e,canvas),b=[Math.min(p[0],dragStart[0]),Math.min(p[1],dragStart[1]),Math.max(p[0],dragStart[0]),Math.max(p[1],dragStart[1])];dragStart=null;drawing=false;if(b[2]-b[0]>=2&&b[3]-b[1]>=2){manualBox=b;dirty=true}render()}}
 function startDraw(){if(state.manual_artifact_frozen)return;drawing=true;render()}
 function clearManual(){manualBox=null;dirty=true;render()}
+function useCandidateBBox(id){if(state.manual_artifact_frozen)return;const o=state.current.options.find(v=>v.candidate_id===id);if(!o?.bbox)return;manualBox=o.bbox.map(Number);selectedId=id;drawing=false;dirty=true;render()}
 function selectTrack(id){selectedId=id;render()}
-function renderGallery(){const o=selectedOption(),gallery=document.querySelector('#gallery'),status=document.querySelector('#trackStatus');if(!o?.track){status.innerHTML='<span class="warning">该候选没有预计算 track。</span>';gallery.innerHTML='';return}const t=o.track;status.innerHTML=(t.valid?'<span class="ok">track有效</span>':'<span class="warning">track无效：'+esc(t.error||t.status)+'</span>')+' · locked obj_id='+esc(t.locked_obj_id);const rows=[];for(const f of t.frames)rows.push({title:'关键帧 '+f.source_frame_index+' · obj_id '+f.obj_id,frame:f,color:'#0f766e'});for(const [m,f] of Object.entries(t.terminals))if(f)rows.push({title:m+' terminal '+f.source_frame_index+' · obj_id '+f.obj_id,frame:f,color:'#b45309'});gallery.innerHTML=rows.map((r,i)=>'<div class="frame"><b>'+esc(r.title)+'</b><canvas id="track-'+i+'"></canvas></div>').join('');rows.forEach((r,i)=>paintStatic(document.querySelector('#track-'+i),r.frame,r.color,'obj '+r.frame.obj_id))}
+function renderGallery(){const o=selectedOption(),gallery=document.querySelector('#gallery'),status=document.querySelector('#trackStatus');if(!o?.track){status.innerHTML='<span class="warning">该候选没有预计算 track；请把候选框保存为 manual anchor 后再传播。</span>';gallery.innerHTML='';return}const t=o.track,continuity=t.continuity||{},drift=continuity.drift_review_required===true,reasons=continuity.quality_reason_frame_indices||{};status.innerHTML=(t.valid?'<span class="ok">track结构有效</span>':'<span class="warning">track无效：'+esc(t.error||t.status)+'</span>')+' · locked obj_id='+esc(t.locked_obj_id)+(drift?'<br><span class="warning">漂移诊断要求人工复核；可疑帧：'+esc(JSON.stringify(reasons))+'。obj_id 连续不能证明实例身份未漂移。</span>':'');const rows=[];for(const f of t.frames){const warning=(f.review_reason_codes||[]).join(',');rows.push({title:'关键帧 '+f.source_frame_index+' · obj_id '+f.obj_id+(warning?' · ⚠ '+warning:''),frame:f,color:warning?'#dc2626':'#0f766e'})}for(const [m,f] of Object.entries(t.terminals))if(f)rows.push({title:m+' terminal '+f.source_frame_index+' · obj_id '+f.obj_id,frame:f,color:'#b45309'});gallery.innerHTML=rows.map((r,i)=>'<div class="frame"><b>'+esc(r.title)+'</b><canvas id="track-'+i+'"></canvas></div>').join('');rows.forEach((r,i)=>paintStatic(document.querySelector('#track-'+i),r.frame,r.color,'obj '+r.frame.obj_id))}
 function paintStatic(canvas,frame,color,label){const img=new Image();img.onload=()=>{canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const x=canvas.getContext('2d');x.drawImage(img,0,0,canvas.width,canvas.height);if(frame.visible===false||!frame.bbox){x.fillStyle='#b91c1c';x.font='18px sans-serif';x.fillText(label+' · 当前帧不可见',12,28);return}drawBox(x,frame.bbox,color,label,4)};img.src=frame.image_url}
 async function submit(payload){if(busy)return;busy=true;try{const r=await fetch('/api/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),v=await r.json();if(!r.ok)throw new Error(v.error||'保存失败');state=v;dirty=false;render()}catch(e){document.querySelector('#message').textContent=e.message}finally{busy=false}}
 function accept(id,source){submit({example_id:state.current.example_id,status:'eligible',candidate_id:id,decision_source:source})}
@@ -2331,19 +2426,19 @@ def open_review_store(
     mode: str = "auto",
 ) -> Sam3ReviewStore | TrackedGroundingReviewStore:
     root = run_dir.resolve()
-    if mode not in {"auto", "v1", "tracking_v2"}:
-        raise ValueError("mode must be auto, v1, or tracking_v2")
+    if mode not in {"auto", "v1", "tracking", "tracking_v2"}:
+        raise ValueError("mode must be auto, v1, tracking, or tracking_v2")
     selected = mode
     if selected == "auto":
         if (root / "tracks.jsonl").is_file():
-            selected = "tracking_v2"
+            selected = "tracking"
         elif (root / "proposals.jsonl").is_file():
             selected = "v1"
         else:
             raise FileNotFoundError(
                 f"{root} contains neither tracks.jsonl nor proposals.jsonl"
             )
-    if selected == "tracking_v2":
+    if selected in {"tracking", "tracking_v2"}:
         if not (root / "tracks.jsonl").is_file():
             raise FileNotFoundError(root / "tracks.jsonl")
         return TrackedGroundingReviewStore(root, reviewer_id, output_dir)
@@ -2360,7 +2455,9 @@ def main() -> None:
         help="review output directory (mode-specific default under run-dir)",
     )
     parser.add_argument(
-        "--mode", choices=("auto", "v1", "tracking_v2"), default="auto"
+        "--mode",
+        choices=("auto", "v1", "tracking", "tracking_v2"),
+        default="auto",
     )
     parser.add_argument("--reviewer", required=True)
     parser.add_argument("--port", type=int, default=8766)

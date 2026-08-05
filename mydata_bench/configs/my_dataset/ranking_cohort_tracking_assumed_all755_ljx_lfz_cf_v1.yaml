@@ -1,0 +1,11 @@
+my_dataset_ranking_cohort:
+  ranking_data_path: /mnt/public1/dais/workspace/data/ljx_lfz_task/new/ranking_data.jsonl
+  inputs_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/model_inputs/inputs.jsonl
+  split_path: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/whitebox_split/split.json
+  attention_inputs_dir: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/attention_tracking_assumed_all755_v1
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/ranking_cohort_tracking_assumed_all755_v1
+  seed: ljx_lfz-ranking-v1
+  expected_source_count: 30
+  expected_input_count: 755
+  expected_attention_count: 755
+  enforce_frozen_s20: true

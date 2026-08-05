@@ -16,6 +16,8 @@ my_dataset_exploratory_matrix:
   skip_early_layers: 8
   swap_bias: 6
   steering_query_scope: all
+  ranking_visual_scope: target_slot_only
+  intervention_visual_scope: target_slot_only
   expected_ranking_count: 20
   expected_evaluation_count: 755
   capture_generation_attentions: false

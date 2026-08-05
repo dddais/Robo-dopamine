@@ -30,7 +30,7 @@ from .grounding_contract import (
 )
 
 
-METRIC_CONTRACT = "my_dataset.exploratory_matrix_metrics.v1"
+METRIC_CONTRACT = "my_dataset.exploratory_matrix_metrics.v2"
 BASELINE_CONDITION = "baseline"
 BASELINE_EQUIVALENCE_FIELDS = (
     "model_family",
@@ -59,8 +59,14 @@ GROUNDING_STRATA = {
     "proxy_grounding": "proxy",
 }
 
+CONDITION_KINDS = (
+    "candidate_target",
+    "candidate_wrong_region",
+    "low_rank_target",
+)
 _CONDITION_RE = re.compile(
-    r"\A(?:candidate_target__)?rank_n(?P<n>\d{3})(?:__|_)top_k(?P<k>\d{3})\Z"
+    r"\A(?:(?P<kind>candidate_target|candidate_wrong_region|low_rank_target)__)?"
+    r"rank_n(?P<n>\d{3})(?:__|_)top_k(?P<k>\d{3})\Z"
 )
 _LABEL_FIELDS = frozenset(
     {
@@ -82,22 +88,29 @@ _PUBLISHED_COUNTS_755 = {
 }
 
 
-def _canonical_condition(ranking_n: int, top_k: int) -> str:
-    return f"candidate_target__rank_n{ranking_n:03d}__top_k{top_k:03d}"
+def _canonical_condition(
+    ranking_n: int, top_k: int, kind: str = "candidate_target"
+) -> str:
+    if kind not in CONDITION_KINDS:
+        raise ValueError(f"Unknown condition kind: {kind!r}")
+    return f"{kind}__rank_n{ranking_n:03d}__top_k{top_k:03d}"
 
 
 GRID_CONDITIONS = tuple(
-    _canonical_condition(ranking_n, top_k)
+    _canonical_condition(ranking_n, top_k, kind)
+    for kind in CONDITION_KINDS
     for ranking_n in RANKING_SIZES
     for top_k in TOP_K_VALUES
 )
 REQUIRED_CONDITIONS = (BASELINE_CONDITION, *GRID_CONDITIONS)
 
 
-def _parse_condition(value: Any) -> tuple[str, int | None, int | None]:
+def _parse_condition(
+    value: Any,
+) -> tuple[str, str, int | None, int | None]:
     condition = str(value)
     if condition == BASELINE_CONDITION:
-        return condition, None, None
+        return condition, "baseline", None, None
     match = _CONDITION_RE.fullmatch(condition)
     if match is None:
         raise ValueError(f"Unexpected exploratory condition: {condition!r}")
@@ -107,7 +120,8 @@ def _parse_condition(value: Any) -> tuple[str, int | None, int | None]:
         raise ValueError(
             f"Condition is outside the frozen N x K grid: {condition!r}"
         )
-    return _canonical_condition(ranking_n, top_k), ranking_n, top_k
+    kind = str(match.group("kind") or "candidate_target")
+    return _canonical_condition(ranking_n, top_k, kind), kind, ranking_n, top_k
 
 
 def _finite_float(value: Any, *, field: str, identity: str) -> float:
@@ -170,6 +184,23 @@ def _head_coordinates(
             f"{identity}: heads coordinates must be unique; duplicates: {duplicates[:5]}"
         )
     return tuple(coordinates)
+
+
+def _position_coordinates(
+    value: Any, *, field: str, identity: str
+) -> tuple[int, ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{identity}: {field} must be a non-empty list")
+    result: list[int] = []
+    for index, raw in enumerate(value):
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise ValueError(
+                f"{identity}: {field}[{index}] must be a non-negative integer"
+            )
+        result.append(int(raw))
+    if result != sorted(set(result)):
+        raise ValueError(f"{identity}: {field} must be sorted and unique")
+    return tuple(result)
 
 
 def _prediction(row: Mapping[str, Any], *, identity: str) -> int:
@@ -250,7 +281,9 @@ def _load_latest_records(
     latest: dict[tuple[str, str], dict[str, Any]] = {}
     source_names: dict[tuple[str, str], str] = {}
     for (example_id, source_condition), row in latest_physical.items():
-        condition, ranking_n, top_k = _parse_condition(source_condition)
+        condition, condition_kind, ranking_n, top_k = _parse_condition(
+            source_condition
+        )
         key = (example_id, condition)
         if key in latest:
             raise ValueError(
@@ -266,6 +299,7 @@ def _load_latest_records(
         normalized["source_ranking_n"] = row.get("ranking_n")
         normalized["source_top_k"] = row.get("top_k")
         normalized["condition"] = condition
+        normalized["parsed_condition_kind"] = condition_kind
         normalized["ranking_n"] = ranking_n
         normalized["top_k"] = top_k
         latest[key] = normalized
@@ -313,6 +347,10 @@ def _validate_latest_records(
     grounding_modes: set[str] = set()
     record_bindings: set[tuple[str, str, str]] = set()
     heads_by_condition: dict[str, tuple[tuple[int, int], ...]] = {}
+    positions_by_example: dict[
+        str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
+    ] = {}
+    visual_scope_bindings: set[tuple[str, str]] = set()
     for (example_id, condition), row in sorted(latest.items()):
         identity = f"{example_id}/{condition}"
         if row.get("status") != "ok":
@@ -367,6 +405,67 @@ def _validate_latest_records(
 
         ranking_n = row["ranking_n"]
         top_k = row["top_k"]
+        parsed_kind = str(row["parsed_condition_kind"])
+        target_positions = _position_coordinates(
+            row.get("target_positions"),
+            field="target_positions",
+            identity=identity,
+        )
+        wrong_positions = _position_coordinates(
+            row.get("wrong_region_positions"),
+            field="wrong_region_positions",
+            identity=identity,
+        )
+        selected_positions = _position_coordinates(
+            row.get("selected_positions"),
+            field="selected_positions",
+            identity=identity,
+        )
+        visual_positions = _position_coordinates(
+            row.get("visual_positions"),
+            field="visual_positions",
+            identity=identity,
+        )
+        if (
+            len(target_positions) != len(wrong_positions)
+            or set(target_positions) & set(wrong_positions)
+            or not set(target_positions) < set(visual_positions)
+            or not set(wrong_positions) < set(visual_positions)
+        ):
+            raise ValueError(
+                f"{identity}: target/wrong positions must be equal-size, "
+                "disjoint proper subsets of the visual universe"
+            )
+        expected_selected = (
+            wrong_positions
+            if parsed_kind == "candidate_wrong_region"
+            else target_positions
+        )
+        if selected_positions != expected_selected:
+            raise ValueError(
+                f"{identity}: selected_positions disagree with condition kind"
+            )
+        position_contract = (target_positions, wrong_positions, visual_positions)
+        old_position_contract = positions_by_example.setdefault(
+            example_id, position_contract
+        )
+        if old_position_contract != position_contract:
+            raise ValueError(
+                f"{example_id}: target/wrong/visual positions vary across conditions"
+            )
+        ranking_visual_scope = str(row.get("ranking_visual_scope", ""))
+        intervention_visual_scope = str(
+            row.get("intervention_visual_scope", "")
+        )
+        if (
+            ranking_visual_scope not in {"target_slot_only", "all_visual"}
+            or intervention_visual_scope
+            not in {"target_slot_only", "all_visual"}
+        ):
+            raise ValueError(f"{identity}: visual scope contract is invalid")
+        visual_scope_bindings.add(
+            (ranking_visual_scope, intervention_visual_scope)
+        )
         if condition == BASELINE_CONDITION:
             if row.get("condition_kind") not in (None, "baseline"):
                 raise ValueError(f"{identity}: invalid baseline condition_kind")
@@ -375,8 +474,10 @@ def _validate_latest_records(
                     f"{identity}: baseline ranking_n and top_k must both be null"
                 )
         else:
-            if row.get("condition_kind") not in (None, "candidate_target"):
-                raise ValueError(f"{identity}: invalid candidate condition_kind")
+            if row.get("condition_kind") != parsed_kind:
+                raise ValueError(
+                    f"{identity}: condition_kind differs from condition name"
+                )
             original_n = row["source_ranking_n"]
             original_k = row["source_top_k"]
             try:
@@ -453,6 +554,11 @@ def _validate_latest_records(
             "Exploratory records mix grounding contracts: "
             f"{sorted(grounding_modes)}"
         )
+    if len(visual_scope_bindings) != 1:
+        raise ValueError(
+            "Exploratory records mix ranking/intervention visual scopes: "
+            f"{sorted(visual_scope_bindings)}"
+        )
     inconsistent_rankings = {
         ranking_n: sorted(values)
         for ranking_n, values in ranking_fingerprint_values.items()
@@ -473,6 +579,34 @@ def _validate_latest_records(
                 raise ValueError(
                     f"Candidate heads for N={ranking_n}, K={top_k} must equal "
                     "the ordered K=64 prefix"
+                )
+        for top_k in TOP_K_VALUES:
+            candidate = heads_by_condition[
+                _canonical_condition(ranking_n, top_k, "candidate_target")
+            ]
+            wrong = heads_by_condition[
+                _canonical_condition(
+                    ranking_n, top_k, "candidate_wrong_region"
+                )
+            ]
+            low = heads_by_condition[
+                _canonical_condition(ranking_n, top_k, "low_rank_target")
+            ]
+            if wrong != candidate:
+                raise ValueError(
+                    f"N={ranking_n}, K={top_k}: wrong-region heads must "
+                    "exactly equal candidate-target heads"
+                )
+            if set(low) & set(candidate):
+                raise ValueError(
+                    f"N={ranking_n}, K={top_k}: low-rank heads overlap candidates"
+                )
+            candidate_layers = Counter(layer for layer, _head in candidate)
+            low_layers = Counter(layer for layer, _head in low)
+            if low_layers != candidate_layers:
+                raise ValueError(
+                    f"N={ranking_n}, K={top_k}: low-rank heads are not "
+                    "layer matched to candidates"
                 )
     ranking_fingerprints = {
         ranking_n: next(iter(ranking_fingerprint_values[ranking_n]))
@@ -1067,7 +1201,9 @@ def _join_conditions(
     rows: list[dict[str, Any]] = []
     s20 = groups_by_n[20]
     for condition in GRID_CONDITIONS:
-        _canonical, ranking_n, top_k = _parse_condition(condition)
+        _canonical, condition_kind, ranking_n, top_k = _parse_condition(
+            condition
+        )
         assert ranking_n is not None and top_k is not None
         for example_id in sorted(label_by_id):
             label = label_by_id[example_id]
@@ -1103,6 +1239,7 @@ def _join_conditions(
                     "instruction_video_match": reward == 5,
                     "condition": condition,
                     "source_condition": str(candidate["source_condition"]),
+                    "condition_kind": condition_kind,
                     "ranking_n": ranking_n,
                     "top_k": top_k,
                     "ranking_fingerprint": candidate.get("ranking_fingerprint"),
@@ -1153,7 +1290,9 @@ def _condition_metrics(
     output = []
     for condition in GRID_CONDITIONS:
         rows = by_condition[condition]
-        _canonical, ranking_n, top_k = _parse_condition(condition)
+        _canonical, condition_kind, ranking_n, top_k = _parse_condition(
+            condition
+        )
         assert ranking_n is not None and top_k is not None
         scopes = {}
         for scope in SCOPE_NAMES:
@@ -1191,6 +1330,7 @@ def _condition_metrics(
             {
                 "schema_version": METRIC_CONTRACT,
                 "condition": condition,
+                "condition_kind": condition_kind,
                 "grid_condition": f"rank_n{ranking_n:03d}_top_k{top_k:03d}",
                 "ranking_n": ranking_n,
                 "top_k": top_k,
@@ -1199,6 +1339,122 @@ def _condition_metrics(
                 **_grounding_aggregate(rows, contract=contract),
             }
         )
+    return output
+
+
+def _paired_control_summary(
+    target_rows: list[dict[str, Any]],
+    control_rows: list[dict[str, Any]],
+    *,
+    control_kind: str,
+) -> dict[str, Any]:
+    target_by_id = {str(row["example_id"]): row for row in target_rows}
+    control_by_id = {str(row["example_id"]): row for row in control_rows}
+    if target_by_id.keys() != control_by_id.keys():
+        raise AssertionError(f"Internal {control_kind} paired IDs differ")
+    progress_gaps: list[float] = []
+    exact_gaps: list[float] = []
+    lower: list[float] = []
+    for example_id in sorted(target_by_id):
+        target = target_by_id[example_id]
+        control = control_by_id[example_id]
+        if (
+            target["group_id"] != control["group_id"]
+            or target["protocol_reward"] != control["protocol_reward"]
+            or target["baseline_progress"] != control["baseline_progress"]
+        ):
+            raise AssertionError(
+                f"Internal {control_kind} pair metadata differ for {example_id}"
+            )
+        gap = float(target["candidate_progress"]) - float(
+            control["candidate_progress"]
+        )
+        progress_gaps.append(gap)
+        exact_gaps.append(
+            float(target["candidate_exact"]) - float(control["candidate_exact"])
+        )
+        lower.append(float(gap < 0))
+    return {
+        "control_kind": control_kind,
+        "n": len(progress_gaps),
+        "mean_target_minus_control_progress": _mean_or_none(progress_gaps),
+        "mean_target_effect_minus_control_effect": _mean_or_none(
+            progress_gaps
+        ),
+        "target_lower_progress_fraction": _mean_or_none(lower),
+        "mean_target_minus_control_exact": _mean_or_none(exact_gaps),
+    }
+
+
+def _specificity_metrics(
+    joined: list[dict[str, Any]], expected_counts: Mapping[str, Any]
+) -> dict[str, Any]:
+    by_condition: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in joined:
+        by_condition[str(row["condition"])].append(row)
+    output: dict[str, Any] = {}
+    for ranking_n in RANKING_SIZES:
+        for top_k in TOP_K_VALUES:
+            target_name = _canonical_condition(
+                ranking_n, top_k, "candidate_target"
+            )
+            wrong_name = _canonical_condition(
+                ranking_n, top_k, "candidate_wrong_region"
+            )
+            low_name = _canonical_condition(
+                ranking_n, top_k, "low_rank_target"
+            )
+            target_all = by_condition[target_name]
+            wrong_all = by_condition[wrong_name]
+            low_all = by_condition[low_name]
+            scopes: dict[str, Any] = {}
+            for scope in SCOPE_NAMES:
+                target = [
+                    row
+                    for row in target_all
+                    if bool(row["scope_membership"][scope])
+                ]
+                target_ids = {str(row["example_id"]) for row in target}
+                wrong = [
+                    row
+                    for row in wrong_all
+                    if str(row["example_id"]) in target_ids
+                ]
+                low = [
+                    row
+                    for row in low_all
+                    if str(row["example_id"]) in target_ids
+                ]
+                expected = (
+                    int(expected_counts[scope])
+                    if scope in {
+                        "all_including_rank_sources",
+                        "common_unseen_s20",
+                    }
+                    else int(expected_counts[scope][ranking_n])
+                )
+                if len(target) != expected:
+                    raise AssertionError(
+                        f"Internal specificity count mismatch for {target_name}/{scope}"
+                    )
+                scopes[scope] = {
+                    "expected_count": expected,
+                    "spatial_specificity": _paired_control_summary(
+                        target,
+                        wrong,
+                        control_kind="candidate_wrong_region",
+                    ),
+                    "head_specificity": _paired_control_summary(
+                        target,
+                        low,
+                        control_kind="layer_matched_low_rank_target",
+                    ),
+                }
+            output[target_name] = {
+                "ranking_n": ranking_n,
+                "top_k": top_k,
+                "scopes": scopes,
+            }
     return output
 
 
@@ -1214,14 +1470,15 @@ def _markdown_table(
     condition_rows: list[dict[str, Any]], scope: str
 ) -> list[str]:
     lines = [
-        "| N | K | n | Overall exact | Suc reward5 exact | Fail reward1 exact | Exact delta | Fail correction | Suc harm | Mean progress shift | Pairwise | Strict top1 |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Kind | N | K | n | Overall exact | Suc reward5 exact | Fail reward1 exact | Exact delta | Fail correction | Suc harm | Mean progress shift | Pairwise | Strict top1 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for condition in condition_rows:
         metric = condition["scopes"][scope]
         lines.append(
-            "| {n_rank} | {top_k} | {n} | {overall} | {suc} | {fail} | "
+            "| {kind} | {n_rank} | {top_k} | {n} | {overall} | {suc} | {fail} | "
             "{delta} | {correction} | {harm} | {shift} | {pairwise} | {top1} |".format(
+                kind=condition["condition_kind"],
                 n_rank=condition["ranking_n"],
                 top_k=condition["top_k"],
                 n=metric["n"],
@@ -1251,16 +1508,17 @@ def _per_task_table(
     condition_rows: list[dict[str, Any]], field: str
 ) -> list[str]:
     lines = [
-        f"| {field} | N | K | n | Overall exact | Suc exact | Fail exact | Exact delta |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        f"| {field} | Kind | N | K | n | Overall exact | Suc exact | Fail exact | Exact delta |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for condition in condition_rows:
         by_task = condition["scopes"]["common_unseen_s20"][f"by_{field}"]
         for task, metric in sorted(by_task.items()):
             lines.append(
-                "| {task} | {n_rank} | {top_k} | {n} | {overall} | {suc} | "
+                "| {task} | {kind} | {n_rank} | {top_k} | {n} | {overall} | {suc} | "
                 "{fail} | {delta} |".format(
                     task=task.replace("|", "\\|"),
+                    kind=condition["condition_kind"],
                     n_rank=condition["ranking_n"],
                     top_k=condition["top_k"],
                     n=metric["n"],
@@ -1270,6 +1528,40 @@ def _per_task_table(
                     delta=_format_metric(metric["versus_baseline"]["exact_delta"]),
                 )
             )
+    return lines
+
+
+def _specificity_markdown_table(
+    specificity: Mapping[str, Any], scope: str
+) -> list[str]:
+    lines = [
+        "| N | K | n | Target−wrong progress | Target<wrong | Target−low-rank progress | Target<low-rank |",
+        "|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for value in specificity.values():
+        metrics = value["scopes"][scope]
+        spatial = metrics["spatial_specificity"]
+        head = metrics["head_specificity"]
+        lines.append(
+            "| {n_rank} | {top_k} | {n} | {spatial_gap} | {spatial_lower} | "
+            "{head_gap} | {head_lower} |".format(
+                n_rank=value["ranking_n"],
+                top_k=value["top_k"],
+                n=spatial["n"],
+                spatial_gap=_format_metric(
+                    spatial["mean_target_minus_control_progress"]
+                ),
+                spatial_lower=_format_metric(
+                    spatial["target_lower_progress_fraction"]
+                ),
+                head_gap=_format_metric(
+                    head["mean_target_minus_control_progress"]
+                ),
+                head_lower=_format_metric(
+                    head["target_lower_progress_fraction"]
+                ),
+            )
+        )
     return lines
 
 
@@ -1314,6 +1606,7 @@ def _render_markdown(
     condition_rows: list[dict[str, Any]],
     expected_counts: Mapping[str, Any],
     shared_baseline: Mapping[str, Any],
+    specificity: Mapping[str, Any],
     grounding_aggregate: Mapping[str, Any],
     *,
     run_fingerprint: str,
@@ -1360,7 +1653,8 @@ def _render_markdown(
         "- 排名源组同时出现在部分评估 scope，存在明确的 `ranking/eval overlap`。",
         "- `all_including_rank_sources` 包含用于 head ranking 的同一批 source groups，因此是 in-sample contaminated，只能作探索性描述。",
         "- `common_unseen_s20` 排除全部 S20 ranking source groups，是 N=5/10/20 之间的 cross-N main comparison（主比较口径）。",
-        "- 本矩阵没有 wrong-target、low-rank 或 layer-matched-random controls，因此不能声称 target-specific 或 head-specific causal specificity。",
+        "- 每个 N×K 均包含同 heads 的 equal-size/disjoint wrong-region control，以及同层数分布且不重叠的 low-rank-head target control。",
+        "- controls 使 spatial/head specificity 可被估计；是否支持因果特异性仍取决于 paired effect CI，而不是仅看点估计。",
         "- 标签仅在本评分阶段 join；推理及 head ranking 阶段不读取评分标签。",
         f"- run fingerprint：`{run_fingerprint}`。",
         "",
@@ -1381,23 +1675,27 @@ def _render_markdown(
         "",
         "## 共享 baseline 汇总（overall / suc / fail）",
         "",
-        "以下 baseline 每个样本只统计一次；同一 baseline 被 9 个 N×K steering 条件共享。",
+        "以下 baseline 每个样本只统计一次；同一 baseline 被 27 个干预条件共享。",
         "",
         *_baseline_markdown_table(shared_baseline),
         "",
-        "## 9-grid 主汇总：common_unseen_s20（overall / suc / fail）",
+        "## 27-condition 主汇总：common_unseen_s20（overall / suc / fail）",
         "",
         *_markdown_table(condition_rows, "common_unseen_s20"),
         "",
-        "## 9-grid 敏感性汇总：all_including_rank_sources",
+        "## Paired causal specificity：common_unseen_s20",
+        "",
+        *_specificity_markdown_table(specificity, "common_unseen_s20"),
+        "",
+        "## 27-condition 敏感性汇总：all_including_rank_sources",
         "",
         *_markdown_table(condition_rows, "all_including_rank_sources"),
         "",
-        "## 9-grid 敏感性汇总：n_specific_unseen",
+        "## 27-condition 敏感性汇总：n_specific_unseen",
         "",
         *_markdown_table(condition_rows, "n_specific_unseen"),
         "",
-        "## 9-grid 诊断汇总：ranking_source_groups_only",
+        "## 27-condition 诊断汇总：ranking_source_groups_only",
         "",
         *_markdown_table(condition_rows, "ranking_source_groups_only"),
         "",
@@ -1607,7 +1905,7 @@ def score_exploratory_matrix(
     evaluation_manifest_path: str | Path | None = None,
     reference_records_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Score the complete exploratory N5/N10/N20 x K8/K32/K64 matrix.
+    """Score baseline plus three N5/N10/N20 x K8/K32/K64 families.
 
     The last JSONL record for each physical ``(example_id, condition)`` key is
     authoritative, allowing an invalid attempt to be superseded by a successful
@@ -1686,6 +1984,7 @@ def score_exploratory_matrix(
         expected_counts,
         contract=contract,
     )
+    specificity = _specificity_metrics(joined, expected_counts)
     shared_baseline = _shared_baseline_metrics(joined, expected_counts)
     baseline_equivalence = (
         _baseline_reference_equivalence(
@@ -1728,6 +2027,7 @@ def score_exploratory_matrix(
             ranking_n: len(groups_by_n[ranking_n]) for ranking_n in RANKING_SIZES
         },
         "shared_baseline": shared_baseline,
+        "paired_specificity": specificity,
         "conditions": {
             row["condition"]: {
                 key: value for key, value in row.items() if key != "schema_version"
@@ -1738,14 +2038,16 @@ def score_exploratory_matrix(
             "ranking_eval_overlap": True,
             "all_scope_in_sample_contaminated": True,
             "common_unseen_s20_is_cross_n_main_comparison": True,
-            "wrong_target_control": False,
-            "low_rank_control": False,
+            "wrong_region_control": True,
+            "low_rank_control": True,
+            "low_rank_control_is_layer_matched": True,
             "layer_matched_random_control": False,
-            "target_or_head_specific_causal_claim_supported": False,
+            "specificity_controls_complete": True,
+            "target_or_head_specific_causal_claim_requires_effect_ci": True,
             "human_reviewed_is_robustness_rerun_not_confirmatory": (
                 contract["mode"] == HUMAN_REVIEWED
             ),
-            "wrong_region_boxes_not_exercised_by_this_matrix": True,
+            "wrong_region_is_equal_size_disjoint_same_target_span": True,
         },
     }
 
@@ -1758,6 +2060,7 @@ def score_exploratory_matrix(
         condition_rows,
         expected_counts,
         shared_baseline,
+        specificity,
         grounding_aggregate,
         run_fingerprint=run_fingerprint,
         contract=contract,

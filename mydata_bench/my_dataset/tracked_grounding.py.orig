@@ -1382,10 +1382,22 @@ def _proposal_from_candidates(
     default, reasons = _select_algorithmic_default(
         roles, eligible_targets, references
     )
+    strategy = str(roles.get("grounding_strategy", ""))
+    identity_review_required = bool(roles.get("requires_instance_review")) or strategy in {
+        "ordinal_position",
+        "left_right_relation",
+        "distance_relation",
+    }
+    if identity_review_required and "instance_identity_requires_human_review" not in reasons:
+        reasons = [*reasons, "instance_identity_requires_human_review"]
     status = (
         "invalid"
         if not eligible_targets
-        else ("needs_review" if default is None else "ok")
+        else (
+            "needs_review"
+            if default is None or identity_review_required
+            else "ok"
+        )
     )
     options: list[dict[str, Any]] = []
     if default is not None:
@@ -1732,10 +1744,134 @@ def _parse_tracker_frame(
     return frame_index, result
 
 
+def _tracking_quality_contract(sam3_cfg: Mapping[str, Any]) -> dict[str, float]:
+    contract = {
+        "min_score": float(sam3_cfg.get("drift_min_score", 0.15)),
+        "min_consecutive_area_ratio": float(
+            sam3_cfg.get("drift_min_consecutive_area_ratio", 0.10)
+        ),
+        "min_anchor_area_ratio": float(
+            sam3_cfg.get("drift_min_anchor_area_ratio", 0.02)
+        ),
+        "max_anchor_area_ratio": float(
+            sam3_cfg.get("drift_max_anchor_area_ratio", 50.0)
+        ),
+        "max_center_step_fraction": float(
+            sam3_cfg.get("drift_max_center_step_fraction", 0.25)
+        ),
+    }
+    if not 0 <= contract["min_score"] <= 1:
+        raise ValueError("drift_min_score must be in [0, 1]")
+    for field in ("min_consecutive_area_ratio", "min_anchor_area_ratio"):
+        if not 0 < contract[field] <= 1:
+            raise ValueError(f"{field} must be in (0, 1]")
+    if contract["max_anchor_area_ratio"] < 1:
+        raise ValueError("drift_max_anchor_area_ratio must be >= 1")
+    if not 0 < contract["max_center_step_fraction"] <= 1:
+        raise ValueError("drift_max_center_step_fraction must be in (0, 1]")
+    return contract
+
+
+def _tracking_quality_diagnostics(
+    frame_states: Sequence[Mapping[str, Any]],
+    *,
+    anchor_bbox: Sequence[float],
+    width: int,
+    height: int,
+    contract: Mapping[str, float],
+) -> dict[str, Any]:
+    anchor_area = max(
+        1.0,
+        (float(anchor_bbox[2]) - float(anchor_bbox[0]))
+        * (float(anchor_bbox[3]) - float(anchor_bbox[1])),
+    )
+    diagonal = max(1.0, math.hypot(width, height))
+    reasons: dict[str, list[int]] = {
+        "invisible_mask": [],
+        "low_tracker_score": [],
+        "anchor_area_ratio_outlier": [],
+        "consecutive_area_jump": [],
+        "consecutive_center_jump": [],
+    }
+    previous_bbox: Sequence[float] | None = None
+    observed_scores: list[float] = []
+    center_steps: list[float] = []
+    consecutive_area_ratios: list[float] = []
+    anchor_area_ratios: list[float] = []
+    for state in frame_states:
+        index = int(state["source_frame_index"])
+        score = float(state["score"])
+        observed_scores.append(score)
+        if score < float(contract["min_score"]):
+            reasons["low_tracker_score"].append(index)
+        bbox = state.get("bbox_xyxy")
+        if state.get("visible") is not True or bbox is None:
+            reasons["invisible_mask"].append(index)
+            previous_bbox = None
+            continue
+        area = max(
+            1.0,
+            (float(bbox[2]) - float(bbox[0]))
+            * (float(bbox[3]) - float(bbox[1])),
+        )
+        anchor_ratio = area / anchor_area
+        anchor_area_ratios.append(anchor_ratio)
+        if (
+            anchor_ratio < float(contract["min_anchor_area_ratio"])
+            or anchor_ratio > float(contract["max_anchor_area_ratio"])
+        ):
+            reasons["anchor_area_ratio_outlier"].append(index)
+        if previous_bbox is not None:
+            previous_area = max(
+                1.0,
+                (float(previous_bbox[2]) - float(previous_bbox[0]))
+                * (float(previous_bbox[3]) - float(previous_bbox[1])),
+            )
+            area_ratio = min(area, previous_area) / max(area, previous_area)
+            consecutive_area_ratios.append(area_ratio)
+            if area_ratio < float(contract["min_consecutive_area_ratio"]):
+                reasons["consecutive_area_jump"].append(index)
+            center = _center(bbox)
+            previous_center = _center(previous_bbox)
+            center_step = math.hypot(
+                center[0] - previous_center[0],
+                center[1] - previous_center[1],
+            ) / diagonal
+            center_steps.append(center_step)
+            if center_step > float(contract["max_center_step_fraction"]):
+                reasons["consecutive_center_jump"].append(index)
+        previous_bbox = bbox
+    reasons = {key: value for key, value in reasons.items() if value}
+    review_indices = sorted({index for values in reasons.values() for index in values})
+    return {
+        "quality_contract": dict(contract),
+        "quality_reason_frame_indices": reasons,
+        "drift_review_frame_indices": review_indices,
+        "drift_review_required": bool(review_indices),
+        "quality_summary": {
+            "minimum_score": min(observed_scores) if observed_scores else None,
+            "maximum_center_step_fraction": max(center_steps) if center_steps else 0.0,
+            "minimum_consecutive_area_ratio": (
+                min(consecutive_area_ratios)
+                if consecutive_area_ratios
+                else 1.0
+            ),
+            "minimum_anchor_area_ratio": (
+                min(anchor_area_ratios) if anchor_area_ratios else None
+            ),
+            "maximum_anchor_area_ratio": (
+                max(anchor_area_ratios) if anchor_area_ratios else None
+            ),
+        },
+    }
+
+
+
 def _cache_key(
     request: Mapping[str, Any],
     candidate: Mapping[str, Any],
     tracker_fingerprint: str,
+    quality_contract: Mapping[str, float],
 ) -> str:
     return object_fingerprint(
         {
@@ -1745,6 +1881,7 @@ def _cache_key(
             "anchor_bbox_xyxy": candidate["bbox_xyxy"],
             "anchor_mask_sha256": candidate.get("mask_sha256"),
             "tracker_fingerprint": tracker_fingerprint,
+            "tracking_quality_contract": dict(quality_contract),
         }
     )
 
@@ -1814,6 +1951,7 @@ def _run_visual_propagation(
         terminal_indices.add(index)
         required_indices.add(index)
 
+    quality_contract = _tracking_quality_contract(sam3_cfg)
     bbox = [float(value) for value in candidate["bbox_xyxy"]]
     x1, y1, x2, y2 = bbox
     normalized_xyxy = np.asarray(
@@ -1890,6 +2028,7 @@ def _run_visual_propagation(
         empty_masks: list[int] = []
         seen: set[int] = set()
         frame_states: dict[int, dict[str, Any]] = {}
+        all_frame_states: list[dict[str, Any]] = []
         stream = predictor.propagate_in_video(
             inference_state,
             start_frame_idx=0,
@@ -1923,6 +2062,14 @@ def _run_visual_propagation(
                 locked_missing.append(frame_index)
                 continue
             state = objects[locked_obj_id]
+            all_frame_states.append(
+                {
+                    "source_frame_index": frame_index,
+                    "bbox_xyxy": copy.deepcopy(state["bbox_xyxy"]),
+                    "score": float(state["score"]),
+                    "visible": bool(state["visible"]),
+                }
+            )
             if not state["visible"]:
                 empty_masks.append(frame_index)
             if frame_index in required_indices:
@@ -1960,6 +2107,13 @@ def _run_visual_propagation(
         absent_keyframes = sorted(required_indices - set(frame_states))
         if absent_keyframes:
             raise ValueError(f"SAM3 key/terminal frames are missing: {absent_keyframes}")
+        quality = _tracking_quality_diagnostics(
+            all_frame_states,
+            anchor_bbox=bbox,
+            width=width,
+            height=height,
+            contract=quality_contract,
+        )
         result = {
             "schema_version": TRACKED_GROUNDING_CACHE_SCHEMA,
             "cache_key": cache_key,
@@ -1976,6 +2130,7 @@ def _run_visual_propagation(
                 "empty_mask_frame_indices": empty_masks,
                 "id_switch_detected": False,
                 "frame_coverage_complete": True,
+                **quality,
             },
             "predictor_provenance": copy.deepcopy(dict(predictor_provenance)),
         }
@@ -2290,7 +2445,18 @@ def _automated_artifact(
     default_id = default.get("candidate_id") if isinstance(default, dict) else None
     if default_id and default_id in valid:
         chosen = valid[default_id]
-        artifact["status"] = "ok"
+        quality_review = bool(
+            chosen.get("continuity", {}).get("drift_review_required")
+        )
+        identity_review = proposal.get("status") == "needs_review"
+        artifact["status"] = (
+            "needs_review" if identity_review or quality_review else "ok"
+        )
+        artifact["error"] = (
+            "Human instance/track review is required"
+            if identity_review or quality_review
+            else None
+        )
         artifact["selected_candidate_id"] = default_id
         artifact["selection_source"] = "algorithmic_default"
         artifact["terminal_by_model"] = copy.deepcopy(chosen["terminal_by_model"])
@@ -2414,6 +2580,11 @@ def run_tracked_grounding(
     previous = _latest_artifacts(tracks_path)
     pending: list[tuple[dict[str, Any], int]] = []
     for request in requests:
+        if shard_id is not None and stable_shard(
+            str(request["video"]["sha256"]),
+            int(num_shards),
+        ) != shard_id:
+            continue
         old = previous.get(str(request["example_id"]))
         if old and old.get("request_fingerprint") == request["request_fingerprint"]:
             if old.get("status") in {"ok", "needs_review"}:
@@ -2498,6 +2669,17 @@ def run_tracked_grounding(
             except Exception as exc:
                 shutdown_error = exc
 
+    if shard_id is not None:
+        if shutdown_error is not None:
+            raise RuntimeError(
+                f"SAM3 predictor shutdown failed: {shutdown_error}"
+            )
+        if provider_shutdown_error is not None:
+            raise RuntimeError(
+                "SAM3 candidate provider shutdown failed: "
+                f"{provider_shutdown_error}"
+            )
+        return tracks_path
     latest = _latest_artifacts(tracks_path)
     counts = Counter(str(row.get("status")) for row in latest.values())
     expected_ids = {str(request["example_id"]) for request in requests}

@@ -9,13 +9,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
-from PIL import Image
-
 from ..attention_eval.masking import (
     Head,
-    bbox_to_token_positions,
-    matched_wrong_position_set,
-    select_low_ranked_heads,
+    VISUAL_SCOPES,
+    select_layer_matched_low_ranked_heads,
 )
 from ..config import section
 from ..io import (
@@ -40,19 +37,57 @@ def _cfg(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"my_dataset_causal is missing: {', '.join(missing)}")
     if cfg["model_family"] not in {"roboreward", "qwen", "grm"}:
         raise ValueError("model_family must be roboreward, qwen, or grm")
+    intervention_scope = str(
+        cfg.get("intervention_visual_scope", "target_slot_only")
+    )
+    ranking_scope = str(cfg.get("ranking_visual_scope", intervention_scope))
+    for field, value in (
+        ("intervention_visual_scope", intervention_scope),
+        ("ranking_visual_scope", ranking_scope),
+    ):
+        if value not in VISUAL_SCOPES:
+            raise ValueError(f"{field} must be one of {sorted(VISUAL_SCOPES)}")
+        cfg[field] = value
     return cfg
 
 
 def _samples(cfg: dict[str, Any], expected_partition: str) -> list[dict[str, Any]]:
     path = Path(cfg["input_manifest"]).resolve()
     rows = list(read_jsonl(path))
-    wrong = sorted({str(row.get("partition")) for row in rows} - {expected_partition})
-    if wrong:
-        raise ValueError(
-            f"{expected_partition} operation received other partitions: {wrong}"
-        )
     if not rows:
         raise ValueError(f"Empty {expected_partition} input manifest: {path}")
+    if expected_partition == "external_ranking":
+        wrong_roles = sorted(
+            {str(row.get("cohort_role")) for row in rows} - {"external_ranking"}
+        )
+        if wrong_roles:
+            raise ValueError(
+                f"external ranking input contains other cohort roles: {wrong_roles}"
+            )
+        orders = [int(row.get("ranking_order", 0)) for row in rows]
+        if orders != list(range(1, len(rows) + 1)):
+            raise ValueError("external ranking input is not ordered 1..N")
+    elif expected_partition == "all":
+        wrong = sorted(
+            {str(row.get("partition")) for row in rows}
+            - {"discovery", "validation", "test"}
+        )
+        if wrong:
+            raise ValueError(f"all operation received invalid partitions: {wrong}")
+    else:
+        wrong = sorted(
+            {str(row.get("partition")) for row in rows} - {expected_partition}
+        )
+        if wrong:
+            raise ValueError(
+                f"{expected_partition} operation received other partitions: {wrong}"
+            )
+    expected_count = cfg.get("expected_input_count")
+    if expected_count is not None and len(rows) != int(expected_count):
+        raise ValueError(
+            f"Expected {int(expected_count)} {expected_partition} inputs, "
+            f"found {len(rows)}"
+        )
     return rows
 
 
@@ -87,7 +122,8 @@ def _ranking_rows(
 
 def rank_heads(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
     cfg = _cfg(config)
-    samples = _samples(cfg, "discovery")
+    ranking_input_role = str(cfg.get("ranking_input_role", "discovery"))
+    samples = _samples(cfg, ranking_input_role)
     output_dir = Path(cfg["output_dir"]).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     records_path = output_dir / "ranking_mass.jsonl"
@@ -144,6 +180,7 @@ def rank_heads(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
         "schema_version": CAUSAL_SCHEMA_VERSION,
         "model_family": cfg["model_family"],
         "partition": "discovery",
+        "ranking_input_role": ranking_input_role,
         "method": f"terminal_last_prompt_{score_kind}_mean_skip_early_layers",
         "ranking_score_kind": score_kind,
         "skip_early_layers": int(cfg.get("skip_early_layers", 8)),
@@ -240,7 +277,9 @@ def check_zero_bias_equivalence(config: dict[str, Any]) -> Path:
         if cfg["model_family"] in {"roboreward", "qwen"}:
             prepared = runtime.prepare(sample)
             target = runtime.target_positions(sample, prepared)
-            visual = prepared.visual_positions
+            visual = runtime.visual_positions_for_scope(
+                prepared, cfg["intervention_visual_scope"]
+            )
             generate = lambda: runtime.generate(
                 sample,
                 prepared=prepared,
@@ -253,7 +292,8 @@ def check_zero_bias_equivalence(config: dict[str, Any]) -> Path:
         else:
             _inputs, spans = runtime.prepare(sample)
             target, visual, _target_spans = runtime.target_positions(
-                sample, spans, str(cfg.get("intervention_location", "after_cam_high"))
+                sample, spans, str(cfg.get("intervention_location", "after_cam_high")),
+                cfg["intervention_visual_scope"],
             )
             generate = lambda: runtime.generate(
                 sample,
@@ -326,8 +366,8 @@ def check_zero_bias_equivalence(config: dict[str, Any]) -> Path:
 def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
     cfg = _cfg(config)
     partition = str(cfg.get("partition", "validation"))
-    if partition not in {"validation", "test"}:
-        raise ValueError("steering partition must be validation or test")
+    if partition not in {"validation", "test", "all"}:
+        raise ValueError("steering partition must be validation, test, or all")
     samples = _samples(cfg, partition)
     ranking_path = Path(cfg["ranking_path"]).resolve()
     ranking_artifact = json.loads(ranking_path.read_text(encoding="utf-8"))
@@ -336,7 +376,9 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
     ranking = ranking_artifact["ranking"]
     top_k = int(cfg.get("top_k", 8))
     candidate = _heads(ranking, top_k)
-    low = select_low_ranked_heads(ranking, top_k, candidate)
+    low = select_layer_matched_low_ranked_heads(
+        ranking, candidate
+    )
     num_heads = int(cfg.get("num_heads", 32))
     random_heads = _layer_matched_random(candidate, [*candidate, *low], num_heads)
     bias = float(cfg.get("swap_bias", 6))
@@ -377,20 +419,10 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
             if cfg["model_family"] in {"roboreward", "qwen"}:
                 prepared = runtime.prepare(sample)
                 target = runtime.target_positions(sample, prepared)
-                visual = prepared.visual_positions
-                if sample.get("wrong_region_bbox") is not None:
-                    with Image.open(sample["last_image_path"]) as image:
-                        wrong = bbox_to_token_positions(
-                            prepared.target_span,
-                            sample["wrong_region_bbox"],
-                            image.size,
-                            runtime.merge_size,
-                        )
-                    wrong_source = "audited_same_target_image"
-                elif bool(cfg.get("require_audited_wrong_region", True)):
-                    raise ValueError("Audited wrong_region_bbox is required")
-                else:
-                    wrong, wrong_source = runtime.wrong_control_positions(prepared, target)
+                visual = runtime.visual_positions_for_scope(
+                    prepared, cfg["intervention_visual_scope"]
+                )
+                wrong, wrong_source = runtime.wrong_control_positions(prepared, target)
                 generate = lambda heads, positions, value: runtime.generate(
                     sample,
                     prepared=prepared,
@@ -402,31 +434,20 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
                 )
             else:
                 _inputs, spans = runtime.prepare(sample)
+                location = str(
+                    cfg.get("intervention_location", "after_cam_high")
+                )
                 target, visual, target_spans = runtime.target_positions(
-                    sample, spans, str(cfg.get("intervention_location", "after_cam_high"))
+                    sample,
+                    spans,
+                    location,
+                    cfg["intervention_visual_scope"],
                 )
                 if len(target_spans) != 1:
                     raise ValueError("Primary GRM control requires one target image span")
-                if sample.get("wrong_region_bbox") is not None:
-                    with Image.open(sample["last_image_path"]) as image:
-                        wrong = bbox_to_token_positions(
-                            target_spans[0],
-                            sample["wrong_region_bbox"],
-                            image.size,
-                            runtime.spatial_merge_size,
-                        )
-                    wrong_source = "audited_same_target_image"
-                elif bool(cfg.get("require_audited_wrong_region", True)):
-                    raise ValueError("Audited wrong_region_bbox is required")
-                else:
-                    wrong = matched_wrong_position_set(
-                        target_spans[0],
-                        target,
-                        spatial_merge_size=runtime.spatial_merge_size,
-                    )
-                    wrong_source = "same_target_span_farthest_region"
-                if wrong is None:
-                    raise ValueError("No equal-size disjoint wrong region for GRM sample")
+                wrong, wrong_source = runtime.wrong_control_positions(
+                    sample, spans, target, location
+                )
                 generate = lambda heads, positions, value: runtime.generate(
                     sample,
                     prepared=(_inputs, spans),
@@ -513,6 +534,8 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
             "top_k": top_k,
             "bias": bias,
             "query_scope": scope,
+            "ranking_visual_scope": cfg["ranking_visual_scope"],
+            "intervention_visual_scope": cfg["intervention_visual_scope"],
             "conditions": sorted(expected),
             "validation_top_k": validation_top_k if partition == "validation" else None,
             "validation_biases": validation_biases if partition == "validation" else None,

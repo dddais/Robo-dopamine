@@ -56,6 +56,22 @@ def _inventory(inputs_path: str | Path) -> dict[str, Any]:
     }
 
 
+def _tracking_implementation(config: dict[str, Any]):
+    section_value = config.get("my_dataset_tracked_grounding")
+    if not isinstance(section_value, dict):
+        raise ValueError("Config must contain my_dataset_tracked_grounding")
+    implementation = str(section_value.get("implementation", "v2"))
+    if implementation == "v2":
+        from . import tracked_grounding as module
+    elif implementation == "v3":
+        from . import tracked_grounding_v3 as module
+    else:
+        raise ValueError(
+            "my_dataset_tracked_grounding.implementation must be v2 or v3"
+        )
+    return module
+
+
 def _positive_count_or_auto(value: str) -> int | None:
     if value.strip().casefold() == "auto":
         return None
@@ -157,6 +173,12 @@ def parser() -> argparse.ArgumentParser:
         help="build explicitly unreviewed exploratory grounding decisions",
     )
     assume_grounding.add_argument("--config", required=True)
+
+    assume_tracking = commands.add_parser(
+        "assume-tracking-all",
+        help="materialize an explicitly unreviewed full-coverage tracking policy",
+    )
+    assume_tracking.add_argument("--config", required=True)
 
     ranking_cohort = commands.add_parser(
         "ranking-cohort",
@@ -290,16 +312,16 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
     if args.command == "ground-track-prepare":
-        from .tracked_grounding import build_tracked_grounding_requests
-
-        print(build_tracked_grounding_requests(load_config(args.config)))
+        config = load_config(args.config)
+        tracking = _tracking_implementation(config)
+        print(tracking.build_tracked_grounding_requests(config))
         return
     if args.command == "ground-track-run":
-        from .tracked_grounding import run_tracked_grounding
-
+        config = load_config(args.config)
+        tracking = _tracking_implementation(config)
         print(
-            run_tracked_grounding(
-                load_config(args.config),
+            tracking.run_tracked_grounding(
+                config,
                 retry_failed=args.retry_failed,
                 shard_id=args.shard_id,
                 num_shards=args.num_shards,
@@ -307,21 +329,29 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
     if args.command == "ground-track-reconcile":
-        from .tracking_finalize import reconcile_stale_tracking_provenance
-
-        print(reconcile_stale_tracking_provenance(load_config(args.config)))
+        config = load_config(args.config)
+        tracking = _tracking_implementation(config)
+        if tracking.__name__.endswith("tracked_grounding_v3"):
+            from . import tracking_finalize_v3 as finalize
+        else:
+            from . import tracking_finalize as finalize
+        print(finalize.reconcile_stale_tracking_provenance(config))
         return
     if args.command == "ground-track-finalize":
-        from .tracking_finalize import finalize_sharded_tracking_manifest
-
-        print(finalize_sharded_tracking_manifest(load_config(args.config)))
+        config = load_config(args.config)
+        tracking = _tracking_implementation(config)
+        if tracking.__name__.endswith("tracked_grounding_v3"):
+            from . import tracking_finalize_v3 as finalize
+        else:
+            from . import tracking_finalize as finalize
+        print(finalize.finalize_sharded_tracking_manifest(config))
         return
     if args.command == "ground-track-manual":
-        from .tracked_grounding import run_manual_retracks
-
+        config = load_config(args.config)
+        tracking = _tracking_implementation(config)
         print(
-            run_manual_retracks(
-                load_config(args.config),
+            tracking.run_manual_retracks(
+                config,
                 args.anchors,
                 args.output,
                 retry_failed=args.retry_failed,
@@ -352,6 +382,11 @@ def main(argv: list[str] | None = None) -> None:
         from .assumed_grounding import build_assumed_grounding
 
         print(build_assumed_grounding(load_config(args.config)))
+        return
+    if args.command == "assume-tracking-all":
+        from .tracking_assumed import build_tracking_assumed
+
+        print(build_tracking_assumed(load_config(args.config)))
         return
     if args.command == "ranking-cohort":
         from .ranking_cohort import freeze_ranking_cohort

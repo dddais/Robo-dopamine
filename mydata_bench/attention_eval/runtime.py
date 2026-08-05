@@ -11,10 +11,12 @@ from PIL import Image
 from ..protocol import IMAGE_LABELS, chat_messages, parse_score, system_prompt
 from .masking import (
     QUERY_SCOPES,
+    VISUAL_SCOPES,
     Head,
     ImageSpan,
     bbox_to_token_positions,
     make_attention_mask_hook,
+    matched_wrong_position_set,
 )
 
 
@@ -172,7 +174,13 @@ class AttentionRuntime:
         sample: dict[str, Any],
         spans: list[ImageSpan],
         location: str = "after_cam_high",
+        visual_scope: str = "target_slot_only",
     ) -> tuple[list[int], list[int], list[ImageSpan]]:
+        if visual_scope not in VISUAL_SCOPES:
+            choices = ", ".join(sorted(VISUAL_SCOPES))
+            raise ValueError(
+                f"Unknown visual scope {visual_scope!r}; choose one of {choices}"
+            )
         selected_spans = (
             [span for span in spans if span.label.startswith("after_cam_")]
             if location == "after_all_duplicates"
@@ -192,18 +200,77 @@ class AttentionRuntime:
         )
         with Image.open(image_path) as image:
             size = image.size
-        selected = []
-        image_positions = []
+        selected: list[int] = []
         for span in selected_spans:
             selected.extend(
                 bbox_to_token_positions(span, bbox, size, self.spatial_merge_size)
             )
-            image_positions.extend(range(span.start, span.end))
-        return selected, image_positions, selected_spans
+        universe_spans = (
+            selected_spans if visual_scope == "target_slot_only" else spans
+        )
+        image_positions = [
+            position
+            for span in universe_spans
+            for position in range(span.start, span.end)
+        ]
+        return sorted(set(selected)), image_positions, selected_spans
+
+    def wrong_control_positions(
+        self,
+        sample: dict[str, Any],
+        spans: list[ImageSpan],
+        target_positions: Sequence[int],
+        location: str = "after_cam_high",
+    ) -> tuple[list[int], str]:
+        _target, _visual, selected_spans = self.target_positions(
+            sample, spans, location, "target_slot_only"
+        )
+        if len(selected_spans) != 1:
+            raise ValueError("Wrong-region control requires one target image span")
+        span = selected_spans[0]
+        wrong_bbox = sample.get("wrong_region_bbox")
+        if wrong_bbox is not None:
+            image_path = (
+                sample["last_image_path"]
+                if "last_image_path" in sample
+                else sample["last"]["provenance"]["image_path"]
+            )
+            with Image.open(image_path) as image:
+                size = image.size
+            wrong = bbox_to_token_positions(
+                span, wrong_bbox, size, self.spatial_merge_size
+            )
+            source = "audited_same_target_image"
+        else:
+            wrong = matched_wrong_position_set(
+                span,
+                target_positions,
+                spatial_merge_size=self.spatial_merge_size,
+            )
+            source = "same_target_span_farthest_translated_footprint"
+        if (
+            wrong is None
+            or not wrong
+            or len(wrong) != len(set(target_positions))
+            or set(wrong) & set(target_positions)
+        ):
+            raise ValueError(
+                "No equal-size disjoint wrong region exists in the target span"
+            )
+        return list(wrong), source
+
 
     def collect_mass(self, sample: dict[str, Any]) -> dict[str, Any]:
         inputs, spans = self.prepare(sample)
-        target, image_positions, _ = self.target_positions(sample, spans)
+        visual_scope = str(
+            self.config.get("ranking_visual_scope", "target_slot_only")
+        )
+        target, image_positions, _ = self.target_positions(
+            sample,
+            spans,
+            str(self.config.get("intervention_location", "after_cam_high")),
+            visual_scope,
+        )
         with self.torch.inference_mode():
             outputs = self.model(**inputs, output_attentions=True, use_cache=False)
         if outputs.attentions is None:
@@ -225,6 +292,7 @@ class AttentionRuntime:
             "query_positions": [query],
             "bbox_positions": target,
             "image_positions": image_positions,
+            "visual_scope": visual_scope,
             "bbox_token_fraction": fraction,
             "raw_mass": raw.tolist(),
             "image_mass": image_mass.tolist(),
@@ -290,8 +358,31 @@ class AttentionRuntime:
         if scope not in QUERY_SCOPES:
             choices = ", ".join(sorted(QUERY_SCOPES))
             raise ValueError(f"Unknown steering query scope {scope!r}; choose one of {choices}")
-        diagnostics: dict[str, Any] = {"query_scope": scope}
+        visual_scope = str(
+            self.config.get("intervention_visual_scope", "target_slot_only")
+        )
+        _target, expected_visual, _selected_spans = self.target_positions(
+            sample,
+            spans,
+            str(self.config.get("intervention_location", "after_cam_high")),
+            visual_scope,
+        )
+        if list(image_positions) != expected_visual:
+            raise ValueError(
+                "Supplied image positions differ from configured intervention universe"
+            )
+        if not set(selected_positions) < set(image_positions):
+            raise ValueError(
+                "Selected target/control positions must be a proper subset of visual universe"
+            )
         other = sorted(set(image_positions) - set(selected_positions))
+        diagnostics: dict[str, Any] = {
+            "query_scope": scope,
+            "visual_scope": visual_scope,
+            "selected_token_count": len(set(selected_positions)),
+            "visual_token_count": len(set(image_positions)),
+            "negative_visual_token_count": len(other),
+        }
         context = (
             self.steering_hooks(
                 heads,

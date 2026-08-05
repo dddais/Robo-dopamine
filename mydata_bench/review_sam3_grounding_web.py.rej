@@ -1,0 +1,11 @@
+--- mydata_bench/review_sam3_grounding_web.py
++++ mydata_bench/review_sam3_grounding_web.py
+@@ -1480,4 +1480,7 @@
+             not isinstance(target_rows, list)
+             or not isinstance(reference_rows, list)
+             or not isinstance(options_raw, list)
+-            or len(options_raw) > 3
++            or (
++                len(options_raw) > 3
++                and proposal.get("pretrack_identity_selection") is not True
++            )

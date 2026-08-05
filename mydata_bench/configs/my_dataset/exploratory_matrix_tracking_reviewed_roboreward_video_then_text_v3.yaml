@@ -1,0 +1,28 @@
+my_dataset_exploratory_matrix:
+  variant_id: tracking_reviewed_roboreward_8b_model_card_native_front_video_then_text_matrix_v3
+  reference_variant_id: roboreward_8b_model_card_native_front_video_then_text_matrix
+  model_family: roboreward
+  model_path: /mnt/public1/dais/workspace/model/RoboReward-8B
+  checkpoint_content_manifest: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/configs/my_dataset/checkpoint_manifests/roboreward_8b.json
+  ranking_manifest: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/ranking_cohort_tracking_reviewed_v3/roboreward/ordered_max20.jsonl
+  evaluation_manifest: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/artifacts/my_dataset/ljx_lfz_cf_v1/attention_tracking_reviewed_v3/roboreward/complete_groups.jsonl
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/outputs/my_dataset/ljx_lfz_cf_v1/reviewed_tracking_matrix_v3/roboreward_8b_model_card_native_front_video_then_text
+  grounding_mode: human_reviewed
+  protocol_addendum: /mnt/public1/dais/workspace/Robo-Dopamine/mydata_bench/configs/my_dataset/tracking_v3_protocol.md
+  protocol: roborewardbench_native
+  content_order: video_then_text
+  attention_video_max_frames: 8
+  ranking_prefix_sizes: [5, 10, 20]
+  steering_top_k: [8, 32, 64]
+  ranking_score_kind: excess_mass
+  skip_early_layers: 8
+  swap_bias: 6
+  steering_query_scope: all
+  ranking_visual_scope: target_slot_only
+  intervention_visual_scope: target_slot_only
+  expected_ranking_count: 20
+  expected_evaluation_count: auto
+  capture_generation_attentions: false
+  torch_dtype: bfloat16
+  device_map: auto
+  max_new_tokens: 32

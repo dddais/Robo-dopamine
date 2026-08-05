@@ -11,14 +11,20 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 import traceback
 from collections import Counter
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from ..attention_eval.masking import Head
+from ..attention_eval.masking import (
+    VISUAL_SCOPES,
+    Head,
+    select_layer_matched_low_ranked_heads,
+)
 from ..config import section
 from ..io import (
     append_jsonl,
@@ -40,6 +46,7 @@ from .grounding_contract import (
     validate_grounding_row,
 )
 from .review_provenance import (
+    TRACKED_REVIEW_SOURCE_KINDS,
     load_fingerprinted_manifest,
     validate_attention_review_manifest,
     validate_jsonl_artifact,
@@ -71,16 +78,55 @@ _CAPTURE_GENERATION_ATTENTIONS = False
 _BASELINE = "baseline"
 
 
-def _candidate_condition(ranking_n: int, top_k: int) -> str:
-    return f"candidate_target__rank_n{ranking_n:03d}__top_k{top_k:03d}"
+def _installed_version(distribution: str) -> str:
+    try:
+        return importlib_metadata.version(distribution)
+    except importlib_metadata.PackageNotFoundError:
+        return "not-installed"
+
+
+def _runtime_library_versions() -> dict[str, str]:
+    return {
+        "python": ".".join(str(value) for value in sys.version_info[:3]),
+        "torch": _installed_version("torch"),
+        "transformers": _installed_version("transformers"),
+        "numpy": str(np.__version__),
+        "pillow": _installed_version("Pillow"),
+    }
+
+
+def _condition_name(kind: str, ranking_n: int, top_k: int) -> str:
+    return f"{kind}__rank_n{ranking_n:03d}__top_k{top_k:03d}"
 
 
 _GRID = tuple(
-    (ranking_n, top_k, _candidate_condition(ranking_n, top_k))
+    (ranking_n, top_k, _condition_name("candidate_target", ranking_n, top_k))
     for ranking_n in _PREFIX_SIZES
     for top_k in _TOP_K_VALUES
 )
-_CONDITIONS = (_BASELINE, *(condition for _n, _k, condition in _GRID))
+_WRONG_GRID = tuple(
+    (
+        ranking_n,
+        top_k,
+        _condition_name("candidate_wrong_region", ranking_n, top_k),
+    )
+    for ranking_n in _PREFIX_SIZES
+    for top_k in _TOP_K_VALUES
+)
+_LOW_RANK_GRID = tuple(
+    (ranking_n, top_k, _condition_name("low_rank_target", ranking_n, top_k))
+    for ranking_n in _PREFIX_SIZES
+    for top_k in _TOP_K_VALUES
+)
+_CONDITION_GRID = (
+    *((n, k, condition, "candidate_target") for n, k, condition in _GRID),
+    *((n, k, condition, "candidate_wrong_region") for n, k, condition in _WRONG_GRID),
+    *((n, k, condition, "low_rank_target") for n, k, condition in _LOW_RANK_GRID),
+)
+_CONDITIONS = (
+    _BASELINE,
+    *(condition for _n, _k, condition, _kind in _CONDITION_GRID),
+)
 
 
 def _as_int_tuple(value: Any, *, field: str) -> tuple[int, ...]:
@@ -115,6 +161,19 @@ def _cfg(config: dict[str, Any]) -> dict[str, Any]:
         )
     if str(value["model_family"]) not in {"qwen", "roboreward", "grm"}:
         raise ValueError("model_family must be qwen, roboreward, or grm")
+
+    intervention_scope = str(
+        value.get("intervention_visual_scope", "target_slot_only")
+    )
+    ranking_scope = str(value.get("ranking_visual_scope", intervention_scope))
+    for field, scope in (
+        ("intervention_visual_scope", intervention_scope),
+        ("ranking_visual_scope", ranking_scope),
+    ):
+        if scope not in VISUAL_SCOPES:
+            choices = ", ".join(sorted(VISUAL_SCOPES))
+            raise ValueError(f"{field} must be one of {choices}")
+        value[field] = scope
 
     prefixes = _as_int_tuple(
         value.get("ranking_prefix_sizes", _PREFIX_SIZES),
@@ -403,7 +462,7 @@ def _validate_tracking_review_contract(
     value: Mapping[str, Any], *, identity: str
 ) -> None:
     if "wrong_region_bbox" in value:
-        raise ValueError(f"{identity}: tracking v2 forbids wrong_region_bbox")
+        raise ValueError(f"{identity}: tracked review forbids wrong_region_bbox")
     if value.get("target_grounding_scope") != "terminal_only":
         raise ValueError(f"{identity}: target_grounding_scope must be terminal_only")
     if value.get("control_region_policy") != "none":
@@ -417,14 +476,17 @@ def _propagate_review_contract(cfg: Mapping[str, Any]) -> dict[str, Any]:
     if has_legacy and has_tracking:
         raise ValueError("matrix configuration mixes reviewed provenance kinds")
     if has_tracking:
-        if cfg.get("review_source_kind") != "tracked_grounding_v2":
-            raise ValueError("tracking provenance requires tracked_grounding_v2")
+        review_source_kind = str(cfg.get("review_source_kind", ""))
+        if review_source_kind not in TRACKED_REVIEW_SOURCE_KINDS:
+            raise ValueError(
+                "tracking provenance requires a supported tracked grounding source"
+            )
         if cfg.get("target_grounding_scope") != "terminal_only":
             raise ValueError("tracking matrix target scope must be terminal_only")
         if cfg.get("control_region_policy") != "none":
             raise ValueError("tracking matrix control-region policy must be none")
         return {
-            "review_source_kind": "tracked_grounding_v2",
+            "review_source_kind": review_source_kind,
             "tracking_review_provenance": dict(
                 validate_tracking_review_provenance(
                     cfg["tracking_review_provenance"],
@@ -521,7 +583,7 @@ def _validate_reviewed_input_chain(
             "review_source_kind"
         )
     if provenance_key == "tracking_review_provenance":
-        if review_source_kind != "tracked_grounding_v2":
+        if review_source_kind not in TRACKED_REVIEW_SOURCE_KINDS:
             raise ValueError("tracking provenance has an invalid review_source_kind")
         _validate_tracking_review_contract(
             selection, identity="reviewed ranking selection manifest"
@@ -799,6 +861,7 @@ def _runtime_fingerprint(cfg: Mapping[str, Any]) -> dict[str, Any]:
         max_pixels = cfg.get("max_pixels")
         max_new_tokens = int(cfg.get("max_new_tokens", 32))
     return {
+        "library_versions": _runtime_library_versions(),
         "max_new_tokens": max_new_tokens,
         "dtype": dtype,
         "device_map": cfg.get("device_map", "auto"),
@@ -809,6 +872,8 @@ def _runtime_fingerprint(cfg: Mapping[str, Any]) -> dict[str, Any]:
         "intervention_location": str(
             cfg.get("intervention_location", "after_cam_high")
         ),
+        "ranking_visual_scope": cfg["ranking_visual_scope"],
+        "intervention_visual_scope": cfg["intervention_visual_scope"],
         "capture_generation_attentions": bool(
             cfg["capture_generation_attentions"]
         ),
@@ -913,6 +978,8 @@ def _fingerprint_components(
             "intervention_location": cfg.get(
                 "intervention_location", "after_cam_high"
             ),
+            "ranking_visual_scope": cfg["ranking_visual_scope"],
+            "intervention_visual_scope": cfg["intervention_visual_scope"],
         },
         "method": {
             "mass_collection": "runtime.collect_mass_terminal_last_prompt",
@@ -1065,7 +1132,7 @@ def _ranking_rows(
         raise ValueError(
             f"Only {len(rows)} eligible ranked heads are available; need {limit}"
         )
-    result = rows[:limit]
+    result = rows
     for rank, row in enumerate(result, 1):
         row["rank"] = rank
     return result
@@ -1180,15 +1247,22 @@ def _validate_record_rankings(
     for (_example_id, condition), row in latest.items():
         if row.get("status") != "ok" or condition == _BASELINE:
             continue
-        matches = [item for item in _GRID if item[2] == condition]
+        matches = [
+            item for item in _CONDITION_GRID if item[2] == condition
+        ]
         if len(matches) != 1:
             raise AssertionError(f"Unknown frozen condition {condition}")
-        ranking_n, top_k, _condition = matches[0]
-        if row.get("ranking_n") != ranking_n or row.get("top_k") != top_k:
+        ranking_n, top_k, _condition, condition_kind = matches[0]
+        if (
+            row.get("ranking_n") != ranking_n
+            or row.get("top_k") != top_k
+            or row.get("condition_kind") != condition_kind
+        ):
             raise RuntimeError(
-                f"Ranking coordinates mismatch in steering record for {condition}"
+                f"Ranking coordinates/kind mismatch in steering record for {condition}"
             )
-        if row.get("ranking_fingerprint") != rankings[ranking_n]["fingerprint"]:
+        artifact = rankings[ranking_n]
+        if row.get("ranking_fingerprint") != artifact["fingerprint"]:
             raise RuntimeError(
                 f"Ranking fingerprint mismatch in steering record for {condition}"
             )
@@ -1221,16 +1295,21 @@ def _validate_record_rankings(
             raise RuntimeError(
                 f"Steering record for {condition} contains duplicate heads"
             )
+        candidate = _head_values(artifact, top_k)
+        expected_heads = (
+            select_layer_matched_low_ranked_heads(
+                artifact["ranking"], candidate
+            )
+            if condition_kind == "low_rank_target"
+            else candidate
+        )
         expected = [
-            (int(value["layer"]), int(value["head"]))
-            for value in rankings[ranking_n]["ranking"][:top_k]
+            (int(value.layer), int(value.head)) for value in expected_heads
         ]
         if actual != expected:
             raise RuntimeError(
-                f"Ordered Top-{top_k} heads mismatch in steering record for {condition}"
+                f"Frozen heads mismatch in steering record for {condition}"
             )
-
-
 def _head_values(artifact: Mapping[str, Any], top_k: int) -> list[Head]:
     rows = artifact.get("ranking")
     if not isinstance(rows, list) or len(rows) < top_k:
@@ -1285,25 +1364,41 @@ def _prepared_contract(prepared: Any, cfg: Mapping[str, Any]) -> None:
 
 def _generation_context(
     runtime: Any, cfg: Mapping[str, Any], sample: dict[str, Any]
-) -> tuple[Any, list[int], list[int], str]:
+) -> tuple[Any, list[int], list[int], list[int], str, str]:
     prepared = runtime.prepare(sample)
     _prepared_contract(prepared, cfg)
+    visual_scope = str(cfg["intervention_visual_scope"])
     if str(cfg["model_family"]) in {"qwen", "roboreward"}:
         target = list(runtime.target_positions(sample, prepared))
-        visual = list(prepared.visual_positions)
-        return prepared, target, visual, "visual_positions"
+        visual = list(runtime.visual_positions_for_scope(prepared, visual_scope))
+        wrong, wrong_source = runtime.wrong_control_positions(prepared, target)
+        return (
+            prepared,
+            target,
+            list(wrong),
+            visual,
+            "visual_positions",
+            str(wrong_source),
+        )
     try:
         _inputs, spans = prepared
     except (TypeError, ValueError) as exc:
         raise RuntimeError("GRM prepare() must return (inputs, spans)") from exc
+    location = str(cfg.get("intervention_location", "after_cam_high"))
     target, visual, _target_spans = runtime.target_positions(
-        sample,
-        spans,
-        str(cfg.get("intervention_location", "after_cam_high")),
+        sample, spans, location, visual_scope
     )
-    return prepared, list(target), list(visual), "image_positions"
-
-
+    wrong, wrong_source = runtime.wrong_control_positions(
+        sample, spans, target, location
+    )
+    return (
+        prepared,
+        list(target),
+        list(wrong),
+        list(visual),
+        "image_positions",
+        str(wrong_source),
+    )
 def _assert_hook_applied(
     result: Mapping[str, Any], heads: Sequence[Head]
 ) -> dict[str, Any]:
@@ -1336,7 +1431,17 @@ def _assert_hook_applied(
         integer_fields = {}
         for field in (
             "calls",
+            "prefill_calls",
+            "decode_calls",
+            "observed_query_rows",
+            "prefill_query_rows",
+            "decode_query_rows",
             "applied_calls",
+            "prefill_applied_calls",
+            "decode_applied_calls",
+            "applied_query_rows",
+            "prefill_applied_query_rows",
+            "decode_applied_query_rows",
             "skipped_calls",
             "missing_mask_calls",
             "selected_token_count",
@@ -1359,6 +1464,18 @@ def _assert_hook_applied(
         if (
             value.get("query_scope") != _QUERY_SCOPE
             or integer_fields["applied_calls"] != integer_fields["calls"]
+            or integer_fields["prefill_calls"] <= 0
+            or integer_fields["prefill_applied_calls"]
+            != integer_fields["prefill_calls"]
+            or integer_fields["decode_applied_calls"]
+            != integer_fields["decode_calls"]
+            or integer_fields["applied_query_rows"] <= 0
+            or integer_fields["applied_query_rows"]
+            != integer_fields["observed_query_rows"]
+            or integer_fields["prefill_applied_query_rows"]
+            != integer_fields["prefill_query_rows"]
+            or integer_fields["decode_applied_query_rows"]
+            != integer_fields["decode_query_rows"]
             or integer_fields["skipped_calls"] != 0
             or integer_fields["missing_mask_calls"] != 0
         ):
@@ -1385,6 +1502,7 @@ def _assert_hook_applied(
         "passed": True,
         "applied_calls_by_layer": by_layer,
         "applied_calls": sum(by_layer.values()),
+        "all_observed_query_rows_modified": True,
     }
 
 
@@ -1507,7 +1625,12 @@ def _manifest(
             "top_k": list(_TOP_K_VALUES),
             "bias": _SWAP_BIAS,
             "scope": _QUERY_SCOPE,
-            "controls": [],
+            "controls": [
+                "candidate_wrong_region",
+                "layer_matched_low_rank_target",
+            ],
+            "ranking_visual_scope": cfg["ranking_visual_scope"],
+            "intervention_visual_scope": cfg["intervention_visual_scope"],
         },
         "labels_opened": False,
         "protocol_addendum": components["input"]["protocol_addendum"],
@@ -1725,10 +1848,25 @@ def run_exploratory_matrix(
         if not missing:
             continue
         current_condition = missing[0]
+        current_matches = [
+            item for item in _CONDITION_GRID if item[2] == current_condition
+        ]
+        current_kind = (
+            "baseline"
+            if current_condition == _BASELINE
+            else current_matches[0][3]
+            if len(current_matches) == 1
+            else "unknown"
+        )
         try:
-            prepared, target, visual, visual_key = _generation_context(
-                runtime, cfg, sample
-            )
+            (
+                prepared,
+                target,
+                wrong,
+                visual,
+                visual_key,
+                wrong_source,
+            ) = _generation_context(runtime, cfg, sample)
             if not target:
                 raise ValueError("Target visual-token positions are empty")
             if not visual or not set(target) < set(visual):
@@ -1736,15 +1874,23 @@ def run_exploratory_matrix(
                     "Target positions must be a non-empty proper subset of "
                     "visual positions"
                 )
+            if (
+                not wrong
+                or len(wrong) != len(target)
+                or set(wrong) & set(target)
+                or not set(wrong) < set(visual)
+            ):
+                raise ValueError(
+                    "Wrong-region positions must be equal-size, disjoint, and "
+                    "inside the configured visual universe"
+                )
         except Exception as exc:
             key = (example_id, current_condition)
             base = _base_record(
                 sample,
                 cfg,
                 condition=current_condition,
-                condition_kind=(
-                    "baseline" if current_condition == _BASELINE else "candidate_target"
-                ),
+                condition_kind=current_kind,
                 run_fingerprint=run_fingerprint,
                 attempt=int(record_attempts[key]) + 1,
             )
@@ -1752,20 +1898,76 @@ def run_exploratory_matrix(
             latest_records[key] = row
             raise
 
-        specs: list[tuple[str, str, int | None, int | None, list[Head], float, str | None]] = [
-            (_BASELINE, "baseline", None, None, [], 0.0, None)
+        specs: list[
+            tuple[
+                str,
+                str,
+                int | None,
+                int | None,
+                list[Head],
+                list[int],
+                float,
+                str | None,
+                str,
+            ]
+        ] = [
+            (
+                _BASELINE,
+                "baseline",
+                None,
+                None,
+                [],
+                target,
+                0.0,
+                None,
+                "audited_target",
+            )
         ]
-        for ranking_n, top_k, condition in _GRID:
-            specs.append(
-                (
-                    condition,
-                    "candidate_target",
-                    ranking_n,
-                    top_k,
-                    _head_values(rankings[ranking_n], top_k),
-                    _SWAP_BIAS,
-                    str(rankings[ranking_n]["fingerprint"]),
-                )
+        for ranking_n, top_k, candidate_condition in _GRID:
+            artifact = rankings[ranking_n]
+            candidate_heads = _head_values(artifact, top_k)
+            low_rank_heads = select_layer_matched_low_ranked_heads(
+                artifact["ranking"], candidate_heads
+            )
+            ranking_fingerprint = str(artifact["fingerprint"])
+            specs.extend(
+                [
+                    (
+                        candidate_condition,
+                        "candidate_target",
+                        ranking_n,
+                        top_k,
+                        candidate_heads,
+                        target,
+                        _SWAP_BIAS,
+                        ranking_fingerprint,
+                        "audited_target",
+                    ),
+                    (
+                        _condition_name(
+                            "candidate_wrong_region", ranking_n, top_k
+                        ),
+                        "candidate_wrong_region",
+                        ranking_n,
+                        top_k,
+                        candidate_heads,
+                        wrong,
+                        _SWAP_BIAS,
+                        ranking_fingerprint,
+                        wrong_source,
+                    ),
+                    (
+                        _condition_name("low_rank_target", ranking_n, top_k),
+                        "low_rank_target",
+                        ranking_n,
+                        top_k,
+                        low_rank_heads,
+                        target,
+                        _SWAP_BIAS,
+                        ranking_fingerprint,
+                        "audited_target",
+                    ),
+                ]
             )
 
         for (
@@ -1774,8 +1976,10 @@ def run_exploratory_matrix(
             ranking_n,
             top_k,
             heads,
+            selected,
             bias,
             ranking_fingerprint,
+            selected_source,
         ) in specs:
             key = (example_id, condition)
             if latest_records.get(key, {}).get("status") == "ok":
@@ -1792,15 +1996,20 @@ def run_exploratory_matrix(
                 generate_kwargs = {
                     "prepared": prepared,
                     "heads": heads,
-                    "selected_positions": target,
+                    "selected_positions": selected,
                     visual_key: visual,
                     "bias": bias,
                     "query_scope": _QUERY_SCOPE,
                 }
                 result = runtime.generate(sample, **generate_kwargs)
+                diagnostics = result.setdefault("hook_diagnostics", {})
+                diagnostics["control_region"] = selected_source
+                diagnostics["intervention_visual_scope"] = cfg[
+                    "intervention_visual_scope"
+                ]
                 hook_assertion = (
                     _assert_hook_applied(result, heads)
-                    if condition_kind == "candidate_target"
+                    if condition_kind != "baseline"
                     else None
                 )
                 row = {
@@ -1814,8 +2023,15 @@ def run_exploratory_matrix(
                     ],
                     "bias": float(bias),
                     "scope": _QUERY_SCOPE,
+                    "ranking_visual_scope": cfg["ranking_visual_scope"],
+                    "intervention_visual_scope": cfg[
+                        "intervention_visual_scope"
+                    ],
                     "ranking_fingerprint": ranking_fingerprint,
                     "target_positions": target,
+                    "wrong_region_positions": wrong,
+                    "selected_positions": selected,
+                    "selected_position_source": selected_source,
                     "visual_positions": visual,
                     "hook_assertion": hook_assertion,
                     "status": "ok",
@@ -1832,7 +2048,12 @@ def run_exploratory_matrix(
                     ],
                     "bias": float(bias),
                     "scope": _QUERY_SCOPE,
+                    "ranking_visual_scope": cfg["ranking_visual_scope"],
+                    "intervention_visual_scope": cfg[
+                        "intervention_visual_scope"
+                    ],
                     "ranking_fingerprint": ranking_fingerprint,
+                    "selected_position_source": selected_source,
                 }
                 row = _append_invalid(records_path, invalid_base, exc)
                 latest_records[key] = row
