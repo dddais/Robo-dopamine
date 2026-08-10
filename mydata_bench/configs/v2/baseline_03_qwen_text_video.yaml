@@ -1,0 +1,16 @@
+experiment_id: baseline_03_qwen_text_video
+qwen_eval:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2/baseline_03_qwen_text_video
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+  protocol: roborewardbench_native
+  content_order: text_then_video
+  do_sample: false
+  max_new_tokens: 32
+  torch_dtype: bfloat16
+  device_map: auto
+  min_pixels: 784
+  max_pixels: 50176
+  shard_id: 0
+  num_shards: 1

@@ -1,0 +1,19 @@
+experiment_id: crossmodel_baseline_02_roboreward_images_text
+roboreward_eval:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/baseline_02_roboreward_images_text
+  model_path: /home/dais/workspace/model/RoboReward-8B
+  input_representation: independent_images
+  video_sampling_mode: uniform_fixed_frames
+  num_images: 8
+  preprocessor_mode: checkpoint_default
+  content_order: images_then_text
+  do_sample: false
+  max_new_tokens: 5000
+  torch_dtype: bfloat16
+  device_map: auto
+  min_pixels: 784
+  max_pixels: 50176
+  shard_id: 0
+  num_shards: 1

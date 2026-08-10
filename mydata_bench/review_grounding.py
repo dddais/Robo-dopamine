@@ -1,8 +1,8 @@
 """Interactive local reviewer for GroundingDINO/SAM3 endpoint boxes.
 
 Example:
-    python rewardbench/review_grounding.py \
-      --run-dir rewardbench/grounding/outputs/pairs_attention_dino_official/grounding_dino \
+    python mydata_bench/review_grounding.py \
+      --run-dir results/mydata_bench/grounding/sam3 \
       --reviewer reviewer1
 
 The program never uploads images or instructions.  It resumes from the review
@@ -26,7 +26,7 @@ import numpy as np
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rewardbench.io import append_jsonl, read_jsonl
+from mydata_bench.io import append_jsonl, read_jsonl
 
 
 KEYS = {
@@ -96,8 +96,18 @@ def _text(canvas: np.ndarray, value: str, x: int, y: int, *, scale: float = 0.58
 def render(row: dict[str, Any], target: dict[str, Any] | None, position: int, total: int) -> np.ndarray:
     first = _read_image(row["endpoints"]["first"]["visualization_path"])
     last = _read_image(row["endpoints"]["last"]["visualization_path"])
-    header_height, panel_height, panel_width = 235, 700, 900
-    canvas = np.full((header_height + panel_height, panel_width * 2, 3), 255, dtype=np.uint8)
+    tracking = (
+        _read_image(row["tracking_contact_sheet_path"])
+        if row.get("tracking_contact_sheet_path")
+        else None
+    )
+    header_height, panel_height, panel_width = 235, 560, 720
+    tracking_height = 480 if tracking is not None else 0
+    canvas = np.full(
+        (header_height + panel_height + tracking_height, panel_width * 2, 3),
+        255,
+        dtype=np.uint8,
+    )
     target_phrase = (target or {}).get("target_phrase", "(target unavailable)")
     entity_type = (target or {}).get("entity_type", "unknown")
     y = 34
@@ -108,6 +118,20 @@ def render(row: dict[str, Any], target: dict[str, Any] | None, position: int, to
     canvas[header_height:, panel_width:] = _fit(last, panel_height, panel_width)
     cv2.putText(canvas, "FIRST endpoint", (25, header_height + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA)
     cv2.putText(canvas, "LAST endpoint", (panel_width + 25, header_height + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA)
+    if tracking is not None:
+        canvas[header_height + panel_height :, :] = _fit(
+            tracking, tracking_height, panel_width * 2
+        )
+        cv2.putText(
+            canvas,
+            "TRACKING timeline",
+            (25, header_height + panel_height + 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
+        )
     cv2.putText(
         canvas,
         "Y: yes/correct   N: no/incorrect   U: uncertain   Q or Esc: save and quit",

@@ -1,0 +1,32 @@
+experiment_id: attention_08_qwen_last_frame
+attention_steer:
+  dataset_root: /home/dais/workspace/data/ljx_lfz_task/new
+  split: all
+  eligibility_mode: auto_valid_grounding
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments/attention_08_qwen_last_frame
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+  protocol: roborewardbench_native
+  content_order: text_then_video
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  prompt_mode: official
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/cohorts/auto_grounded/example_ids.json
+  grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding/sam3
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments/attention_08_qwen_last_frame/consensus_ranking.json
+  ranking_metadata_file: /home/dais/workspace/data/ljx_lfz_task/new/ranking_data.jsonl
+  ranking_grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/ranking_grounding/sam3
+  ranking_split: suc
+  min_pixels: 784
+  max_pixels: 50176
+  torch_dtype: bfloat16
+  device_map: auto
+  attention_video_max_frames: 8
+  temporal_intervention_scope: last_frame
+  max_new_tokens: 128
+  ranking_num_samples: 12
+  ranking_score_kind: raw_mass
+  top_k: 8
+  top_k_values: [8, 32, 64]
+  swap_bias: 6
+  skip_early_layers: 8
+  steering_query_scope: all
+  negative_scope: target_span

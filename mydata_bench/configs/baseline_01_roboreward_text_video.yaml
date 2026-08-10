@@ -1,0 +1,17 @@
+experiment_id: baseline_01_roboreward_text_video
+roboreward_eval:
+  dataset_root: /home/dais/workspace/data/ljx_lfz_task/new
+  split: all
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments/baseline_01_roboreward_text_video
+  model_path: /home/dais/workspace/model/RoboReward-8B
+  video_sampling_mode: checkpoint_native_video
+  preprocessor_mode: checkpoint_default
+  content_order: text_then_video
+  do_sample: false
+  max_new_tokens: 5000
+  torch_dtype: bfloat16
+  device_map: auto
+  min_pixels: 784
+  max_pixels: 50176
+  shard_id: 0
+  num_shards: 1

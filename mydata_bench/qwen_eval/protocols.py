@@ -1,6 +1,6 @@
-"""Immutable input/output contracts for the Qwen3-VL baseline.
+"""Explicit input/output contracts for the Qwen3-VL baseline and ablations.
 
-The two contracts are intentionally separate.  A direct 1--5 RoboRewardBench
+The contracts are intentionally separate.  A direct 1--5 RoboRewardBench
 answer and a Robo-Dopamine signed progress hop are not interchangeable model
 outputs, even though both can be summarized with the benchmark's ordinal
 metrics after inference.
@@ -18,8 +18,17 @@ from ..schemas import EpisodeRecord, FrameRecord
 
 
 ROBOREWARDBENCH_NATIVE = "roborewardbench_native"
+ROBOREWARDBENCH_IMAGE_SEQUENCE = "roborewardbench_image_sequence"
 ROBO_DOPAMINE_FORWARD = "robo_dopamine_forward"
-PROTOCOLS = {ROBOREWARDBENCH_NATIVE, ROBO_DOPAMINE_FORWARD}
+PROTOCOLS = {
+    ROBOREWARDBENCH_NATIVE,
+    ROBOREWARDBENCH_IMAGE_SEQUENCE,
+    ROBO_DOPAMINE_FORWARD,
+}
+DISCRETE_PROTOCOLS = {
+    ROBOREWARDBENCH_NATIVE,
+    ROBOREWARDBENCH_IMAGE_SEQUENCE,
+}
 
 
 def validate_protocol(value: str) -> str:
@@ -29,18 +38,52 @@ def validate_protocol(value: str) -> str:
     return value
 
 
-def protocol_descriptor(protocol: str, *, prompt_mode: str = "official") -> dict[str, Any]:
+def protocol_descriptor(
+    protocol: str,
+    *,
+    prompt_mode: str = "official",
+    content_order: str = "text_then_video",
+) -> dict[str, Any]:
     """Return the model-facing contract that is frozen into every manifest."""
     protocol = validate_protocol(protocol)
     if protocol == ROBOREWARDBENCH_NATIVE:
+        if content_order not in {"text_then_video", "video_then_text"}:
+            raise ValueError(
+                "content_order must be 'text_then_video' or 'video_then_text', "
+                f"got {content_order!r}"
+            )
+        media_order = ["text", "video"] if content_order == "text_then_video" else ["video", "text"]
         return {
             "name": protocol,
-            "input": "original_mp4_text_then_video",
+            "input": f"original_mp4_{content_order}",
             "output": "ANSWER: <1-5>",
             "progress_mapping": "(answer - 1) / 4",
             "prompt_sha256": hashlib.sha256(ROBOREWARD_PROMPT.encode("utf-8")).hexdigest(),
             "prompt_contract": "RoboRewardBench discrete progress rubric",
-            "media_order": ["text", "video"],
+            "content_order": content_order,
+            "media_order": media_order,
+        }
+    if protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+        if content_order not in {"text_then_images", "images_then_text"}:
+            raise ValueError(
+                "content_order must be 'text_then_images' or 'images_then_text' "
+                f"for {ROBOREWARDBENCH_IMAGE_SEQUENCE}, got {content_order!r}"
+            )
+        media_order = (
+            ["text", "image_sequence"]
+            if content_order == "text_then_images"
+            else ["image_sequence", "text"]
+        )
+        return {
+            "name": protocol,
+            "input": f"uniform_independent_images_{content_order}",
+            "output": "ANSWER: <1-5>",
+            "progress_mapping": "(answer - 1) / 4",
+            "prompt_sha256": hashlib.sha256(ROBOREWARD_PROMPT.encode("utf-8")).hexdigest(),
+            "prompt_contract": "RoboRewardBench discrete progress rubric",
+            "content_order": content_order,
+            "media_order": media_order,
+            "adapter_protocol": True,
         }
     # ``native_endpoint_payload`` validates the requested named prompt.
     from ..protocol import system_prompt
@@ -58,8 +101,11 @@ def protocol_descriptor(protocol: str, *, prompt_mode: str = "official") -> dict
     }
 
 
-def native_video_payload(episode: EpisodeRecord) -> dict[str, Any]:
+def native_video_payload(
+    episode: EpisodeRecord, *, content_order: str = "text_then_video"
+) -> dict[str, Any]:
     """Build the benchmark-native direct-video request without labels."""
+    protocol_descriptor(ROBOREWARDBENCH_NATIVE, content_order=content_order)
     payload = episode.model_payload()
     path = Path(payload["video_path"]).resolve()
     if not path.is_file():
@@ -68,8 +114,65 @@ def native_video_payload(episode: EpisodeRecord) -> dict[str, Any]:
         "protocol": ROBOREWARDBENCH_NATIVE,
         "task": payload["task"],
         "video_path": str(path),
-        "media_order": ["text", "video"],
+        "content_order": content_order,
+        "media_order": (
+            ["text", "video"] if content_order == "text_then_video"
+            else ["video", "text"]
+        ),
         "prompt": ROBOREWARD_PROMPT.format(task=payload["task"]),
+    }
+
+
+def image_sequence_messages(
+    task: str,
+    image_paths: list[str] | tuple[str, ...],
+    *,
+    content_order: str,
+) -> list[dict[str, Any]]:
+    """Build the discrete rubric request with independent image items."""
+    protocol_descriptor(
+        ROBOREWARDBENCH_IMAGE_SEQUENCE, content_order=content_order
+    )
+    paths = [str(Path(path).resolve()) for path in image_paths]
+    if not paths:
+        raise ValueError("image sequence must contain at least one image")
+    missing = [path for path in paths if not Path(path).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Missing image-sequence inputs: {missing}")
+    text = {"type": "text", "text": ROBOREWARD_PROMPT.format(task=task)}
+    images = [{"type": "image", "image": path} for path in paths]
+    content = (
+        [text, *images]
+        if content_order == "text_then_images"
+        else [*images, text]
+    )
+    return [{"role": "user", "content": content}]
+
+
+def image_sequence_payload(
+    episode: EpisodeRecord,
+    image_paths: list[str],
+    sampling_record: dict[str, Any],
+    *,
+    content_order: str,
+) -> dict[str, Any]:
+    """Build a label-free sampled-image request for baseline inference."""
+    protocol_descriptor(
+        ROBOREWARDBENCH_IMAGE_SEQUENCE, content_order=content_order
+    )
+    payload = episode.model_payload()
+    paths = [str(Path(path).resolve()) for path in image_paths]
+    return {
+        "protocol": ROBOREWARDBENCH_IMAGE_SEQUENCE,
+        "task": payload["task"],
+        "image": paths,
+        "sampling_record": dict(sampling_record),
+        "content_order": content_order,
+        "media_order": (
+            ["text", "image_sequence"]
+            if content_order == "text_then_images"
+            else ["image_sequence", "text"]
+        ),
     }
 
 
@@ -126,7 +229,7 @@ def dopamine_forward_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def parse_protocol_output(protocol: str, raw_output: str) -> dict[str, float | int]:
     """Strictly parse a completed model answer into benchmark progress."""
     protocol = validate_protocol(protocol)
-    if protocol == ROBOREWARDBENCH_NATIVE:
+    if protocol in DISCRETE_PROTOCOLS:
         prediction = parse_native_score(raw_output)
         return {
             "native_prediction": prediction,

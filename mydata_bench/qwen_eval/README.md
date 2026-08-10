@@ -82,3 +82,8 @@ python rewardbench/run_qwen_attention.py score --config rewardbench/configs/atte
 
 reward=5 将配置名中的 `reward1` 改为 `reward5`。八图前向仍是 adapter 指标，不能与原生
 `ANSWER: <1-5>` 结果混合比较。完整结果见 `rewardbench/attention_steering_exp_record.md`。
+# Legacy reference
+
+This file was copied with rewardbench. For the new dataset, use
+mydata_bench/exp_use.md and the mydata_*.yaml configurations; commands below
+refer to historical rewardbench runs.

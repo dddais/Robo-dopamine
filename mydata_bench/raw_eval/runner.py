@@ -11,7 +11,7 @@ from typing import Any
 from PIL import Image
 
 from ..config import section
-from ..data import load_episodes
+from ..data import load_episodes, metadata_path
 from ..io import (
     append_jsonl,
     artifact_fingerprint,
@@ -23,15 +23,18 @@ from ..io import (
     write_json,
 )
 from ..protocol import (
+    accumulate_incremental_progress,
     chat_messages,
+    multiview_endpoint_payload,
     native_endpoint_payload,
+    official_incremental_indices,
     parse_score,
     progress,
     system_prompt,
     temporal_chat_messages,
 )
 from ..schemas import SCHEMA_VERSION
-from ..video import extract_endpoints, extract_uniform
+from ..video import extract_endpoints, extract_frame_at, extract_uniform
 
 
 OFFICIAL_SAMPLING = {
@@ -116,11 +119,24 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
     records_path = output_dir / f"records.shard-{shard_id:02d}.jsonl"
     previous = latest_by_id(read_jsonl(records_path)) if records_path.exists() else {}
     prompt_mode = str(raw.get("prompt_mode", "official"))
+    eval_mode = str(raw.get("eval_mode", "forward"))
+    if eval_mode not in {"forward", "incremental"}:
+        raise ValueError("raw_eval.eval_mode must be 'forward' or 'incremental'")
+    incremental_protocol = str(
+        raw.get("incremental_protocol", "official_accumulated_v1")
+    )
+    if eval_mode == "incremental" and incremental_protocol != "official_accumulated_v1":
+        raise ValueError(
+            "raw_eval.incremental_protocol must be official_accumulated_v1"
+        )
+    frame_interval = int(raw.get("frame_interval", 20))
+    if frame_interval < 1:
+        raise ValueError("raw_eval.frame_interval must be positive")
     prompt_template = system_prompt(prompt_mode)
     manifest = provenance(sys.argv, config, Path(__file__).resolve().parents[2])
     manifest["model_fingerprint"] = artifact_fingerprint(raw["model_path"])
     manifest["metadata_sha256"] = sha256_file(
-        Path(raw["dataset_root"]) / raw.get("split", "test") / "metadata.jsonl"
+        metadata_path(raw["dataset_root"], raw.get("split", "test"))
     )
     manifest["shard_id"] = shard_id
     manifest["num_shards"] = num_shards
@@ -128,10 +144,25 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
         "prompt_mode": prompt_mode,
         "prompt_template_sha256": hashlib.sha256(prompt_template.encode("utf-8")).hexdigest(),
         "sampling": sampling_kwargs(raw),
+        "eval_mode": eval_mode,
+        "frame_interval": frame_interval,
+        "comparison": (
+            "start_to_terminal"
+            if eval_mode == "forward"
+            else "all_adjacent_interval_hops"
+        ),
+        "incremental_protocol": (
+            "official_accumulated_v1" if eval_mode == "incremental" else None
+        ),
+        "reported_progress": (
+            "official_accumulation_then_clip_0_1"
+            if eval_mode == "incremental"
+            else "clip_signed_score_0_1"
+        ),
     }
     manifest["source_fingerprints"] = {
-        "rewardbench/protocol.py": sha256_file(Path(__file__).resolve().parents[1] / "protocol.py"),
-        "rewardbench/raw_eval/runner.py": sha256_file(Path(__file__).resolve()),
+        "mydata_bench/protocol.py": sha256_file(Path(__file__).resolve().parents[1] / "protocol.py"),
+        "mydata_bench/raw_eval/runner.py": sha256_file(Path(__file__).resolve()),
     }
     write_json(
         output_dir
@@ -175,37 +206,164 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
         }
         try:
             frame_dir = frames_root / episode.video_sha256
-            frames = extract_endpoints(
-                episode.example_id,
-                episode.video_sha256,
-                episode.video_path,
-                frame_dir,
-            )
-            payload = native_endpoint_payload(
-                episode, frames, blank_goal, prompt_mode=prompt_mode
-            )
-            if {"reward", "gpt5_mini_check"} & payload.keys():
-                raise AssertionError("Label leakage into model payload")
-            if dry_run:
-                output = "<score>0%</score>"
-                status = "dry_run"
-                signed = 0.0
+            frames_by_view = {
+                view: extract_endpoints(
+                    episode.example_id,
+                    episode.video_sha256,
+                    path,
+                    frame_dir / view,
+                )
+                for view, path in episode.views.items()
+            }
+            before_frame_indices = {
+                view: record.first_index for view, record in frames_by_view.items()
+            }
+            if {"front", "left_wrist", "right_wrist"} <= set(frames_by_view):
+                frames = frames_by_view["front"]
+                if eval_mode == "incremental":
+                    terminal_indices = {
+                        view: frames_by_view[view].last_index
+                        for view in ("front", "left_wrist", "right_wrist")
+                    }
+                    if len(set(terminal_indices.values())) != 1:
+                        raise ValueError(
+                            "incremental mode requires synchronized camera frame counts; "
+                            f"terminal indices are {terminal_indices}"
+                        )
+                    sampled_indices = official_incremental_indices(
+                        frames.last_index, frame_interval
+                    )
+                    if len(sampled_indices) < 2:
+                        raise ValueError("incremental mode requires at least two frames")
+                    incremental_steps = []
+                    accumulated = None
+                    payload = None
+                    for hop_index, (before_index, after_index) in enumerate(
+                        zip(sampled_indices, sampled_indices[1:])
+                    ):
+                        hop_paths: dict[str, dict[str, str]] = {
+                            "before": {}, "after": {}
+                        }
+                        for view in ("front", "left_wrist", "right_wrist"):
+                            record = frames_by_view[view]
+                            for endpoint, index in (
+                                ("before", before_index), ("after", after_index)
+                            ):
+                                if index == record.first_index:
+                                    path = record.first_path
+                                elif index == record.last_index:
+                                    path = record.last_path
+                                else:
+                                    _actual, path = extract_frame_at(
+                                        episode.views[view],
+                                        frame_dir / view / f"frame_{index:06d}.png",
+                                        index,
+                                    )
+                                hop_paths[endpoint][view] = path
+                        payload = multiview_endpoint_payload(
+                            episode,
+                            frames_by_view,
+                            blank_goal,
+                            prompt_mode=prompt_mode,
+                            eval_mode=eval_mode,
+                            before_paths=hop_paths["before"],
+                            after_paths=hop_paths["after"],
+                        )
+                        if {"reward", "gpt5_mini_check"} & payload.keys():
+                            raise AssertionError("Label leakage into model payload")
+                        output = (
+                            "<score>0%</score>"
+                            if dry_run
+                            else engine.infer(payload)
+                        )
+                        hop_score = parse_score(output)
+                        accumulated = accumulate_incremental_progress(
+                            accumulated, hop_score
+                        )
+                        incremental_steps.append(
+                            {
+                                "hop_index": hop_index,
+                                "before_frame_index": before_index,
+                                "after_frame_index": after_index,
+                                "raw_output": output,
+                                "hop_score": hop_score,
+                                "accumulated_progress_unclipped": accumulated,
+                            }
+                        )
+                    assert payload is not None and accumulated is not None
+                    before_frame_indices = {
+                        view: sampled_indices[-2]
+                        for view in ("front", "left_wrist", "right_wrist")
+                    }
+                    signed = incremental_steps[-1]["hop_score"]
+                    reported_progress = progress(accumulated)
+                    output = incremental_steps[-1]["raw_output"]
+                    status = "dry_run" if dry_run else "ok"
+                else:
+                    payload = multiview_endpoint_payload(
+                        episode,
+                        frames_by_view,
+                        blank_goal,
+                        prompt_mode=prompt_mode,
+                        eval_mode=eval_mode,
+                    )
             else:
-                assert engine is not None
-                output = engine.infer(payload)
-                signed = parse_score(output)
-                status = "ok"
+                if eval_mode != "forward":
+                    raise ValueError(
+                        "incremental mode requires all three camera views"
+                    )
+                frames = extract_endpoints(
+                    episode.example_id,
+                    episode.video_sha256,
+                    episode.video_path,
+                    frame_dir,
+                )
+                payload = native_endpoint_payload(
+                    episode, frames, blank_goal, prompt_mode=prompt_mode
+                )
+            if eval_mode != "incremental":
+                if {"reward", "gpt5_mini_check"} & payload.keys():
+                    raise AssertionError("Label leakage into model payload")
+                if dry_run:
+                    output = "<score>0%</score>"
+                    status = "dry_run"
+                    signed = 0.0
+                else:
+                    assert engine is not None
+                    output = engine.infer(payload)
+                    signed = parse_score(output)
+                    status = "ok"
+                sampled_indices = None
+                incremental_steps = None
+                accumulated = None
+                reported_progress = progress(signed)
             append_jsonl(
                 records_path,
                 {
                     **base,
                     "task": episode.task,
                     "frame_record": frames.to_dict(),
+                    "frame_records": {
+                        view: record.to_dict() for view, record in frames_by_view.items()
+                    },
                     "protocol": payload["protocol"],
                     "prompt_mode": payload["prompt_mode"],
+                    "eval_mode": eval_mode,
+                    "before_frame_indices": before_frame_indices,
+                    "incremental_protocol": (
+                        "official_accumulated_v1"
+                        if eval_mode == "incremental"
+                        else None
+                    ),
+                    "sampled_frame_indices": sampled_indices,
+                    "hop_count": (
+                        len(incremental_steps) if incremental_steps is not None else None
+                    ),
+                    "incremental_steps": incremental_steps,
                     "raw_output": output,
                     "signed_score": signed,
-                    "progress": progress(signed),
+                    "accumulated_progress_unclipped": accumulated,
+                    "progress": reported_progress,
                     "status": status,
                 },
             )

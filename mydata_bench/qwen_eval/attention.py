@@ -31,30 +31,198 @@ from ..attention_eval.masking import (
     bbox_to_token_positions,
     make_attention_mask_hook,
     matched_wrong_position_set,
+    resolve_negative_positions,
 )
 from ..attention_eval.runtime import find_contiguous_spans
 from ..protocol import IMAGE_LABELS, progress
 from ..roboreward_eval.runner import ROBOREWARD_PROMPT, parse_native_score
 from .protocols import (
+    DISCRETE_PROTOCOLS,
     ROBO_DOPAMINE_FORWARD,
+    ROBOREWARDBENCH_IMAGE_SEQUENCE,
     ROBOREWARDBENCH_NATIVE,
     dopamine_forward_messages,
+    image_sequence_messages,
     parse_protocol_output,
     validate_protocol,
 )
 
+TEMPORAL_SPAN_MODES = frozenset({"native_pairs", "duplicate_frames"})
+TEMPORAL_BBOX_REDUCERS = frozenset({"last", "union", "intersection"})
 
-def _native_video_message(task: str, video_path: str) -> list[dict[str, Any]]:
-    """Build the exact text-then-video native request used by evaluation."""
+
+def _native_video_message(
+    task: str, video_input: Any, *, content_order: str = "text_then_video"
+) -> list[dict[str, Any]]:
+    """Build a native request in the same explicit order as its baseline."""
+    text = {"type": "text", "text": ROBOREWARD_PROMPT.format(task=task)}
+    resolved_video = (
+        str(Path(video_input).resolve())
+        if isinstance(video_input, (str, Path))
+        else video_input
+    )
+    video = {"type": "video", "video": resolved_video}
+    if content_order == "text_then_video":
+        content = [text, video]
+    elif content_order == "video_then_text":
+        content = [video, text]
+    else:
+        raise ValueError("Unknown native attention content_order")
     return [
         {
             "role": "user",
-            "content": [
-                {"type": "text", "text": ROBOREWARD_PROMPT.format(task=task)},
-                {"type": "video", "video": str(Path(video_path).resolve())},
-            ],
+            "content": content,
         }
     ]
+
+
+def duplicate_temporal_frames(frames: Any, repeat: int = 2) -> Any:
+    """Repeat every decoded source frame consecutively along the time axis."""
+    if repeat < 1:
+        raise ValueError("repeat must be positive")
+    if hasattr(frames, "repeat_interleave"):
+        return frames.repeat_interleave(repeat, dim=0)
+    if isinstance(frames, np.ndarray):
+        return np.repeat(frames, repeat, axis=0)
+    if isinstance(frames, (list, tuple)):
+        return [frame for frame in frames for _ in range(repeat)]
+    raise TypeError(f"Unsupported decoded video type {type(frames)!r}")
+
+
+def reduce_temporal_bboxes(
+    bboxes: Sequence[Sequence[float]], reducer: str
+) -> list[float]:
+    """Reduce tracked boxes belonging to one temporal tubelet."""
+    mode = str(reducer)
+    if mode not in TEMPORAL_BBOX_REDUCERS:
+        choices = ", ".join(sorted(TEMPORAL_BBOX_REDUCERS))
+        raise ValueError(f"Unknown temporal_bbox_reduce {mode!r}; choose one of {choices}")
+    values = [list(map(float, bbox)) for bbox in bboxes]
+    if not values or any(len(bbox) != 4 for bbox in values):
+        raise ValueError("Temporal bbox reduction requires one or more xyxy boxes")
+    if mode == "last":
+        result = values[-1]
+    elif mode == "union":
+        result = [
+            min(bbox[0] for bbox in values),
+            min(bbox[1] for bbox in values),
+            max(bbox[2] for bbox in values),
+            max(bbox[3] for bbox in values),
+        ]
+    else:
+        result = [
+            max(bbox[0] for bbox in values),
+            max(bbox[1] for bbox in values),
+            min(bbox[2] for bbox in values),
+            min(bbox[3] for bbox in values),
+        ]
+    if result[2] <= result[0] or result[3] <= result[1]:
+        raise ValueError("Temporal bbox intersection is empty")
+    return result
+
+
+def prepare_native_video_processor_input(
+    processor: Any,
+    task: str,
+    video_path: str | Path,
+    *,
+    content_order: str,
+    temporal_span_mode: str,
+) -> tuple[Any, dict[str, Any]]:
+    """Apply native processing with an auditable temporal-span contract."""
+    mode = str(temporal_span_mode)
+    if mode not in TEMPORAL_SPAN_MODES:
+        choices = ", ".join(sorted(TEMPORAL_SPAN_MODES))
+        raise ValueError(f"Unknown temporal_span_mode {mode!r}; choose one of {choices}")
+    resolved = str(Path(video_path).resolve())
+    if mode == "native_pairs":
+        raw = processor.apply_chat_template(
+            _native_video_message(task, resolved, content_order=content_order),
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_metadata=True,
+        )
+        return raw, {"temporal_span_mode": mode}
+
+    video_processor = processor.video_processor
+    temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 2))
+    if temporal_patch_size != 2:
+        raise RuntimeError(
+            "duplicate_frames currently requires the checkpoint's temporal_patch_size=2"
+        )
+    frames, source_metadata = video_processor.fetch_videos(
+        resolved,
+        sample_indices_fn=video_processor.sample_frames,
+    )
+    source_indices_value = getattr(source_metadata, "frames_indices", None)
+    source_indices = (
+        source_indices_value.tolist()
+        if hasattr(source_indices_value, "tolist")
+        else list(source_indices_value or [])
+    )
+    if not source_indices or len(source_indices) != len(frames):
+        raise RuntimeError("Native source-frame sampling metadata is incomplete")
+    duplicated_indices = [
+        int(index)
+        for index in source_indices
+        for _ in range(temporal_patch_size)
+    ]
+    duplicated_frames = duplicate_temporal_frames(frames, temporal_patch_size)
+    metadata = {
+        field: getattr(source_metadata, field, None)
+        for field in (
+            "total_num_frames",
+            "fps",
+            "width",
+            "height",
+            "duration",
+            "video_backend",
+        )
+    }
+    # Keep original-video indices so duplicated tubelets retain timestamps.
+    metadata["frames_indices"] = duplicated_indices
+    native_size = getattr(video_processor, "size", None)
+    shortest_edge = (
+        getattr(native_size, "shortest_edge", None)
+        if native_size is not None
+        else None
+    )
+    longest_edge = (
+        getattr(native_size, "longest_edge", None)
+        if native_size is not None
+        else None
+    )
+    if isinstance(native_size, dict):
+        shortest_edge = native_size.get("shortest_edge", shortest_edge)
+        longest_edge = native_size.get("longest_edge", longest_edge)
+    if shortest_edge is None or longest_edge is None:
+        raise RuntimeError("Video processor did not expose its native pixel budget")
+    # Qwen3-VL's smart_resize applies a total-video pixel budget. Doubling T
+    # would otherwise reduce H/W, confounding temporal and spatial ablations.
+    duplicated_size = {
+        "shortest_edge": int(shortest_edge) * temporal_patch_size,
+        "longest_edge": int(longest_edge) * temporal_patch_size,
+    }
+    raw = processor.apply_chat_template(
+        _native_video_message(task, duplicated_frames, content_order=content_order),
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=True,
+        return_metadata=True,
+        do_sample_frames=False,
+        video_metadata=metadata,
+        size=duplicated_size,
+    )
+    return raw, {
+        "temporal_span_mode": mode,
+        "source_sample_frame_indices": [int(value) for value in source_indices],
+        "processor_input_source_frame_indices": duplicated_indices,
+        "source_sample_frame_count": len(source_indices),
+        "processor_input_frame_count": len(duplicated_indices),
+        "temporal_duplication_factor": temporal_patch_size,
+        "duplicated_video_pixel_budget": duplicated_size,
+    }
 
 
 def _move_inputs(torch, model, inputs: Any, dtype: Any) -> dict[str, Any]:
@@ -135,6 +303,44 @@ class QwenAttentionRuntime:
         self.torch = torch
         self.config = dict(config)
         self.protocol = validate_protocol(str(config["protocol"]))
+        default_order = (
+            "text_then_images"
+            if self.protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE
+            else "text_then_video"
+        )
+        self.content_order = str(config.get("content_order", default_order))
+        valid_orders = (
+            {"text_then_images", "images_then_text"}
+            if self.protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE
+            else {"text_then_video", "video_then_text"}
+        )
+        if self.protocol != ROBO_DOPAMINE_FORWARD and self.content_order not in valid_orders:
+            raise ValueError(
+                f"Unknown attention content_order {self.content_order!r} for "
+                f"protocol {self.protocol!r}"
+            )
+        self.temporal_scope = str(config.get("temporal_intervention_scope", "last_frame"))
+        if self.temporal_scope not in {"last_frame", "all_frames"}:
+            raise ValueError("temporal_intervention_scope must be last_frame or all_frames")
+        self.temporal_span_mode = str(config.get("temporal_span_mode", "native_pairs"))
+        if self.temporal_span_mode not in TEMPORAL_SPAN_MODES:
+            choices = ", ".join(sorted(TEMPORAL_SPAN_MODES))
+            raise ValueError(
+                f"Unknown temporal_span_mode {self.temporal_span_mode!r}; "
+                f"choose one of {choices}"
+            )
+        self.temporal_bbox_reduce = str(config.get("temporal_bbox_reduce", "last"))
+        if self.temporal_bbox_reduce not in TEMPORAL_BBOX_REDUCERS:
+            choices = ", ".join(sorted(TEMPORAL_BBOX_REDUCERS))
+            raise ValueError(
+                f"Unknown temporal_bbox_reduce {self.temporal_bbox_reduce!r}; "
+                f"choose one of {choices}"
+            )
+        if (
+            self.protocol != ROBOREWARDBENCH_NATIVE
+            and self.temporal_span_mode != "native_pairs"
+        ):
+            raise ValueError("temporal_span_mode applies only to native video")
         dtype_name = str(config.get("torch_dtype", config.get("dtype", "bfloat16")))
         try:
             self.dtype = getattr(torch, dtype_name)
@@ -243,16 +449,85 @@ class QwenAttentionRuntime:
             protocol=self.protocol,
         )
 
+    def _prepare_image_sequence(
+        self, sample: dict[str, Any]
+    ) -> PreparedAttentionInput:
+        paths = [str(Path(path).resolve()) for path in sample["image_paths"]]
+        if not paths:
+            raise ValueError("Image-sequence attention input is empty")
+        missing = [path for path in paths if not Path(path).is_file()]
+        if missing:
+            raise FileNotFoundError(f"Missing image-sequence inputs: {missing}")
+        inputs = self.processor.apply_chat_template(
+            image_sequence_messages(
+                sample["task"], paths, content_order=self.content_order
+            ),
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        token_id = int(getattr(self.model.config, "image_token_id", 151655))
+        token_spans = find_contiguous_spans(inputs["input_ids"][0].tolist(), token_id)
+        grids = inputs.get("image_grid_thw")
+        grid_count = int(grids.shape[0]) if grids is not None else 0
+        if len(token_spans) != len(paths) or grid_count != len(paths):
+            raise RuntimeError(
+                "Independent-image token alignment failed: "
+                f"images={len(paths)}, spans={len(token_spans)}, grids={grid_count}"
+            )
+        image_spans = [
+            ImageSpan(
+                f"image_t{index}",
+                path,
+                int(start),
+                int(end),
+                tuple(int(value) for value in grid),
+            )
+            for index, (path, (start, end), grid) in enumerate(
+                zip(paths, token_spans, grids.tolist())
+            )
+        ]
+        source_indices = [int(value) for value in sample["image_source_indices"]]
+        if len(source_indices) != len(image_spans):
+            raise RuntimeError("Image spans and sampled source indices do not align")
+        sampling = dict(sample.get("image_sampling_record", {}))
+        terminal = sampling.get("terminal_source_index")
+        if not source_indices or terminal is None or source_indices[-1] != int(terminal):
+            raise RuntimeError("Last independent image is not the source terminal frame")
+        sampling.update(
+            {
+                "span_source_frame_indices": [[index] for index in source_indices],
+                "target_source_frame_indices": [source_indices[-1]],
+                "target_image_span": image_spans[-1].label,
+                "independent_image_spans": True,
+            }
+        )
+        visual = [
+            position
+            for span in image_spans
+            for position in range(span.start, span.end)
+        ]
+        return PreparedAttentionInput(
+            inputs=_move_inputs(self.torch, self.model, inputs, self.dtype),
+            spans=image_spans,
+            target_span=image_spans[-1],
+            target_image_path=paths[-1],
+            visual_positions=visual,
+            protocol=self.protocol,
+            video_metadata=sampling,
+        )
+
     def _prepare_native(self, sample: dict[str, Any]) -> PreparedAttentionInput:
         video_path = str(Path(sample["video_path"]).resolve())
         if not Path(video_path).is_file():
             raise FileNotFoundError(video_path)
-        raw = self.processor.apply_chat_template(
-            _native_video_message(sample["task"], video_path),
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_metadata=True,
+        raw, temporal_record = prepare_native_video_processor_input(
+            self.processor,
+            sample["task"],
+            video_path,
+            content_order=self.content_order,
+            temporal_span_mode=self.temporal_span_mode,
         )
         metadata = raw.pop("video_metadata", None)
         converter = getattr(raw, "convert_to_tensors", None)
@@ -277,7 +552,7 @@ class QwenAttentionRuntime:
         ]
         visual = [position for span in image_spans for position in range(span.start, span.end)]
         metadata_value = metadata[0] if isinstance(metadata, (list, tuple)) and len(metadata) == 1 else metadata
-        record = {}
+        record = dict(temporal_record)
         for field in ("total_num_frames", "fps", "frames_indices", "width", "height", "duration", "video_backend"):
             value = getattr(metadata_value, field, None)
             record[field] = value.tolist() if hasattr(value, "tolist") else value
@@ -291,16 +566,34 @@ class QwenAttentionRuntime:
             raise RuntimeError(
                 "Native video sampling omitted the terminal frame; cannot align endpoint bbox"
             )
+        record.setdefault(
+            "processor_input_source_frame_indices",
+            [int(value) for value in frame_indices],
+        )
+        record.setdefault("processor_input_frame_count", len(frame_indices))
+        record.setdefault(
+            "source_sample_frame_indices",
+            [int(value) for value in frame_indices],
+        )
+        record.setdefault("source_sample_frame_count", len(frame_indices))
         record["target_video_span"] = image_spans[-1].label
         if len(frame_indices) % temporal == 0:
             frames_per_span = len(frame_indices) // temporal
-            record["target_source_frame_indices"] = frame_indices[-frames_per_span:]
+            span_sources = [
+                frame_indices[index * frames_per_span : (index + 1) * frames_per_span]
+                for index in range(temporal)
+            ]
+            record["span_source_frame_indices"] = span_sources
+            record["target_source_frame_indices"] = span_sources[-1]
             record["target_span_alignment"] = "terminal_merged_time_group"
         else:
             # Some processors pad/merge a final temporal group internally.
             # The reported terminal index still proves that the final token
             # span is the only endpoint-aligned span; do not infer a false
             # one-to-one frame grouping from a non-divisible count.
+            record["span_source_frame_indices"] = (
+                [None] * (temporal - 1) + [[frame_indices[-1]]]
+            )
             record["target_source_frame_indices"] = [frame_indices[-1]]
             record["target_span_alignment"] = "terminal_in_final_padded_or_merged_group"
         return PreparedAttentionInput(
@@ -314,23 +607,145 @@ class QwenAttentionRuntime:
         )
 
     def prepare(self, sample: dict[str, Any]) -> PreparedAttentionInput:
-        return (
-            self._prepare_forward(sample)
-            if self.protocol == ROBO_DOPAMINE_FORWARD
-            else self._prepare_native(sample)
-        )
+        if self.protocol == ROBO_DOPAMINE_FORWARD:
+            return self._prepare_forward(sample)
+        if self.protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+            return self._prepare_image_sequence(sample)
+        return self._prepare_native(sample)
 
     def target_positions(self, sample: dict[str, Any], prepared: PreparedAttentionInput) -> list[int]:
         with Image.open(prepared.target_image_path) as image:
             size = image.size
-        positions = bbox_to_token_positions(
-            prepared.target_span,
-            sample["last_bbox"],
-            size,
-            self.merge_size,
-        )
+        if prepared.protocol == ROBO_DOPAMINE_FORWARD:
+            selected = [(prepared.target_span, sample["last_bbox"], None)]
+        elif prepared.protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+            metadata = prepared.video_metadata or {}
+            source_indices = [
+                int(values[0])
+                for values in metadata.get("span_source_frame_indices", [])
+                if isinstance(values, list) and len(values) == 1
+            ]
+            if len(source_indices) != len(prepared.spans):
+                raise RuntimeError(
+                    "Sampled source indices cannot be mapped to image spans"
+                )
+            chosen = (
+                [(prepared.spans[-1], source_indices[-1])]
+                if self.temporal_scope == "last_frame"
+                else list(zip(prepared.spans, source_indices))
+            )
+            by_index = {}
+            if self.temporal_scope == "all_frames":
+                track = json.loads(
+                    Path(sample["tracking_path"]).read_text(encoding="utf-8")
+                )
+                by_index = {
+                    int(row["frame_index"]): row
+                    for row in track.get("frames", [])
+                    if isinstance(row.get("bbox"), list) and len(row["bbox"]) == 4
+                }
+                if not by_index:
+                    raise ValueError("track.json contains no valid bboxes")
+            selected = []
+            alignment = []
+            for span, source_index in chosen:
+                if self.temporal_scope == "last_frame":
+                    bbox = [float(value) for value in sample["last_bbox"]]
+                    track_index = source_index
+                else:
+                    track_index = min(
+                        by_index, key=lambda value: abs(value - source_index)
+                    )
+                    bbox = [float(value) for value in by_index[track_index]["bbox"]]
+                selected.append((span, bbox, source_index))
+                alignment.append(
+                    {
+                        "span": span.label,
+                        "source_frame_indices": [source_index],
+                        "tracking_frame_indices": [track_index],
+                        "applied_bbox": bbox,
+                    }
+                )
+            metadata["intervention_span_tracking_alignment"] = alignment
+        else:
+            metadata = prepared.video_metadata or {}
+            span_sources = metadata.get("span_source_frame_indices")
+            if (
+                not isinstance(span_sources, list)
+                or len(span_sources) != len(prepared.spans)
+                or any(not isinstance(indices, list) or not indices for indices in span_sources)
+            ):
+                raise RuntimeError(
+                    "Processor frame indices cannot be mapped to every native video span"
+                )
+            chosen = (
+                [(prepared.spans[-1], span_sources[-1])]
+                if self.temporal_scope == "last_frame"
+                else list(zip(prepared.spans, span_sources))
+            )
+            need_tracking = (
+                self.temporal_scope == "all_frames"
+                or self.temporal_bbox_reduce != "last"
+            )
+            by_index = {}
+            if need_tracking:
+                track = json.loads(
+                    Path(sample["tracking_path"]).read_text(encoding="utf-8")
+                )
+                rows = track.get("frames")
+                if not isinstance(rows, list) or not rows:
+                    raise ValueError("track.json contains no frames")
+                by_index = {
+                    int(row["frame_index"]): row
+                    for row in rows
+                    if isinstance(row.get("bbox"), list) and len(row["bbox"]) == 4
+                }
+                if not by_index:
+                    raise ValueError("track.json contains no valid bboxes")
+            selected = []
+            alignment = []
+            for span, source_indices in chosen:
+                source_values = [int(value) for value in source_indices]
+                if (
+                    self.temporal_scope == "last_frame"
+                    and self.temporal_bbox_reduce == "last"
+                ):
+                    bbox = [float(value) for value in sample["last_bbox"]]
+                    track_indices = [source_values[-1]]
+                else:
+                    track_indices = [
+                        min(by_index, key=lambda value: abs(value - source_index))
+                        for source_index in source_values
+                    ]
+                    bbox = reduce_temporal_bboxes(
+                        [by_index[index]["bbox"] for index in track_indices],
+                        self.temporal_bbox_reduce,
+                    )
+                selected.append((span, bbox, source_values[-1]))
+                alignment.append(
+                    {
+                        "span": span.label,
+                        "source_frame_indices": source_values,
+                        "tracking_frame_indices": track_indices,
+                        "bbox_reduce": self.temporal_bbox_reduce,
+                        "applied_bbox": bbox,
+                    }
+                )
+            metadata["intervention_span_tracking_alignment"] = alignment
+        positions = []
+        for span, bbox, _source_index in selected:
+            positions.extend(
+                bbox_to_token_positions(span, bbox, size, self.merge_size)
+            )
+        positions = sorted(set(positions))
         if not positions:
             raise ValueError("Target bbox did not map to any visual tokens")
+        if prepared.video_metadata is not None:
+            prepared.video_metadata["temporal_intervention_scope"] = self.temporal_scope
+            prepared.video_metadata["temporal_bbox_reduce"] = self.temporal_bbox_reduce
+            prepared.video_metadata["selected_target_span_labels"] = [
+                span.label for span, _bbox, _source_index in selected
+            ]
         return positions
 
     def wrong_control_positions(
@@ -343,21 +758,24 @@ class QwenAttentionRuntime:
         different equal-grid image/time plane; this preserves cardinality and
         disjointness instead of silently dropping the frozen cohort sample.
         """
-        same_span = matched_wrong_position_set(
-            prepared.target_span, target_positions, spatial_merge_size=self.merge_size
-        )
-        if same_span is not None:
-            return same_span, "same_target_span_farthest_region"
-        relative = [int(position) - prepared.target_span.start for position in target_positions]
+        per_span = []
         for span in prepared.spans:
-            if span == prepared.target_span or span.grid_thw != prepared.target_span.grid_thw:
+            positions = [
+                int(position)
+                for position in target_positions
+                if span.start <= int(position) < span.end
+            ]
+            if not positions:
                 continue
-            remapped = [span.start + value for value in relative]
-            candidate = matched_wrong_position_set(
-                span, remapped, spatial_merge_size=self.merge_size
+            wrong = matched_wrong_position_set(
+                span, positions, spatial_merge_size=self.merge_size
             )
-            if candidate is not None:
-                return candidate, "equal_grid_other_visual_span_farthest_region"
+            if wrong is None:
+                per_span = []
+                break
+            per_span.extend(wrong)
+        if len(per_span) == len(target_positions):
+            return sorted(per_span), "matched_farthest_region_in_each_selected_span"
         other = sorted(set(prepared.visual_positions) - set(target_positions))
         if len(other) >= len(target_positions):
             return other[: len(target_positions)], "other_visual_tokens_fallback"
@@ -439,6 +857,8 @@ class QwenAttentionRuntime:
         visual_positions: Sequence[int],
         bias: float,
         query_scope: str,
+        negative_scope: str,
+        spans: Sequence[ImageSpan],
         diagnostics: dict[str, Any],
     ):
         if query_scope not in QUERY_SCOPES:
@@ -447,10 +867,24 @@ class QwenAttentionRuntime:
         for head in heads:
             grouped.setdefault(int(head.layer), []).append(int(head.head))
         handles = []
+        other, selected_span_labels = resolve_negative_positions(
+            spans, selected_positions, negative_scope
+        )
+        diagnostics.update(
+            {
+                "negative_scope": negative_scope,
+                "selected_span_labels": selected_span_labels,
+                "all_visual_span_labels": [span.label for span in spans],
+                "selected_token_count": len(set(selected_positions)),
+                "negative_token_count": len(other),
+                "selected_negative_disjoint": not bool(
+                    set(selected_positions) & set(other)
+                ),
+            }
+        )
         try:
             for layer, layer_heads in sorted(grouped.items()):
                 layer_diagnostics: dict[str, Any] = {}
-                other = sorted(set(visual_positions) - set(selected_positions))
                 hook = make_attention_mask_hook(
                     layer_heads,
                     selected_positions,
@@ -481,6 +915,7 @@ class QwenAttentionRuntime:
         visual_positions: Sequence[int] = (),
         bias: float = 0.0,
         query_scope: str = "last_prompt",
+        negative_scope: str | None = None,
     ) -> dict[str, Any]:
         prepared = prepared or self.prepare(sample)
         if not selected_positions:
@@ -493,6 +928,11 @@ class QwenAttentionRuntime:
             "hook_active": bool(heads and bias != 0),
             "video_metadata": prepared.video_metadata,
         }
+        negative = str(
+            negative_scope
+            if negative_scope is not None
+            else self.config.get("negative_scope", "other_spans")
+        )
         context = (
             self.steering_hooks(
                 heads,
@@ -500,6 +940,8 @@ class QwenAttentionRuntime:
                 visual_positions,
                 bias,
                 query_scope,
+                negative,
+                prepared.spans,
                 diagnostics,
             )
             if heads and bias != 0
@@ -531,7 +973,7 @@ class QwenAttentionRuntime:
             "visual_positions": list(visual_positions),
             **parsed,
         }
-        if self.protocol == ROBOREWARDBENCH_NATIVE:
+        if self.protocol in DISCRETE_PROTOCOLS:
             # Keep an explicit parsed field for metric code and make failures
             # impossible to silently coerce into a low score.
             result["native_prediction"] = parse_native_score(raw)

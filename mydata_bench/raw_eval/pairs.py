@@ -25,7 +25,14 @@ from ..io import (
     write_json,
     write_jsonl,
 )
-from ..protocol import native_endpoint_payload, parse_score, progress, progress_to_reward, system_prompt
+from ..protocol import (
+    multiview_endpoint_payload,
+    native_endpoint_payload,
+    parse_score,
+    progress,
+    progress_to_reward,
+    system_prompt,
+)
 from ..schemas import EpisodeRecord, SCHEMA_VERSION
 from ..video import extract_endpoints
 from .runner import VLLMGRM, sampling_kwargs
@@ -36,7 +43,7 @@ SIDES = ("counterfactual", "original")
 
 def _cfg(config: dict[str, Any]) -> dict[str, Any]:
     value = section(config, "paired_raw_eval")
-    required = ("counterfactual_dataset_root", "original_dataset_root", "output_dir", "model_path")
+    required = ("dataset_root", "output_dir", "model_path")
     missing = [key for key in required if not value.get(key)]
     if missing:
         raise ValueError(f"paired_raw_eval is missing required keys: {', '.join(missing)}")
@@ -44,49 +51,53 @@ def _cfg(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pair_rows(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build one pair for every fail row and its declared source_suc_id."""
     cfg = _cfg(config)
-    split = str(cfg.get("split", "test"))
-    original_rows = list(load_episodes(cfg["original_dataset_root"], split, compute_hash=True))
-    counter_rows = list(load_episodes(cfg["counterfactual_dataset_root"], split, compute_hash=True))
-    original_by_hash: dict[str, list[EpisodeRecord]] = defaultdict(list)
-    counter_by_hash: dict[str, list[EpisodeRecord]] = defaultdict(list)
-    for row in original_rows:
-        if row.reward == 5:
-            original_by_hash[row.video_sha256].append(row)
-    for row in counter_rows:
-        if row.reward == 1:
-            counter_by_hash[row.video_sha256].append(row)
+    rows = list(
+        load_episodes(
+            cfg["dataset_root"],
+            str(cfg.get("split", "all")),
+            compute_hash=True,
+        )
+    )
+    successes = {
+        row.example_id: row
+        for row in rows
+        if row.instruction_video_match is True
+    }
     pairs: list[dict[str, Any]] = []
-    for digest in sorted(set(original_by_hash) & set(counter_by_hash)):
-        counter_candidates = sorted(counter_by_hash[digest], key=lambda row: row.example_id)
-        original_candidates = sorted(original_by_hash[digest], key=lambda row: row.example_id)
-        if len(counter_candidates) != 1:
+    for counter in sorted(
+        (row for row in rows if row.instruction_video_match is False),
+        key=lambda row: row.example_id,
+    ):
+        original = successes.get(str(counter.source_suc_id))
+        if original is None:
             raise ValueError(
-                f"Expected exactly one counterfactual reward=1 row for {digest}, "
-                f"found {len(counter_candidates)}"
+                f"Missing source success {counter.source_suc_id!r} for {counter.example_id}"
             )
-        counter = counter_candidates[0]
-        original = original_candidates[0]
-        if counter.subset != original.subset:
-            raise ValueError(f"Subset mismatch for same-video pair {digest}")
+        if counter.video_sha256 != original.video_sha256:
+            raise ValueError(f"View-content mismatch for {counter.example_id}")
         if counter.task == original.task:
-            raise ValueError(f"Instructions are identical for pair {digest}")
+            raise ValueError(f"Instructions are identical for {counter.example_id}")
+        pair_id = hashlib.sha256(
+            f"{counter.video_sha256}\0{counter.example_id}".encode("utf-8")
+        ).hexdigest()
         pairs.append(
             {
-                "pair_id": digest,
-                "video_sha256": digest,
-                # The counterfactual copy is canonical; byte equality was used
-                # to find the partner and is rechecked by the loader above.
+                "pair_id": pair_id,
+                "video_sha256": counter.video_sha256,
                 "video_path": counter.video_path,
+                "view_paths": counter.views,
                 "subset": counter.subset,
                 "counterfactual_example_id": counter.example_id,
                 "counterfactual_task": counter.task,
-                "counterfactual_reward": counter.reward,
+                "counterfactual_reward": 1,
                 "original_example_id": original.example_id,
                 "original_task": original.task,
-                "original_reward": original.reward,
-                "original_candidate_example_ids": [row.example_id for row in original_candidates],
-                "original_candidate_tasks": [row.task for row in original_candidates],
+                "original_reward": 5,
+                "source_suc_id": original.example_id,
+                "original_candidate_example_ids": [original.example_id],
+                "original_candidate_tasks": [original.task],
             }
         )
     return pairs
@@ -97,9 +108,9 @@ def prepare(config: dict[str, Any]) -> Path:
     cfg = _cfg(config)
     output_dir = Path(cfg["output_dir"]).resolve()
     pairs = _pair_rows(config)
-    expected = int(cfg.get("expected_pairs", 63))
-    if len(pairs) != expected:
-        raise ValueError(f"Expected {expected} paired videos, found {len(pairs)}")
+    expected = cfg.get("expected_pairs")
+    if expected is not None and len(pairs) != int(expected):
+        raise ValueError(f"Expected {int(expected)} paired videos, found {len(pairs)}")
     write_jsonl(output_dir / "pairs.jsonl", pairs)
     summary = {
         "num_pairs": len(pairs),
@@ -138,11 +149,8 @@ def _run_manifest(config: dict[str, Any], pairs: list[dict[str, Any]]) -> dict[s
     return {
         **provenance(sys.argv, config, Path(__file__).resolve().parents[2]),
         "model_fingerprint": artifact_fingerprint(cfg["model_path"]),
-        "counterfactual_metadata_sha256": sha256_file(
-            Path(cfg["counterfactual_dataset_root"]) / cfg.get("split", "test") / "metadata.jsonl"
-        ),
-        "original_metadata_sha256": sha256_file(
-            Path(cfg["original_dataset_root"]) / cfg.get("split", "test") / "metadata.jsonl"
+        "metadata_sha256": sha256_file(
+            Path(cfg["dataset_root"]) / "metadata.jsonl"
         ),
         "raw_protocol": {
             "prompt_mode": prompt_mode,
@@ -165,9 +173,9 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
     if not pairs_path.is_file():
         raise FileNotFoundError(f"Run prepare first; missing {pairs_path}")
     pairs = list(read_jsonl(pairs_path))
-    expected = int(cfg.get("expected_pairs", 63))
-    if len(pairs) != expected:
-        raise ValueError(f"Expected {expected} frozen pairs, found {len(pairs)}")
+    expected = cfg.get("expected_pairs")
+    if expected is not None and len(pairs) != int(expected):
+        raise ValueError(f"Expected {int(expected)} frozen pairs, found {len(pairs)}")
     shard_id = int(cfg.get("shard_id", 0))
     num_shards = int(cfg.get("num_shards", 1))
     records_path = output_dir / f"paired_records.shard-{shard_id:02d}.jsonl"
@@ -177,7 +185,7 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
     manifest.update({"shard_id": shard_id, "num_shards": num_shards})
     write_json(manifest_path, manifest)
     local_pairs = [
-        row for row in pairs if stable_shard(str(row["video_sha256"]), num_shards) == shard_id
+        row for row in pairs if stable_shard(str(row["pair_id"]), num_shards) == shard_id
     ]
     engine = None if dry_run else VLLMGRM(cfg)
     blank_goal = cfg.get(
@@ -185,7 +193,7 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
     )
     prompt_mode = str(cfg.get("prompt_mode", "official"))
     for pair in local_pairs:
-        frame_dir = output_dir / "frames" / str(pair["video_sha256"])
+        frame_dir = output_dir / "frames" / str(pair["pair_id"])
         try:
             frames = extract_endpoints(
                 str(pair["pair_id"]),
@@ -229,6 +237,7 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
                 reward=int(pair[reward_key]),
                 subset=str(pair["subset"]),
                 video_sha256=str(pair["video_sha256"]),
+                view_paths=tuple(sorted(dict(pair.get("view_paths", {})).items())),
             )
             base = {
                 "schema_version": SCHEMA_VERSION,
@@ -243,8 +252,26 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
                 "attempt": int(old.get("attempt", 0)) + 1 if old else 1,
             }
             try:
-                payload = native_endpoint_payload(
-                    episode, frames, blank_goal, prompt_mode=prompt_mode
+                frames_by_view = {
+                    view: extract_endpoints(
+                        episode.example_id,
+                        episode.video_sha256,
+                        path,
+                        frame_dir / view,
+                    )
+                    for view, path in episode.views.items()
+                }
+                payload = (
+                    multiview_endpoint_payload(
+                        episode,
+                        frames_by_view,
+                        blank_goal,
+                        prompt_mode=prompt_mode,
+                    )
+                    if {"front", "left_wrist", "right_wrist"} <= set(frames_by_view)
+                    else native_endpoint_payload(
+                        episode, frames, blank_goal, prompt_mode=prompt_mode
+                    )
                 )
                 if {"reward", "gpt5_mini_check"} & payload.keys():
                     raise AssertionError("Label leakage into pair model payload")
@@ -259,6 +286,11 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
                     {
                         **base,
                         "frame_record": frames.to_dict(),
+                        "frame_records": {
+                            view: record.to_dict()
+                            for view, record in frames_by_view.items()
+                        }
+                        or None,
                         "protocol": payload["protocol"],
                         "prompt_mode": payload["prompt_mode"],
                         "raw_output": output,

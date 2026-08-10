@@ -2,7 +2,7 @@
 
 Run on the remote machine, then forward the loopback-only port over SSH:
 
-    python rewardbench/review_grounding_web.py --run-dir <grounding_dino_dir>
+    python mydata_bench/review_grounding_web.py --run-dir <sam3_dir>
     ssh -L 8765:127.0.0.1:8765 user@remote-host
 
 Open http://127.0.0.1:8765 locally.  Images and annotations never leave the
@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rewardbench.io import append_jsonl, read_jsonl
+from mydata_bench.io import append_jsonl, read_jsonl
 
 
 LABELS = {"correct", "incorrect", "uncertain"}
@@ -133,6 +133,16 @@ class ReviewStore:
             "entity_type": target.get("entity_type", "unknown"),
             "first_image": f"/api/image?example_id={row['example_id']}&frame=first",
             "last_image": f"/api/image?example_id={row['example_id']}&frame=last",
+            "tracking_preview": (
+                f"/api/media?example_id={row['example_id']}&kind=preview"
+                if row.get("tracking_preview_path")
+                else None
+            ),
+            "tracking_contact_sheet": (
+                f"/api/media?example_id={row['example_id']}&kind=contact"
+                if row.get("tracking_contact_sheet_path")
+                else None
+            ),
         }
 
     def image_path(self, example_id: str, frame: str) -> Path:
@@ -145,6 +155,24 @@ class ReviewStore:
             path.relative_to(root)
         except ValueError as exc:
             raise ValueError("Visualization path escapes run directory") from exc
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        return path
+
+    def media_path(self, example_id: str, kind: str) -> Path:
+        if kind not in {"preview", "contact"} or example_id not in self.by_id:
+            raise KeyError("Unknown review media")
+        field = (
+            "tracking_preview_path" if kind == "preview" else "tracking_contact_sheet_path"
+        )
+        raw = self.by_id[example_id].get(field)
+        if not raw:
+            raise FileNotFoundError(f"No {kind} media for {example_id}")
+        path = Path(raw).resolve()
+        try:
+            path.relative_to(self.run_dir.resolve())
+        except ValueError as exc:
+            raise ValueError("Tracking media path escapes run directory") from exc
         if not path.is_file():
             raise FileNotFoundError(path)
         return path
@@ -179,7 +207,7 @@ PAGE = """<!doctype html>
 body{font-family:system-ui,sans-serif;margin:22px;background:#f6f7f9;color:#17181a}#meta{color:#555}
 #task{font-size:1.15rem;font-weight:650;margin:8px 0}#target{margin:6px 0 16px;color:#333}
 #images{display:grid;grid-template-columns:1fr 1fr;gap:16px}.panel{background:white;padding:10px;border-radius:8px;box-shadow:0 1px 3px #0002}
-img{width:100%;height:auto;display:block}.label{font-weight:650;margin:0 0 8px}button{font-size:1.2rem;padding:10px 25px;margin:18px 10px 0 0;border:0;border-radius:7px;cursor:pointer}
+img,video{width:100%;height:auto;display:block}.wide{grid-column:1/-1}.label{font-weight:650;margin:0 0 8px}button{font-size:1.2rem;padding:10px 25px;margin:18px 10px 0 0;border:0;border-radius:7px;cursor:pointer}
 #yes{background:#14883d;color:white}#no{background:#c33333;color:white}#uncertain{background:#d99c15;color:#111}
 #back,#next,#go{background:#5f6874;color:white}button:disabled{cursor:not-allowed;opacity:.45}
 #jump-controls{display:inline-flex;align-items:center;gap:7px;margin:18px 0 0 8px}#jump{font-size:1.1rem;width:6rem;padding:9px;border:1px solid #aab0b8;border-radius:7px}#go{margin:0;padding:10px 18px}
@@ -193,7 +221,9 @@ function jumpControls(state){return `<span id="jump-controls"><label for="jump">
 async function load(exampleId=null,position=null){if(busy)return;busy=true;const suffix=exampleId?`?example_id=${encodeURIComponent(exampleId)}`:position!==null?`?position=${encodeURIComponent(position)}`:'';const response=await fetch(`/api/state${suffix}`);const state=await response.json();const app=document.querySelector('#app');previousExampleId=state.previous_example_id;nextExampleId=state.next_example_id;
 if(state.done){current=null;app.innerHTML=`<div id="done">Completed ${state.completed}/${state.total}. You may close this page.</div><button id="back" onclick="goBack()" ${previousExampleId?'':'disabled'}>← Previous (←)</button>${jumpControls(state)}`;busy=false;return;}
 current=state.current;const saved=state.current_label?`<div id="saved">Saved label: ${esc(state.current_label)} · choose again to correct it</div>`:'';
-app.innerHTML=`<div id="meta">Item ${state.position}/${state.total} · Completed ${state.completed}/${state.total} · data #${current.data_number ?? '?'} · visual #${current.visualization_number ?? '?'}</div><div id="task">${esc(current.instruction)}</div><div id="target">Target object: <b>${esc(current.target_phrase)}</b> <small>[${esc(current.entity_type)}]</small></div>${saved}<div id="images"><div class="panel"><div class="label">FIRST endpoint</div><img src="${current.first_image}" alt="first endpoint"></div><div class="panel"><div class="label">LAST endpoint</div><img src="${current.last_image}" alt="last endpoint"></div></div><button id="yes" onclick="submit('correct')">Yes (Y)</button><button id="no" onclick="submit('incorrect')">No (N)</button><button id="uncertain" onclick="submit('uncertain')">Uncertain (U)</button><button id="back" onclick="goBack()" ${previousExampleId?'':'disabled'}>← Previous (←)</button><button id="next" onclick="goNext()" ${nextExampleId?'':'disabled'}>Next (→) →</button>${jumpControls(state)}`;busy=false;}
+const contact=current.tracking_contact_sheet?`<div class="panel wide"><div class="label">TRACKING timeline</div><img src="${current.tracking_contact_sheet}" alt="tracking timeline"></div>`:'';
+const video=current.tracking_preview?`<div class="panel wide"><div class="label">TRACKING video</div><video src="${current.tracking_preview}" controls muted loop preload="metadata"></video></div>`:'';
+app.innerHTML=`<div id="meta">Item ${state.position}/${state.total} · Completed ${state.completed}/${state.total} · data #${current.data_number ?? '?'} · visual #${current.visualization_number ?? '?'}</div><div id="task">${esc(current.instruction)}</div><div id="target">Target object: <b>${esc(current.target_phrase)}</b> <small>[${esc(current.entity_type)}]</small></div>${saved}<div id="images"><div class="panel"><div class="label">FIRST endpoint</div><img src="${current.first_image}" alt="first endpoint"></div><div class="panel"><div class="label">LAST endpoint</div><img src="${current.last_image}" alt="last endpoint"></div>${contact}${video}</div><button id="yes" onclick="submit('correct')">Yes (Y)</button><button id="no" onclick="submit('incorrect')">No (N)</button><button id="uncertain" onclick="submit('uncertain')">Uncertain (U)</button><button id="back" onclick="goBack()" ${previousExampleId?'':'disabled'}>← Previous (←)</button><button id="next" onclick="goNext()" ${nextExampleId?'':'disabled'}>Next (→) →</button>${jumpControls(state)}`;busy=false;}
 async function submit(label){if(!current||busy)return;const nextAfterSubmit=nextExampleId;busy=true;document.querySelectorAll('button').forEach(x=>x.disabled=true);await fetch('/api/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({example_id:current.example_id,label})});busy=false;if(nextAfterSubmit){await load(nextAfterSubmit);}else{await load();}}
 async function goBack(){if(!previousExampleId||busy)return;await load(previousExampleId);}
 async function goNext(){if(!nextExampleId||busy)return;await load(nextExampleId);}
@@ -244,6 +274,26 @@ def make_handler(store: ReviewStore):
                 content = image.read_bytes()
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", mimetypes.guess_type(image.name)[0] or "application/octet-stream")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            if parsed.path == "/api/media":
+                query = parse_qs(parsed.query)
+                try:
+                    media = store.media_path(
+                        query.get("example_id", [""])[0],
+                        query.get("kind", [""])[0],
+                    )
+                except (KeyError, ValueError, FileNotFoundError) as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+                    return
+                content = media.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header(
+                    "Content-Type",
+                    mimetypes.guess_type(media.name)[0] or "application/octet-stream",
+                )
                 self.send_header("Content-Length", str(len(content)))
                 self.end_headers()
                 self.wfile.write(content)

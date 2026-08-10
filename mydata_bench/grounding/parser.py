@@ -93,6 +93,8 @@ def _clean_phrase(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+SPATIAL_RELATIONS = {"left_of", "right_of", "closest_to", "farthest_from"}
+
 def normalize_target(
     example_id: str,
     value: dict[str, Any],
@@ -110,6 +112,10 @@ def normalize_target(
     entity = str(value.get("entity_type") or value.get("target_type") or "object")
     if entity not in {"object", "object_part", "robot_part", "spatial_region", "unknown"}:
         entity = "unknown"
+    relation = value.get("relation")
+    relation = str(relation).strip().lower() if relation is not None else None
+    if relation not in SPATIAL_RELATIONS:
+        relation = None
     return TargetSpec(
         example_id=example_id,
         target_phrase=phrase,
@@ -117,8 +123,8 @@ def normalize_target(
         attributes=attributes,
         entity_type=entity,
         parent_object=value.get("parent_object"),
-        reference_object=value.get("reference_object") or value.get("reference_phrase"),
-        relation=value.get("relation"),
+        reference_object=(value.get("reference_object") or value.get("reference_phrase")) if relation else None,
+        relation=relation,
         targets=targets,
         multi_target=bool(value.get("multi_target", len(targets) > 1)),
         ambiguous=bool(value.get("ambiguous", False)),
@@ -128,7 +134,62 @@ def normalize_target(
     )
 
 
+RELATIONAL_TARGET = re.compile(
+    r"^(?P<subject>.+?)\s+(?P<relation>to the left of|to the right of|closest to|farthest from)\s+(?P<reference>.+)$",
+    re.IGNORECASE,
+)
+PICK_TARGET = re.compile(
+    r"\bpick(?:\s+up)?\s+(?P<target>.+?)\s+and\s+place\b",
+    re.IGNORECASE,
+)
+RELATION_NAMES = {
+    "to the left of": "left_of",
+    "to the right of": "right_of",
+    "closest to": "closest_to",
+    "farthest from": "farthest_from",
+}
+
+
+def _relational_parse(task: str, example_id: str) -> TargetSpec | None:
+    action = PICK_TARGET.search(re.sub(r"\s+", " ", task.strip()))
+    if action is None:
+        return None
+    phrase = _clean_phrase(action.group("target"))
+    match = RELATIONAL_TARGET.fullmatch(phrase)
+    if match is None:
+        return None
+    subject = _clean_phrase(match.group("subject"))
+    reference = _clean_phrase(match.group("reference"))
+    words = [word.lower() for word in re.findall(r"[A-Za-z0-9_-]+", subject)]
+    meaningful = [word for word in words if word not in STOPWORDS]
+    if not meaningful:
+        return None
+    head = meaningful[-1]
+    payload = {
+        "target_phrase": phrase,
+        "head_noun": head,
+        "attributes": tuple(word for word in words if word in ATTRIBUTES),
+        "entity_type": "object",
+        "reference_object": reference,
+        "relation": RELATION_NAMES[match.group("relation").lower()],
+        "targets": [phrase],
+        "multi_target": False,
+        "ambiguous": False,
+    }
+    return normalize_target(
+        example_id,
+        payload,
+        parser="heuristic_relational_v1",
+        parser_fingerprint=object_fingerprint(
+            {"parser": "heuristic_relational_v1", "relations": RELATION_NAMES}
+        ),
+    )
+
+
 def heuristic_parse(task: str, example_id: str = "") -> TargetSpec:
+    relational = _relational_parse(task, example_id)
+    if relational is not None:
+        return relational
     normalized = re.sub(r"\s+", " ", task.strip())
     match = re.search(rf"\b{VERBS}\b\s+(.*)", normalized, re.I)
     tail = match.group(1) if match else normalized
@@ -297,6 +358,22 @@ class InstructionParser:
                 raw_output=raw,
             )
             heuristic = heuristic_parse(task, example_id)
+            # Spatial relation clauses are kept as one semantic unit. This
+            # deterministic override prevents subword/token-boundary behavior
+            # in the LLM parser from dropping "closest to" or "left/right of".
+            if heuristic.relation is not None:
+                parsed = replace(
+                    parsed,
+                    target_phrase=heuristic.target_phrase,
+                    head_noun=heuristic.head_noun,
+                    attributes=heuristic.attributes,
+                    entity_type=heuristic.entity_type,
+                    reference_object=heuristic.reference_object,
+                    relation=heuristic.relation,
+                    targets=heuristic.targets,
+                    multi_target=False,
+                    ambiguous=False,
+                )
             # Structural syntax is more reliable than free-form model JSON for
             # safety-critical exclusions. A missed sequential marker would
             # otherwise leak a multi-object task into the formal single-object
@@ -324,10 +401,22 @@ class InstructionParser:
 
 
 def build_queries(target: TargetSpec) -> list[str]:
-    queries = [target.target_phrase]
+    if target.relation:
+        # SAM3 is asked for all instances of the manipulated object class; the
+        # relational choice is made geometrically on the first frame.
+        subject = " ".join((*target.attributes, target.head_noun)).strip()
+        queries = [subject, target.head_noun]
+    else:
+        queries = [target.target_phrase]
     if target.entity_type == "object_part" and target.parent_object:
         queries.append(f"{target.head_noun} of {target.parent_object}")
         queries.append(target.parent_object)
     if target.head_noun and target.head_noun != target.target_phrase:
         queries.append(target.head_noun)
     return list(dict.fromkeys(query.strip().lower() for query in queries if query.strip()))
+
+
+def reference_queries(target: TargetSpec) -> list[str]:
+    if not target.reference_object:
+        return []
+    return [str(target.reference_object).strip().lower()]

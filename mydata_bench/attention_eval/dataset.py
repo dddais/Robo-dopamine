@@ -8,6 +8,175 @@ from typing import Any
 
 from ..data import load_configured_episodes
 from ..io import object_fingerprint, provenance, read_jsonl, write_json, write_jsonl
+from ..video import extract_uniform_image_sequence
+
+
+IMAGE_SEQUENCE_PROTOCOL = "roborewardbench_image_sequence"
+
+
+def _latest_ok_endpoints(rows: Any) -> dict[str, dict[str, dict]]:
+    """Return only endpoints whose latest append-only record is successful."""
+    latest: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        example_id, frame = row.get("example_id"), row.get("frame")
+        if isinstance(example_id, str) and frame in {"first", "last"}:
+            latest[(example_id, frame)] = row
+    endpoints: dict[str, dict[str, dict]] = defaultdict(dict)
+    for (example_id, frame), row in latest.items():
+        if row.get("status") == "ok":
+            endpoints[example_id][frame] = row
+    return endpoints
+
+
+def prepare_grounded_ranking_samples(
+    attention: dict[str, Any], output_path: str | Path
+) -> Path:
+    """Materialize model-safe inputs from the independent ranking_data split."""
+    grounding_run = Path(attention["ranking_grounding_run"]).resolve()
+    episodes = list(
+        load_configured_episodes(
+            {
+                "dataset_root": attention["dataset_root"],
+                "split": attention.get("ranking_split", "suc"),
+                "metadata_file": attention["ranking_metadata_file"],
+            }
+        )[0]
+    )
+    expected_source_count = attention.get("ranking_expected_source_count")
+    if expected_source_count is not None and len(episodes) != int(expected_source_count):
+        raise ValueError(
+            "Independent ranking metadata count mismatch: "
+            f"expected {int(expected_source_count)}, found {len(episodes)}"
+        )
+    targets = {
+        row["example_id"]: row
+        for row in read_jsonl(grounding_run.parent / "targets.jsonl")
+    }
+    grounding_rows = list(read_jsonl(grounding_run / "grounding.jsonl"))
+    if bool(attention.get("ranking_require_complete_grounding", False)):
+        latest_seen = {
+            (row.get("example_id"), row.get("frame"))
+            for row in grounding_rows
+            if isinstance(row.get("example_id"), str)
+            and row.get("frame") in {"first", "last"}
+        }
+        missing = [
+            (episode.example_id, frame)
+            for episode in episodes
+            for frame in ("first", "last")
+            if (episode.example_id, frame) not in latest_seen
+        ]
+        if missing:
+            missing_ids = sorted({example_id for example_id, _ in missing})
+            raise ValueError(
+                "Independent ranking grounding is incomplete: "
+                f"{len(missing_ids)}/{len(episodes)} source examples are missing "
+                f"one or more endpoint records; first missing IDs: {missing_ids[:5]}"
+            )
+    endpoints = _latest_ok_endpoints(grounding_rows)
+    rows = []
+    for episode in episodes:
+        endpoint = endpoints.get(episode.example_id, {})
+        target = targets.get(episode.example_id)
+        if {"first", "last"} - set(endpoint) or target is None:
+            continue
+        first, last = endpoint["first"], endpoint["last"]
+        first_path = first.get("provenance", {}).get("image_path")
+        last_path = last.get("provenance", {}).get("image_path")
+        first_bbox = first.get("bbox")
+        bbox = last.get("bbox")
+        tracking_path = last.get("provenance", {}).get("tracking_path")
+        if not isinstance(first_path, str) or not isinstance(last_path, str):
+            continue
+        if not isinstance(first_bbox, list) or len(first_bbox) != 4:
+            continue
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        if not isinstance(tracking_path, str) or not Path(tracking_path).is_file():
+            continue
+        row = {
+            "example_id": episode.example_id,
+            "video_sha256": episode.video_sha256,
+            "subset": episode.subset,
+            "task": episode.task,
+            "video_path": episode.video_path,
+            "target_type": target.get("entity_type", "object"),
+            "target_phrase": target.get("target_phrase"),
+            "first": first,
+            "last": last,
+            "first_image_path": first_path,
+            "last_image_path": last_path,
+            "first_bbox": [float(value) for value in first_bbox],
+            "last_bbox": [float(value) for value in bbox],
+            "tracking_path": str(Path(tracking_path).resolve()),
+            "ranking_source": "mydata_ranking_data",
+            "grounding_fingerprint": last.get("grounding_fingerprint"),
+        }
+        views = last.get("provenance", {}).get("view_endpoint_paths", {})
+        if (
+            str(attention.get("protocol")) == "robo_dopamine_forward"
+            and {"front", "left_wrist", "right_wrist"} <= set(views)
+        ):
+            blank = str(Path(attention["blank_goal"]).resolve())
+            row["image_paths"] = [
+                views["front"]["first"],
+                blank,
+                views["front"]["first"],
+                views["left_wrist"]["first"],
+                views["right_wrist"]["first"],
+                views["front"]["last"],
+                views["left_wrist"]["last"],
+                views["right_wrist"]["last"],
+            ]
+        elif str(attention.get("protocol")) == IMAGE_SEQUENCE_PROTOCOL:
+            image_paths, sampling_record = extract_uniform_image_sequence(
+                episode.video_path,
+                Path(output_path).resolve().parent
+                / "image_sequences"
+                / "ranking"
+                / episode.video_sha256,
+                count=int(attention.get("num_images", 8)),
+            )
+            row["image_paths"] = image_paths
+            row["image_source_indices"] = sampling_record[
+                "selected_source_indices"
+            ]
+            row["image_sampling_record"] = sampling_record
+            row["sample_fingerprint"] = object_fingerprint(row)
+        rows.append(row)
+    expected_usable_count = attention.get("ranking_expected_usable_count")
+    if expected_usable_count is not None and len(rows) != int(expected_usable_count):
+        raise ValueError(
+            "Independent ranking usable sample count mismatch after grounding: "
+            f"expected {int(expected_usable_count)}, found {len(rows)}"
+        )
+    if not rows:
+        raise ValueError("Independent ranking grounding produced no usable samples")
+    path = Path(output_path).resolve()
+    write_jsonl(path, rows)
+    write_json(
+        path.with_suffix(".manifest.json"),
+        {
+            "source": "ranking_data.jsonl_with_automatic_sam3_tracking",
+            "ranking_metadata_file": str(
+                Path(attention["ranking_metadata_file"]).resolve()
+            ),
+            "ranking_grounding_run": str(grounding_run),
+            "source_sample_count": len(episodes),
+            "sample_count": len(rows),
+            "complete_grounding_required": bool(
+                attention.get("ranking_require_complete_grounding", False)
+            ),
+            "labels_model_facing": False,
+            "input_representation": (
+                "uniform_independent_images_v1"
+                if str(attention.get("protocol")) == IMAGE_SEQUENCE_PROTOCOL
+                else None
+            ),
+            "fingerprint": object_fingerprint(rows),
+        },
+    )
+    return path
 
 
 def _formal_ids(
@@ -111,6 +280,22 @@ def prepare(config: dict[str, Any]) -> Path:
     grounding_run = Path(attention["grounding_run"]).resolve()
     eligibility_mode = str(attention.get("eligibility_mode", "audited"))
     formal = _formal_ids(grounding_run, eligibility_mode)
+    requested_ids: set[str] | None = None
+    ids_path = attention.get("example_ids_file")
+    if ids_path:
+        payload = json.loads(Path(ids_path).read_text(encoding="utf-8"))
+        if not isinstance(payload, list) or not all(isinstance(value, str) for value in payload):
+            raise ValueError("attention_eval.example_ids_file must be a JSON string list")
+        if len(set(payload)) != len(payload):
+            raise ValueError("attention_eval.example_ids_file contains duplicate IDs")
+        requested_ids = set(payload)
+        unavailable = requested_ids - formal
+        if unavailable:
+            raise ValueError(
+                "Frozen cohort contains IDs without eligible endpoint grounding: "
+                f"{sorted(unavailable)[:5]}"
+            )
+        formal = requested_ids
     targets = {
         row["example_id"]: row
         for row in read_jsonl(grounding_run.parent / "targets.jsonl")
@@ -148,6 +333,14 @@ def prepare(config: dict[str, Any]) -> Path:
                 "last": endpoint["last"],
             }
         )
+    if requested_ids is not None:
+        eligible_ids = {row["example_id"] for row in eligible}
+        missing_requested = requested_ids - eligible_ids
+        if missing_requested:
+            raise ValueError(
+                "GRM preparation filtered IDs from the frozen cohort: "
+                f"{sorted(missing_requested)[:5]}"
+            )
     split = grouped_stratified_split(
         eligible,
         discovery_fraction=float(attention.get("discovery_fraction", 1 / 3)),

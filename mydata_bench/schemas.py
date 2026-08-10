@@ -25,6 +25,11 @@ class EpisodeRecord(Record):
     video_sha256: str
     split: str = "test"
     gpt5_mini_check: str | None = None
+    view_paths: tuple[tuple[str, str], ...] = ()
+    source_suc_id: str | None = None
+    target_obj: str | None = None
+    correct_target_obj: str | None = None
+    instruction_video_match: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.example_id or not self.task or not self.subset:
@@ -43,6 +48,16 @@ class EpisodeRecord(Record):
             "subset": self.subset,
             "video_sha256": self.video_sha256,
         }
+
+    @property
+    def views(self) -> dict[str, str]:
+        """Return camera-name to absolute-video-path mapping.
+
+        These paths are input media, never labels. They are deliberately not
+        included in model_payload so each evaluator must declare its media
+        protocol explicitly (front-only native video or three-view endpoints).
+        """
+        return dict(self.view_paths)
 
 
 @dataclass(frozen=True)

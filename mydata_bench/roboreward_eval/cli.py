@@ -108,8 +108,17 @@ def _score(run_dir: Path, bootstrap_samples: int) -> dict:
         )
     metrics.update(
         {
-            "adapter_metric": False,
+            "adapter_metric": evaluation.get("input_representation", "video")
+            != "video",
             "official_native_discrete_output": True,
+            "checkpoint_native_input": (
+                evaluation.get("input_representation", "video") == "video"
+                and evaluation.get("video_sampling_mode")
+                == "checkpoint_native_video"
+            ),
+            "input_representation": evaluation.get(
+                "input_representation", "video"
+            ),
             "model_family": "RoboReward",
             "prediction_contract": "ANSWER: <1-5>",
             "completion": completion,
@@ -167,7 +176,7 @@ def _score(run_dir: Path, bootstrap_samples: int) -> dict:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="python rewardbench/run_roboreward_eval.py")
+    root = argparse.ArgumentParser(prog="python mydata_bench/run_roboreward_eval.py")
     commands = root.add_subparsers(dest="command", required=True)
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--config", required=True)
@@ -175,6 +184,8 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--config", required=True)
     run_parser.add_argument("--dry-run", action="store_true")
     run_parser.add_argument("--retry-failed", action="store_true")
+    run_parser.add_argument("--shard-id", type=int)
+    run_parser.add_argument("--num-shards", type=int)
     score = commands.add_parser("score")
     score.add_argument("--run-dir", required=True)
     score.add_argument("--bootstrap-samples", type=int, default=10_000)
@@ -196,6 +207,13 @@ def main(argv: list[str] | None = None) -> None:
             )
             print(output)
         else:
+            if (args.shard_id is None) != (args.num_shards is None):
+                raise ValueError("--shard-id and --num-shards must be provided together")
+            if args.shard_id is not None:
+                if args.num_shards <= 0 or not 0 <= args.shard_id < args.num_shards:
+                    raise ValueError("Require 0 <= shard-id < num-shards")
+                evaluation["shard_id"] = args.shard_id
+                evaluation["num_shards"] = args.num_shards
             print(run(config, dry_run=args.dry_run, retry_failed=args.retry_failed))
     else:
         metrics = _score(Path(args.run_dir).resolve(), args.bootstrap_samples)

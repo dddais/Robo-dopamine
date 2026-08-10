@@ -7,6 +7,7 @@ import numpy as np
 
 
 QUERY_SCOPES = frozenset({"all", "prefill", "last_prompt", "decode"})
+NEGATIVE_SCOPES = frozenset({"all_visual", "target_span", "other_spans", "none"})
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,51 @@ class ImageSpan:
     @property
     def token_count(self) -> int:
         return self.end - self.start
+
+
+def resolve_negative_positions(
+    spans: Sequence[ImageSpan],
+    selected_positions: Sequence[int],
+    negative_scope: str,
+) -> tuple[list[int], list[str]]:
+    """Resolve negative-bias keys under one cross-model contract.
+
+    other_spans is the primary frame-isolation intervention: target bbox
+    tokens receive positive bias, every other image/time span receives
+    negative bias, and non-target tokens in the target span stay unchanged.
+    """
+    scope = str(negative_scope)
+    if scope not in NEGATIVE_SCOPES:
+        choices = ", ".join(sorted(NEGATIVE_SCOPES))
+        raise ValueError(f"Unknown negative_scope {scope!r}; choose one of {choices}")
+    selected = {int(value) for value in selected_positions}
+    visual = {position for span in spans for position in range(span.start, span.end)}
+    if not selected:
+        raise ValueError("selected_positions must not be empty")
+    if not selected <= visual:
+        raise ValueError("Selected attention positions are outside visual spans")
+    selected_spans = [
+        span
+        for span in spans
+        if selected & set(range(span.start, span.end))
+    ]
+    labels = [span.label for span in selected_spans]
+    selected_span_positions = {
+        position
+        for span in selected_spans
+        for position in range(span.start, span.end)
+    }
+    if scope == "all_visual":
+        negative = visual - selected
+    elif scope == "target_span":
+        negative = selected_span_positions - selected
+    elif scope == "other_spans":
+        negative = visual - selected_span_positions
+    else:
+        negative = set()
+    if selected & negative:
+        raise AssertionError("Positive and negative attention token sets overlap")
+    return sorted(negative), labels
 
 
 def bbox_to_token_positions(

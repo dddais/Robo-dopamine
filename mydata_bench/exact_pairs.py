@@ -140,7 +140,7 @@ def freeze_exact_pairs(
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="python rewardbench/prepare_exact_pairs.py",
+        prog="python mydata_bench/prepare_exact_pairs.py",
         description="Freeze exact same-video pairs from an audited reward=1 cohort.",
     )
     parser.add_argument("--pair-manifest", required=True)

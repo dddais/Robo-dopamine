@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import section
-from ..data import load_episodes
+from ..data import load_episodes, metadata_path
 from ..io import (
     append_jsonl,
     artifact_fingerprint,
@@ -20,12 +20,16 @@ from ..io import (
     write_json,
 )
 from ..schemas import SCHEMA_VERSION
-from ..video import extract_endpoints
+from ..video import extract_endpoints, extract_uniform_image_sequence
+from ..protocol import multiview_endpoint_payload
 from .protocols import (
     ROBO_DOPAMINE_FORWARD,
+    ROBOREWARDBENCH_IMAGE_SEQUENCE,
     ROBOREWARDBENCH_NATIVE,
     dopamine_forward_messages,
     dopamine_forward_payload,
+    image_sequence_messages,
+    image_sequence_payload,
     native_video_payload,
     parse_protocol_output,
     protocol_descriptor,
@@ -117,13 +121,22 @@ class Qwen3VLBaseline:
         )[0].strip()
 
     def _infer_native_video(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        text_item = {"type": "text", "text": payload["prompt"]}
+        video_item = {"type": "video", "video": payload["video_path"]}
+        content_order = str(payload.get("content_order", "text_then_video"))
+        if content_order == "text_then_video":
+            content = [text_item, video_item]
+        elif content_order == "video_then_text":
+            content = [video_item, text_item]
+        else:
+            raise ValueError(
+                "content_order must be 'text_then_video' or 'video_then_text', "
+                f"got {content_order!r}"
+            )
         message = [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": payload["prompt"]},
-                    {"type": "video", "video": payload["video_path"]},
-                ],
+                "content": content,
             }
         ]
         inputs = self.processor.apply_chat_template(
@@ -157,6 +170,7 @@ class Qwen3VLBaseline:
             "video_grid_thw": grid.detach().cpu().tolist() if grid is not None else None,
             "video_token_count": int((inputs["input_ids"] == video_token_id).sum()),
             "video_metadata": metadata_record,
+            "content_order": content_order,
         }
 
     def _infer_endpoint_images(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -178,9 +192,42 @@ class Qwen3VLBaseline:
             "image_token_count": int((inputs["input_ids"] == image_token_id).sum()),
         }
 
+    def _infer_image_sequence(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        paths = [str(Path(path).resolve()) for path in payload["image"]]
+        content_order = str(payload["content_order"])
+        inputs = self.processor.apply_chat_template(
+            image_sequence_messages(
+                payload["task"], paths, content_order=content_order
+            ),
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        image_token_id = int(getattr(self.model.config, "image_token_id", 151655))
+        grid = inputs.get("image_grid_thw")
+        grid_count = int(grid.shape[0]) if grid is not None else 0
+        if grid_count != len(paths):
+            raise RuntimeError(
+                "Independent-image processor alignment failed: "
+                f"images={len(paths)}, grids={grid_count}"
+            )
+        return self._decode(inputs), {
+            "processor_native_video": False,
+            "input_representation": "uniform_independent_images_v1",
+            "image_count": len(paths),
+            "image_grid_thw": grid.detach().cpu().tolist(),
+            "image_token_count": int((inputs["input_ids"] == image_token_id).sum()),
+            "content_order": content_order,
+            "media_order": payload["media_order"],
+            "sampling_record": payload["sampling_record"],
+        }
+
     def infer(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if payload["protocol"] == ROBOREWARDBENCH_NATIVE:
             return self._infer_native_video(payload)
+        if payload["protocol"] == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+            return self._infer_image_sequence(payload)
         if payload["protocol"] == ROBO_DOPAMINE_FORWARD:
             return self._infer_endpoint_images(payload)
         raise ValueError(f"Unknown payload protocol {payload['protocol']!r}")
@@ -192,6 +239,7 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
     output_dir.mkdir(parents=True, exist_ok=True)
     protocol = validate_protocol(str(evaluation.get("protocol", ROBOREWARDBENCH_NATIVE)))
     prompt_mode = str(evaluation.get("prompt_mode", "official"))
+    content_order = str(evaluation.get("content_order", "text_then_video"))
     requested_ids = requested_example_ids(evaluation)
     shard_id = int(evaluation.get("shard_id", 0))
     num_shards = int(evaluation.get("num_shards", 1))
@@ -204,12 +252,18 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
         {
             "model_fingerprint": artifact_fingerprint(evaluation["model_path"]),
             "metadata_sha256": sha256_file(
-                Path(evaluation["dataset_root"]) / evaluation.get("split", "test") / "metadata.jsonl"
+                metadata_path(
+                    evaluation["dataset_root"], evaluation.get("split", "test")
+                )
             ),
             "shard_id": shard_id,
             "num_shards": num_shards,
             "qwen_protocol": {
-                **protocol_descriptor(protocol, prompt_mode=prompt_mode),
+                **protocol_descriptor(
+                    protocol,
+                    prompt_mode=prompt_mode,
+                    content_order=content_order,
+                ),
                 "frozen_id_cohort": {
                     "requested_id_count": len(requested_ids) if requested_ids else None,
                     "requested_ids_fingerprint": (
@@ -274,20 +328,63 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
             if {"reward", "gpt5_mini_check"} & model_payload.keys():
                 raise AssertionError("Label leakage into Qwen model payload")
             frame_record = None
+            frame_records = None
             if protocol == ROBOREWARDBENCH_NATIVE:
-                payload = native_video_payload(episode)
-            else:
-                frame_record = extract_endpoints(
-                    episode.example_id,
-                    episode.video_sha256,
+                payload = native_video_payload(episode, content_order=content_order)
+            elif protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+                image_paths, sampling_record = extract_uniform_image_sequence(
                     episode.video_path,
-                    output_dir / "frames" / episode.video_sha256,
+                    output_dir / "image_sequences" / episode.video_sha256,
+                    count=int(evaluation.get("num_images", 8)),
                 )
-                payload = dopamine_forward_payload(
-                    episode, frame_record, blank_goal, prompt_mode=prompt_mode
+                payload = image_sequence_payload(
+                    episode,
+                    image_paths,
+                    sampling_record,
+                    content_order=content_order,
                 )
+            else:
+                frame_dir = output_dir / "frames" / episode.video_sha256
+                frames_by_view = {
+                    view: extract_endpoints(
+                        episode.example_id,
+                        episode.video_sha256,
+                        path,
+                        frame_dir / view,
+                    )
+                    for view, path in episode.views.items()
+                }
+                if {"front", "left_wrist", "right_wrist"} <= set(frames_by_view):
+                    payload = multiview_endpoint_payload(
+                        episode,
+                        frames_by_view,
+                        blank_goal,
+                        prompt_mode=prompt_mode,
+                    )
+                    frame_record = frames_by_view["front"]
+                    frame_records = {
+                        view: record.to_dict()
+                        for view, record in frames_by_view.items()
+                    }
+                else:
+                    frame_record = extract_endpoints(
+                        episode.example_id,
+                        episode.video_sha256,
+                        episode.video_path,
+                        frame_dir,
+                    )
+                    payload = dopamine_forward_payload(
+                        episode, frame_record, blank_goal, prompt_mode=prompt_mode
+                    )
             if dry_run:
-                raw_output = "ANSWER: 1" if protocol == ROBOREWARDBENCH_NATIVE else "<score>0%</score>"
+                raw_output = (
+                    "ANSWER: 1"
+                    if protocol in {
+                        ROBOREWARDBENCH_NATIVE,
+                        ROBOREWARDBENCH_IMAGE_SEQUENCE,
+                    }
+                    else "<score>0%</score>"
+                )
                 parsed = parse_protocol_output(protocol, raw_output)
                 diagnostics = {"dry_run": True}
                 status = "dry_run"
@@ -305,6 +402,7 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
                     "raw_output": raw_output,
                     "input_diagnostics": diagnostics,
                     "frame_record": frame_record.to_dict() if frame_record else None,
+                    "frame_records": frame_records,
                     **parsed,
                     "status": status,
                 },

@@ -13,8 +13,8 @@ def consensus_ranking(
     expected_heads: int = 32,
     skip_early_layers: int = 0,
 ) -> dict:
-    if len(paths) < 2:
-        raise ValueError("Consensus ranking requires at least two complete rankings")
+    if not paths:
+        raise ValueError("Ranking aggregation requires at least one complete ranking")
     if not 0 <= skip_early_layers < expected_layers:
         raise ValueError("skip_early_layers must be in [0, expected_layers)")
     rank_maps = []
@@ -64,13 +64,16 @@ def consensus_ranking(
     for rank, row in enumerate(rows, 1):
         row["rank"] = rank
         row["score"] = 1 - row["normalized_borda_rank"]
+    single_source = len(paths) == 1
+    ranking_source = "independent_single_source_ranking" if single_source else "frozen_cross_domain_consensus"
+    method = "single_source_normalized_rank" if single_source else "mean_normalized_borda_rank"
     result = {
-        "ranking_source": "frozen_cross_domain_consensus",
+        "ranking_source": ranking_source,
         "num_layers": expected_layers,
         "num_heads": expected_heads,
         "skip_early_layers": skip_early_layers,
         "eligible_head_count": eligible_total,
-        "method": "mean_normalized_borda_rank",
+        "method": method,
         "ranking_fingerprints": fingerprints,
         "ranking": rows,
     }
@@ -83,7 +86,13 @@ def aggregate_in_domain(
 ) -> dict:
     import numpy as np
 
-    valid = [row for row in per_sample if row.get("status") == "ok"]
+    # Mass files are append-only so retries can leave multiple records for one
+    # example. Match the resume logic and treat the latest record as the
+    # authoritative state before deciding which examples are valid.
+    latest_by_example: dict[str, dict] = {}
+    for row in per_sample:
+        latest_by_example[str(row["example_id"])] = row
+    valid = [row for row in latest_by_example.values() if row.get("status") == "ok"]
     if not valid:
         raise ValueError("No valid discovery attention records")
     raw = np.asarray([row["raw_mass"] for row in valid], dtype=np.float64)

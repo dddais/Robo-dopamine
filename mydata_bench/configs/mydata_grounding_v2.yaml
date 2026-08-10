@@ -1,0 +1,18 @@
+grounding:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2
+  parser_model_path: /home/dais/workspace/model/Qwen3-4B-Instruct-2507
+  use_parser_model: true
+
+sam3:
+  model_path: /home/dais/workspace/model/sam3
+  checkpoint_path: /home/dais/workspace/model/sam3/sam3.pt
+  device: cuda
+  threshold: 0.30
+  mask_threshold: 0.50
+  top_n: 20
+  tracking: true
+  tracking_preview: true
+  tracking_preview_max_width: 960
+

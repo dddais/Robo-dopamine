@@ -19,7 +19,7 @@ from ..io import (
 )
 from ..protocol import progress, progress_to_reward
 from ..schemas import SCHEMA_VERSION
-from .dataset import load_partition
+from .dataset import load_partition, prepare_grounded_ranking_samples
 from .masking import (
     QUERY_SCOPES,
     Head,
@@ -49,8 +49,19 @@ def _attention_prompt_protocol(attention: dict[str, Any]) -> dict[str, Any]:
         ).hexdigest(),
         "decoding": "greedy_attention_runtime",
         "steering_query_scope": str(attention.get("steering_query_scope", "all")),
+        "negative_scope": str(attention.get("negative_scope", "other_spans")),
         "query_scope_sensitivity": list(
             attention.get("query_scope_sensitivity", [])
+        ),
+        "incremental_protocol": (
+            str(attention.get("incremental_protocol", "official_accumulated_v1"))
+            if str(attention.get("eval_mode", "forward")) == "incremental"
+            else None
+        ),
+        "incremental_steering_scope": (
+            str(attention.get("incremental_steering_scope", "all_hops"))
+            if str(attention.get("eval_mode", "forward")) == "incremental"
+            else None
         ),
     }
 
@@ -69,6 +80,82 @@ def _query_scopes(attention: dict[str, Any]) -> tuple[str, list[str]]:
     return primary, sensitivity
 
 
+def _validate_incremental_protocol(attention: dict[str, Any]) -> None:
+    if str(attention.get("eval_mode", "forward")) != "incremental":
+        return
+    protocol = str(attention.get("incremental_protocol", "official_accumulated_v1"))
+    scope = str(attention.get("incremental_steering_scope", "all_hops"))
+    if protocol != "official_accumulated_v1":
+        raise ValueError(
+            "attention_eval.incremental_protocol must be official_accumulated_v1"
+        )
+    if scope != "all_hops":
+        raise ValueError("attention_eval.incremental_steering_scope must be all_hops")
+
+
+def _required_steering_conditions(attention: dict[str, Any]) -> list[str]:
+    required = {
+        "baseline",
+        "candidate_target",
+        "candidate_wrong",
+        "low_rank_target",
+    }
+    if bool(attention.get("include_all_heads_control", True)):
+        required.add("all_target")
+    for top_k in sorted(
+        {int(value) for value in attention.get("top_k_values", [8, 32, 64])}
+    ):
+        required.update(
+            {
+                f"candidate_target_k{top_k}",
+                f"candidate_wrong_k{top_k}",
+                f"low_rank_target_k{top_k}",
+            }
+        )
+    _, scopes = _query_scopes(attention)
+    scope_conditions = list(
+        dict.fromkeys(
+            str(value)
+            for value in attention.get(
+                "query_scope_sensitivity_conditions", ["candidate_target"]
+            )
+        )
+    )
+    for scope in scopes:
+        required.update(
+            f"query_scope_{scope}_{condition}" for condition in scope_conditions
+        )
+    if bool(attention.get("run_sensitivity", True)):
+        for top_k in attention.get("top_k_sensitivity", [8, 64]):
+            for bias in attention.get("bias_sensitivity", [0, 2, 4, 6]):
+                required.add(
+                    f"sensitivity_candidate_target_k{int(top_k)}_bias{float(bias):g}"
+                )
+    if bool(attention.get("run_duplicate_location_sensitivity", True)):
+        required.add("sensitivity_after_all_duplicates_k8_bias6")
+    return sorted(required)
+
+
+def _condition_is_terminal(row: dict[str, Any] | None, *, dry_run: bool) -> bool:
+    if not row:
+        return False
+    status = row.get("status")
+    if status == "ok" or (dry_run and status == "dry_run"):
+        return True
+    return status == "missing_control" and "wrong" in str(row.get("condition", ""))
+
+
+def _steering_sample_complete(
+    rows_by_condition: dict[str, dict[str, Any]],
+    required_conditions: list[str],
+    *,
+    dry_run: bool,
+) -> bool:
+    return all(
+        _condition_is_terminal(rows_by_condition.get(condition), dry_run=dry_run)
+        for condition in required_conditions
+    )
+
 def rank(
     config: dict[str, Any],
     source: str,
@@ -77,6 +164,7 @@ def rank(
     retry_failed: bool = False,
 ) -> Path:
     attention = config["attention_eval"]
+    _validate_incremental_protocol(attention)
     output_dir = Path(attention["output_dir"]).resolve()
     if source == "consensus":
         result = consensus_ranking(
@@ -88,7 +176,18 @@ def rank(
         path = output_dir / "consensus_ranking.json"
         write_json(path, result)
         return path
-    samples, split = load_partition(output_dir, "discovery")
+    independent_ranking = bool(attention.get("ranking_grounding_run"))
+    if independent_ranking:
+        samples = list(
+            read_jsonl(
+                prepare_grounded_ranking_samples(
+                    attention, output_dir / "grounded_ranking_inputs.jsonl"
+                )
+            )
+        )
+        split = None
+    else:
+        samples, split = load_partition(output_dir, "discovery")
     shard_id = int(attention.get("shard_id", 0))
     num_shards = int(attention.get("num_shards", 1))
     samples = [
@@ -99,7 +198,12 @@ def rank(
         if num_shards == 1
         else output_dir / f"in_domain_mass.shard-{shard_id:02d}.jsonl"
     )
-    runtime = None if dry_run else AttentionRuntime(attention)
+    # Loading an 8B runtime is unnecessary when every append-only record has a
+    # successful cached result. Instantiate only if a sample needs inference.
+    runtime = None
+    top_k_matrix = sorted({int(value) for value in attention.get("top_k_values", [8, 32, 64])})
+    if not top_k_matrix or top_k_matrix[0] < 1:
+        raise ValueError("top_k_values must contain positive integers")
     previous = {}
     if records_path.exists():
         for row in read_jsonl(records_path):
@@ -122,7 +226,8 @@ def rank(
                     "status": "ok",
                 }
             else:
-                assert runtime is not None
+                if runtime is None:
+                    runtime = AttentionRuntime(attention)
                 row = runtime.collect_mass(sample)
             append_jsonl(records_path, row)
         except Exception as exc:
@@ -154,8 +259,13 @@ def rank(
         num_heads=int(attention.get("num_heads", 32)),
         skip_layers=int(attention.get("skip_early_layers", 2)),
     )
-    if set(result["per_sample_example_ids"]) - set(split["discovery"]):
+    if split is not None and set(result["per_sample_example_ids"]) - set(split["discovery"]):
         raise AssertionError("Evaluation leakage into in-domain ranking")
+    if independent_ranking:
+        result["ranking_source"] = "independent_grounded_ranking_data"
+        result["ranking_metadata_file"] = str(
+            Path(attention["ranking_metadata_file"]).resolve()
+        )
     path = output_dir / "in_domain_ranking.json"
     write_json(path, result)
     return path
@@ -171,6 +281,13 @@ def _load_ranking(path: Path) -> tuple[list[dict], str, str]:
 
 def steer(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = False) -> Path:
     attention = config["attention_eval"]
+    _validate_incremental_protocol(attention)
+    eval_mode = str(attention.get("eval_mode", "forward"))
+    if eval_mode == "incremental" and bool(attention.get("run_paired", True)):
+        raise ValueError(
+            "official incremental attention does not support run_paired; "
+            "set run_paired: false"
+        )
     output_dir = Path(attention["output_dir"]).resolve()
     steering_partition = str(attention.get("steering_partition", "evaluation"))
     samples, split = load_partition(output_dir, steering_partition)
@@ -190,7 +307,10 @@ def steer(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool =
         if num_shards == 1
         else output_dir / f"steering.shard-{shard_id:02d}.jsonl"
     )
-    runtime = None if dry_run else AttentionRuntime(attention)
+    runtime = None
+    top_k_matrix = sorted({int(value) for value in attention.get("top_k_values", [8, 32, 64])})
+    if not top_k_matrix or top_k_matrix[0] < 1:
+        raise ValueError("top_k_values must contain positive integers")
     top_values = [int(x) for x in attention.get("top_k_sensitivity", [8, 64])]
     biases = [float(x) for x in attention.get("bias_sensitivity", [0, 2, 4, 6])]
     primary_k = int(attention.get("top_k", 8))
@@ -217,17 +337,64 @@ def steer(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool =
             "query_scope_sensitivity_conditions contains unsupported values: "
             f"{invalid_scope_conditions}"
         )
-    previous_ids = (
-        {row["example_id"] for row in read_jsonl(records_path)}
-        if records_path.exists()
-        else set()
-    )
+    previous_by_key: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = {}
+    if records_path.exists():
+        for row in read_jsonl(records_path):
+            condition = row.get("condition")
+            grounding_fingerprint = row.get("grounding_fingerprint")
+            if (
+                condition
+                and isinstance(grounding_fingerprint, str)
+                and grounding_fingerprint
+                and row.get("ranking_fingerprint") == ranking_fingerprint
+            ):
+                completion_key = (
+                    str(row["example_id"]),
+                    grounding_fingerprint,
+                    ranking_fingerprint,
+                )
+                previous_by_key.setdefault(completion_key, {})[str(condition)] = row
+    required_conditions = _required_steering_conditions(attention)
     for sample in samples:
-        if sample["example_id"] in previous_ids and not retry_failed:
+        grounding_fingerprint = sample.get("last", {}).get("grounding_fingerprint")
+        if not isinstance(grounding_fingerprint, str) or not grounding_fingerprint:
+            raise ValueError(
+                f"Missing grounding_fingerprint for {sample.get('example_id')}"
+            )
+        completion_key = (
+            str(sample["example_id"]), grounding_fingerprint, ranking_fingerprint
+        )
+        previous_conditions = previous_by_key.get(completion_key, {})
+        if _steering_sample_complete(
+            previous_conditions, required_conditions, dry_run=dry_run
+        ):
             continue
         try:
             candidate = [Head(int(row["layer"]), int(row["head"])) for row in ranking[:primary_k]]
             low = select_low_ranked_heads(ranking, primary_k, candidate)
+            if eval_mode == "incremental":
+                if runtime is None and not dry_run:
+                    runtime = AttentionRuntime(attention)
+                _steer_incremental_sample(
+                    attention=attention,
+                    sample=sample,
+                    records_path=records_path,
+                    ranking=ranking,
+                    ranking_source=ranking_source,
+                    ranking_fingerprint=ranking_fingerprint,
+                    candidate=candidate,
+                    low=low,
+                    runtime=runtime,
+                    dry_run=dry_run,
+                    primary_k=primary_k,
+                    primary_bias=primary_bias,
+                    primary_scope=primary_scope,
+                    scope_values=scope_values,
+                    scope_conditions=scope_conditions,
+                    top_values=top_values,
+                    biases=biases,
+                )
+                continue
             if dry_run:
                 baseline = {
                     "raw_output": "<score>0%</score>",
@@ -241,7 +408,8 @@ def steer(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool =
                 image_positions = list(range(10, 30))
                 target_spans = []
             else:
-                assert runtime is not None
+                if runtime is None:
+                    runtime = AttentionRuntime(attention)
                 inputs, spans = runtime.prepare(sample)
                 del inputs
                 target_positions, image_positions, target_spans = runtime.target_positions(
@@ -263,14 +431,26 @@ def steer(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool =
             if dry_run:
                 wrong = [20, 21, 22, 23]
             else:
-                if len(target_spans) != 1:
-                    wrong = None
-                else:
-                    wrong = matched_wrong_position_set(
-                        target_spans[0],
-                        target_positions,
+                wrong_parts = []
+                for target_span in target_spans:
+                    span_positions = [
+                        position for position in target_positions
+                        if target_span.start <= position < target_span.end
+                    ]
+                    matched = matched_wrong_position_set(
+                        target_span,
+                        span_positions,
                         spatial_merge_size=runtime.spatial_merge_size,
                     )
+                    if matched is None:
+                        wrong_parts = []
+                        break
+                    wrong_parts.extend(matched)
+                wrong = (
+                    sorted(set(wrong_parts))
+                    if len(wrong_parts) == len(target_positions)
+                    else None
+                )
             conditions = [
                 ("candidate_target", candidate, target_positions),
                 ("candidate_wrong", candidate, wrong),
@@ -327,6 +507,75 @@ def steer(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool =
                         primary_bias, name, result, positions, image_positions,
                     ),
                 )
+            top_k_values = sorted(
+                {int(value) for value in attention.get("top_k_values", [8, 32, 64])}
+            )
+            for top_k in top_k_values:
+                top_candidate = [
+                    Head(int(row["layer"]), int(row["head"]))
+                    for row in ranking[:top_k]
+                ]
+                top_low = select_low_ranked_heads(ranking, top_k, top_candidate)
+                top_specs = (
+                    ("candidate_target", top_candidate, target_positions),
+                    ("candidate_wrong", top_candidate, wrong),
+                    ("low_rank_target", top_low, target_positions),
+                )
+                for base_name, heads, positions in top_specs:
+                    name = f"{base_name}_k{top_k}"
+                    if positions is None:
+                        append_jsonl(
+                            records_path,
+                            {
+                                "schema_version": SCHEMA_VERSION,
+                                "example_id": sample["example_id"],
+                                "video_sha256": sample["video_sha256"],
+                                "ranking_source": ranking_source,
+                                "condition": name,
+                                "query_scope": primary_scope,
+                                "status": "missing_control",
+                                "reason": "equal-size non-overlapping wrong region unavailable",
+                            },
+                        )
+                        continue
+                    if top_k == primary_k and base_name in primary_condition_results:
+                        result = dict(primary_condition_results[base_name])
+                        result["hook_diagnostics"] = {
+                            **result.get("hook_diagnostics", {}),
+                            "exact_primary_condition_reuse": True,
+                            "top_k": top_k,
+                        }
+                    elif dry_run:
+                        result = {
+                            "raw_output": "<score>0%</score>",
+                            "signed_score": 0.0,
+                            "hook_diagnostics": {"dry_run": True, "top_k": top_k},
+                        }
+                    else:
+                        result = runtime.generate(
+                            sample,
+                            heads=heads,
+                            selected_positions=positions,
+                            image_positions=image_positions,
+                            bias=primary_bias,
+                            query_scope=primary_scope,
+                        )
+                        result["hook_diagnostics"]["top_k"] = top_k
+                    append_jsonl(
+                        records_path,
+                        _record(
+                            sample,
+                            ranking_source,
+                            ranking_fingerprint,
+                            heads,
+                            primary_bias,
+                            name,
+                            result,
+                            positions,
+                            image_positions,
+                        ),
+                    )
+
             scope_specs = {
                 "candidate_target": (candidate, target_positions),
                 "candidate_wrong": (candidate, wrong),
@@ -480,6 +729,8 @@ def steer(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool =
                 },
             )
     if attention.get("run_paired", True):
+        if runtime is None and not dry_run:
+            runtime = AttentionRuntime(attention)
         _run_paired(
             attention,
             output_dir,
@@ -505,6 +756,17 @@ def steer(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool =
             and Path(attention["grounding_run"]).name == "grounding_dino"
             and str(attention.get("eligibility_mode", "audited")) == "audited",
             "eligibility_mode": str(attention.get("eligibility_mode", "audited")),
+            "eval_mode": str(attention.get("eval_mode", "forward")),
+            "frame_interval": int(attention.get("frame_interval", 20)),
+            "incremental_protocol": (
+                "official_accumulated_v1" if eval_mode == "incremental" else None
+            ),
+            "incremental_steering_scope": (
+                "all_hops" if eval_mode == "incremental" else None
+            ),
+            "intervention_location": str(attention.get("intervention_location", "after_cam_high")),
+            "negative_scope": str(attention.get("negative_scope", "target_span")),
+            "top_k_values": top_k_matrix,
             "shard_id": shard_id,
             "num_shards": num_shards,
         },
@@ -514,13 +776,14 @@ def steer(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool =
             output_dir / f"steering.shard-{index:02d}.jsonl"
             for index in range(num_shards)
         ]
-        if all(path.exists() for path in shard_paths):
+        manifest_paths = [
+            output_dir / f"steering_manifest.shard-{index:02d}.json"
+            for index in range(num_shards)
+        ]
+        if all(path.exists() for path in [*shard_paths, *manifest_paths]):
             deterministic_merge(shard_paths, output_dir / "steering.jsonl")
             manifests = [
-                json.loads(
-                    (output_dir / f"steering_manifest.shard-{index:02d}.json").read_text()
-                )
-                for index in range(num_shards)
+                json.loads(path.read_text()) for path in manifest_paths
             ]
             write_json(
                 output_dir / "steering_manifest.json",
@@ -545,12 +808,271 @@ def steer(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool =
     return records_path
 
 
+def _steer_incremental_sample(
+    *,
+    attention: dict[str, Any],
+    sample: dict[str, Any],
+    records_path: Path,
+    ranking: list[dict],
+    ranking_source: str,
+    ranking_fingerprint: str,
+    candidate: list[Head],
+    low: list[Head],
+    runtime: AttentionRuntime | None,
+    dry_run: bool,
+    primary_k: int,
+    primary_bias: float,
+    primary_scope: str,
+    scope_values: list[str],
+    scope_conditions: list[str],
+    top_values: list[int],
+    biases: list[float],
+) -> None:
+    """Run all configured conditions over every official incremental hop."""
+    location = str(attention.get("intervention_location", "after_cam_high"))
+    if dry_run:
+        plan = [
+            {
+                "target_positions": [10, 11, 12, 13],
+                "wrong_positions": [20, 21, 22, 23],
+                "image_positions": list(range(10, 30)),
+                "before_frame_index": 0,
+                "after_frame_index": int(attention.get("frame_interval", 20)),
+            }
+        ]
+    else:
+        assert runtime is not None
+        plan = runtime.incremental_plan(sample, location)
+
+    def positions(kind: str, selected_plan=plan) -> list[int] | None:
+        values = [step[f"{kind}_positions"] for step in selected_plan]
+        if any(value is None for value in values):
+            return None
+        return values[-1]
+
+    def dry_result(scope: str) -> dict[str, Any]:
+        return {
+            "raw_output": "<score>0%</score>",
+            "signed_score": 0.0,
+            "progress": 0.0,
+            "last_hop_score": 0.0,
+            "accumulated_progress_unclipped": 0.0,
+            "incremental_protocol": "official_accumulated_v1",
+            "sampled_frame_indices": [
+                plan[0]["before_frame_index"], plan[-1]["after_frame_index"]
+            ],
+            "hop_count": len(plan),
+            "incremental_steps": [],
+            "hook_diagnostics": {
+                "dry_run": True,
+                "query_scope": scope,
+                "incremental_protocol": "official_accumulated_v1",
+                "incremental_steering_scope": "all_hops",
+            },
+        }
+
+    cache: dict[tuple, dict[str, Any]] = {}
+
+    def run_condition(
+        heads: list[Head] | tuple[Head, ...],
+        kind: str,
+        bias: float,
+        scope: str,
+        *,
+        selected_plan=plan,
+    ) -> dict[str, Any]:
+        key = (
+            tuple((head.layer, head.head) for head in heads),
+            kind,
+            float(bias),
+            scope,
+            id(selected_plan),
+        )
+        if key not in cache:
+            cache[key] = (
+                dry_result(scope)
+                if dry_run
+                else runtime.generate_incremental(
+                    sample,
+                    selected_plan,
+                    heads=heads,
+                    position_kind=kind,
+                    bias=bias,
+                    query_scope=scope,
+                )
+            )
+        return cache[key]
+
+    def append_condition(
+        name: str,
+        heads: list[Head] | tuple[Head, ...],
+        kind: str,
+        bias: float,
+        scope: str,
+        *,
+        selected_plan=plan,
+        reuse: dict[str, Any] | None = None,
+        reuse_note: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        selected = positions(kind, selected_plan)
+        if selected is None:
+            append_jsonl(
+                records_path,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "example_id": sample["example_id"],
+                    "video_sha256": sample["video_sha256"],
+                    "grounding_fingerprint": sample.get("last", {}).get(
+                        "grounding_fingerprint"
+                    ),
+                    "ranking_source": ranking_source,
+                    "ranking_fingerprint": ranking_fingerprint,
+                    "condition": name,
+                    "query_scope": scope,
+                    "incremental_protocol": "official_accumulated_v1",
+                    "status": "missing_control",
+                    "reason": (
+                        "equal-size non-overlapping wrong region unavailable "
+                        "for at least one incremental hop"
+                    ),
+                },
+            )
+            return None
+        result = dict(reuse) if reuse is not None else run_condition(
+            heads, kind, bias, scope, selected_plan=selected_plan
+        )
+        if reuse_note:
+            result["hook_diagnostics"] = {
+                **result.get("hook_diagnostics", {}), **reuse_note
+            }
+        append_jsonl(
+            records_path,
+            _record(
+                sample,
+                ranking_source,
+                ranking_fingerprint,
+                heads,
+                bias,
+                name,
+                result,
+                selected,
+                selected_plan[-1]["image_positions"],
+            ),
+        )
+        return result
+
+    baseline = append_condition(
+        "baseline", candidate, "target", 0.0, primary_scope
+    )
+    assert baseline is not None
+    primary_results: dict[str, dict[str, Any]] = {}
+    for name, heads, kind in (
+        ("candidate_target", candidate, "target"),
+        ("candidate_wrong", candidate, "wrong"),
+        ("low_rank_target", low, "target"),
+    ):
+        result = append_condition(
+            name, heads, kind, primary_bias, primary_scope
+        )
+        if result is not None:
+            primary_results[name] = result
+    if bool(attention.get("include_all_heads_control", True)):
+        all_heads = [
+            Head(layer, head)
+            for layer in range(int(attention.get("num_layers", 36)))
+            for head in range(int(attention.get("num_heads", 32)))
+        ]
+        append_condition(
+            "all_target", all_heads, "target", primary_bias, primary_scope
+        )
+
+    for top_k in sorted({int(value) for value in attention.get("top_k_values", [8, 32, 64])}):
+        top_candidate = [
+            Head(int(row["layer"]), int(row["head"])) for row in ranking[:top_k]
+        ]
+        top_low = select_low_ranked_heads(ranking, top_k, top_candidate)
+        for base_name, heads, kind in (
+            ("candidate_target", top_candidate, "target"),
+            ("candidate_wrong", top_candidate, "wrong"),
+            ("low_rank_target", top_low, "target"),
+        ):
+            reuse = primary_results.get(base_name) if top_k == primary_k else None
+            append_condition(
+                f"{base_name}_k{top_k}",
+                heads,
+                kind,
+                primary_bias,
+                primary_scope,
+                reuse=reuse,
+                reuse_note=(
+                    {"exact_primary_condition_reuse": True, "top_k": top_k}
+                    if reuse is not None else None
+                ),
+            )
+
+    scope_specs = {
+        "candidate_target": (candidate, "target"),
+        "candidate_wrong": (candidate, "wrong"),
+        "low_rank_target": (low, "target"),
+    }
+    for scope in scope_values:
+        for base_name in scope_conditions:
+            heads, kind = scope_specs[base_name]
+            reuse = primary_results.get(base_name) if scope == primary_scope else None
+            append_condition(
+                f"query_scope_{scope}_{base_name}",
+                heads,
+                kind,
+                primary_bias,
+                scope,
+                reuse=reuse,
+                reuse_note=(
+                    {"exact_primary_condition_reuse": True, "query_scope": scope}
+                    if reuse is not None else None
+                ),
+            )
+
+    if bool(attention.get("run_sensitivity", True)):
+        for top_k in top_values:
+            heads = [
+                Head(int(row["layer"]), int(row["head"]))
+                for row in ranking[:top_k]
+            ]
+            for bias in biases:
+                append_condition(
+                    f"sensitivity_candidate_target_k{top_k}_bias{bias:g}",
+                    heads,
+                    "target",
+                    bias,
+                    primary_scope,
+                    reuse=baseline if bias == 0 else None,
+                    reuse_note=(
+                        {"exact_baseline_reuse": True} if bias == 0 else None
+                    ),
+                )
+
+    if bool(attention.get("run_duplicate_location_sensitivity", True)):
+        if dry_run:
+            duplicate_plan = plan
+        else:
+            duplicate_plan = runtime.incremental_plan(sample, "after_all_duplicates")
+        append_condition(
+            "sensitivity_after_all_duplicates_k8_bias6",
+            candidate,
+            "target",
+            primary_bias,
+            primary_scope,
+            selected_plan=duplicate_plan,
+        )
+
+
 def _record(sample, ranking_source, ranking_fingerprint, heads, bias, condition, result, bbox, image):
     hook_diagnostics = result.get("hook_diagnostics", {})
     return {
         "schema_version": SCHEMA_VERSION,
         "example_id": sample["example_id"],
         "video_sha256": sample["video_sha256"],
+        "grounding_fingerprint": sample.get("last", {}).get("grounding_fingerprint"),
         "ranking_source": ranking_source,
         "ranking_fingerprint": ranking_fingerprint,
         "heads": [[head.layer, head.head] for head in heads],
@@ -559,7 +1081,15 @@ def _record(sample, ranking_source, ranking_fingerprint, heads, bias, condition,
         "query_scope": hook_diagnostics.get("query_scope"),
         "raw_output": result["raw_output"],
         "signed_score": result["signed_score"],
-        "progress": progress(result["signed_score"]),
+        "progress": float(result.get("progress", progress(result["signed_score"]))),
+        "last_hop_score": result.get("last_hop_score"),
+        "accumulated_progress_unclipped": result.get(
+            "accumulated_progress_unclipped"
+        ),
+        "incremental_protocol": result.get("incremental_protocol"),
+        "sampled_frame_indices": result.get("sampled_frame_indices"),
+        "hop_count": result.get("hop_count"),
+        "incremental_steps": result.get("incremental_steps"),
         "bbox_positions": list(bbox),
         "image_positions": list(image),
         "hook_diagnostics": hook_diagnostics,
@@ -751,13 +1281,22 @@ def _rank_correlation(first: list[dict], second: list[dict]) -> float:
 def metrics(run_dir: str | Path, config: dict[str, Any] | None = None) -> dict:
     run_dir = Path(run_dir).resolve()
     rows = list(read_jsonl(run_dir / "steering.jsonl"))
-    grouped: dict[str, dict[str, dict]] = {}
+    latest_conditions: dict[str, dict[str, dict[str, Any]]] = {}
     metadata = {
         row["example_id"]: row for row in read_jsonl(run_dir / "eligible.jsonl")
     } if (run_dir / "eligible.jsonl").exists() else {}
     for row in rows:
-        if row.get("status") == "ok":
-            grouped.setdefault(row["example_id"], {})[row["condition"]] = row
+        condition = row.get("condition")
+        if condition:
+            latest_conditions.setdefault(row["example_id"], {})[condition] = row
+    grouped: dict[str, dict[str, dict]] = {
+        example_id: {
+            condition: row
+            for condition, row in conditions.items()
+            if row.get("status") == "ok"
+        }
+        for example_id, conditions in latest_conditions.items()
+    }
     contrasts = []
     for example_id, conditions in grouped.items():
         required = {"baseline", "candidate_target", "low_rank_target"}
@@ -794,6 +1333,136 @@ def metrics(run_dir: str | Path, config: dict[str, Any] | None = None) -> dict:
                 else None
             )
         },
+    }
+    attention_config = (config or {}).get("attention_eval", {})
+    manifest = {}
+    manifest_path = run_dir / "steering_manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if attention_config:
+        required_conditions = _required_steering_conditions(attention_config)
+        top_k_values = sorted(
+            {
+                int(value)
+                for value in attention_config.get("top_k_values", [8, 32, 64])
+            }
+        )
+    else:
+        top_k_values = sorted(
+            {int(value) for value in manifest.get("top_k_values", [8, 32, 64])}
+        )
+        required_conditions = ["baseline"]
+        for top_k in top_k_values:
+            required_conditions.extend(
+                [
+                    f"candidate_target_k{top_k}",
+                    f"candidate_wrong_k{top_k}",
+                    f"low_rank_target_k{top_k}",
+                ]
+            )
+    top_k_estimands = {}
+    for top_k in top_k_values:
+        target_name = f"candidate_target_k{top_k}"
+        wrong_name = f"candidate_wrong_k{top_k}"
+        low_name = f"low_rank_target_k{top_k}"
+        top_k_contrasts = []
+        for example_id, conditions in grouped.items():
+            if not {"baseline", target_name, low_name} <= conditions.keys():
+                continue
+            baseline_score = float(conditions["baseline"]["signed_score"])
+            target_score = float(conditions[target_name]["signed_score"])
+            top_k_contrasts.append(
+                {
+                    "example_id": example_id,
+                    "video_sha256": conditions["baseline"]["video_sha256"],
+                    "target_shift": target_score - baseline_score,
+                    "head_specificity": target_score
+                    - float(conditions[low_name]["signed_score"]),
+                    "spatial_specificity": (
+                        target_score - float(conditions[wrong_name]["signed_score"])
+                        if wrong_name in conditions
+                        else None
+                    ),
+                    "subset": metadata.get(example_id, {}).get("subset"),
+                }
+            )
+        top_k_estimands[str(top_k)] = {
+            "n_formal_contrasts": len(top_k_contrasts),
+            "estimands": {
+                field: paired_cluster_bootstrap(
+                    top_k_contrasts, field, samples=samples
+                )
+                for field in (
+                    "target_shift",
+                    "spatial_specificity",
+                    "head_specificity",
+                )
+            },
+        }
+    summary["top_k_estimands"] = top_k_estimands
+    steering_partition = str(
+        attention_config.get(
+            "steering_partition", manifest.get("steering_partition", "evaluation")
+        )
+    )
+    if steering_partition == "all_eligible" and metadata:
+        expected_ids = set(metadata)
+    elif (run_dir / "split.json").exists():
+        split_data = json.loads((run_dir / "split.json").read_text(encoding="utf-8"))
+        expected_ids = set(split_data.get(steering_partition, []))
+    else:
+        expected_ids = set(latest_conditions)
+    if not expected_ids:
+        expected_ids = set(latest_conditions)
+
+    condition_status_counts: dict[str, dict[str, int]] = {}
+    for condition in required_conditions:
+        counts: dict[str, int] = {}
+        for example_id in expected_ids:
+            row = latest_conditions.get(example_id, {}).get(condition)
+            status = str(row.get("status", "missing_record")) if row else "missing_record"
+            counts[status] = counts.get(status, 0) + 1
+        condition_status_counts[condition] = dict(sorted(counts.items()))
+    complete_ids = sorted(
+        example_id
+        for example_id in expected_ids
+        if _steering_sample_complete(
+            latest_conditions.get(example_id, {}),
+            required_conditions,
+            dry_run=False,
+        )
+    )
+    top_k_completion = {}
+    for top_k in top_k_values:
+        conditions = [
+            f"candidate_target_k{top_k}",
+            f"candidate_wrong_k{top_k}",
+            f"low_rank_target_k{top_k}",
+        ]
+        top_k_completion[str(top_k)] = {
+            "required_conditions": conditions,
+            "complete_count": sum(
+                all(
+                    _condition_is_terminal(
+                        latest_conditions.get(example_id, {}).get(condition),
+                        dry_run=False,
+                    )
+                    for condition in conditions
+                )
+                for example_id in expected_ids
+            ),
+        }
+    summary["condition_completion"] = {
+        "steering_partition": steering_partition,
+        "expected_population_count": len(expected_ids),
+        "required_conditions": required_conditions,
+        "condition_status_counts": condition_status_counts,
+        "all_required_complete_count": len(complete_ids),
+        "all_required_complete_fraction": (
+            len(complete_ids) / len(expected_ids) if expected_ids else None
+        ),
+        "incomplete_example_ids": sorted(expected_ids - set(complete_ids)),
+        "top_k_controls": top_k_completion,
     }
     configured_scope_values = list(
         dict.fromkeys(

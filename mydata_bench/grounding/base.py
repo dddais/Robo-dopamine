@@ -77,6 +77,100 @@ def mask_to_bbox(mask) -> tuple[float, float, float, float] | None:
     return float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)
 
 
+def _box_iou(left: list[float], right: list[float]) -> float:
+    x1 = max(float(left[0]), float(right[0]))
+    y1 = max(float(left[1]), float(right[1]))
+    x2 = min(float(left[2]), float(right[2]))
+    y2 = min(float(left[3]), float(right[3]))
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    left_area = max(0.0, float(left[2]) - float(left[0])) * max(
+        0.0, float(left[3]) - float(left[1])
+    )
+    right_area = max(0.0, float(right[2]) - float(right[0])) * max(
+        0.0, float(right[3]) - float(right[1])
+    )
+    union = left_area + right_area - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def _deduplicate_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse the same instance returned by multiple open-vocabulary queries."""
+    kept: list[dict[str, Any]] = []
+    for row in sorted(rows, key=lambda value: float(value.get("score", 0)), reverse=True):
+        if all(_box_iou(row["bbox"], other["bbox"]) < 0.8 for other in kept):
+            kept.append(row)
+    return kept
+
+
+def select_relational_candidate(
+    image_path: str,
+    target_candidates: list[dict[str, Any]],
+    reference_candidates: list[dict[str, Any]],
+    relation: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
+    """Resolve a relational noun phrase using first-frame box geometry.
+
+    SAM3 supplies entity proposals; this function, rather than the tokenizer or
+    language model, implements the exact left/right/nearest/farthest operator.
+    """
+    import math
+
+    with Image.open(image_path) as image:
+        width, height = image.size
+
+    def legal(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        output = []
+        for row in rows:
+            value = dict(row)
+            try:
+                value["bbox"] = list(validate_bbox(value["bbox"], width, height))
+            except ValueError:
+                continue
+            output.append(value)
+        return _deduplicate_candidates(output)
+
+    targets = legal(target_candidates)
+    references = legal(reference_candidates)
+    if not targets or not references:
+        return None, None, "relational_target_or_reference_not_detected"
+    reference = max(references, key=lambda row: float(row.get("score", 0)))
+    rx = (reference["bbox"][0] + reference["bbox"][2]) / 2
+    ry = (reference["bbox"][1] + reference["bbox"][3]) / 2
+    # A reference such as "purple cup" can also appear in the generic "cup"
+    # result. Exclude that same physical instance before applying the relation.
+    targets = [row for row in targets if _box_iou(row["bbox"], reference["bbox"]) < 0.6]
+    if not targets:
+        return None, reference, "only_reference_instance_detected"
+
+    def center(row: dict[str, Any]) -> tuple[float, float]:
+        box = row["bbox"]
+        return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+
+    if relation in {"left_of", "right_of"}:
+        sign = -1 if relation == "left_of" else 1
+        valid = [row for row in targets if sign * (center(row)[0] - rx) > 0]
+        if not valid:
+            return None, reference, f"no_candidate_satisfies_{relation}"
+        selected = max(valid, key=lambda row: float(row.get("score", 0)))
+    elif relation in {"closest_to", "farthest_from"}:
+        def distance(row: dict[str, Any]) -> float:
+            x, y = center(row)
+            return math.hypot(x - rx, y - ry)
+
+        selected = (
+            min(targets, key=lambda row: (distance(row), -float(row.get("score", 0))))
+            if relation == "closest_to"
+            else max(targets, key=lambda row: (distance(row), float(row.get("score", 0))))
+        )
+        selected["reference_center_distance"] = distance(selected)
+    else:
+        raise ValueError(f"Unsupported spatial relation: {relation}")
+    selected["relation"] = relation
+    selected["reference_bbox"] = list(reference["bbox"])
+    selected["reference_query"] = reference.get("query")
+    return selected, reference, f"first_frame_geometry_{relation}"
+
+
 def select_temporal_pair(
     first_image_path: str,
     last_image_path: str,

@@ -11,7 +11,7 @@ from typing import Any
 import cv2
 
 from ..config import section
-from ..data import load_episodes
+from ..data import load_episodes, metadata_path
 from ..io import (
     append_jsonl,
     artifact_fingerprint,
@@ -24,6 +24,7 @@ from ..io import (
 )
 from ..protocol import progress
 from ..schemas import SCHEMA_VERSION
+from ..video import extract_uniform_image_sequence
 from .paper_protocol import PAPER_PROTOCOL_ID
 
 
@@ -317,6 +318,31 @@ def _native_video_message(
     ]
 
 
+def _image_sequence_message(
+    task: str,
+    image_paths: list[str],
+    *,
+    content_order: str,
+) -> list[dict[str, Any]]:
+    """Build the discrete rubric request with independent image items."""
+    paths = [str(Path(path).resolve()) for path in image_paths]
+    missing = [path for path in paths if not Path(path).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Missing image-sequence inputs: {missing}")
+    text = {"type": "text", "text": native_prompt(task)}
+    images = [{"type": "image", "image": path} for path in paths]
+    if content_order == "text_then_images":
+        content = [text, *images]
+    elif content_order == "images_then_text":
+        content = [*images, text]
+    else:
+        raise ValueError(
+            "image-sequence content_order must be 'text_then_images' or "
+            f"'images_then_text', got {content_order!r}"
+        )
+    return [{"role": "user", "content": content}]
+
+
 def _native_video_metadata(metadata: Any) -> dict[str, Any]:
     """Make the processor's video metadata JSON-safe for the run record."""
     if isinstance(metadata, (list, tuple)):
@@ -386,11 +412,28 @@ class NativeRoboReward:
                 "preprocessor_mode must be 'legacy_no_resize' or "
                 f"'checkpoint_default', got {self.preprocessor_mode!r}"
             )
-        self.content_order = str(config.get("content_order", "video_then_text"))
-        if self.content_order not in {"video_then_text", "text_then_video"}:
+        self.input_representation = str(config.get("input_representation", "video"))
+        if self.input_representation not in {"video", "independent_images"}:
             raise ValueError(
-                "content_order must be 'video_then_text' or 'text_then_video', "
-                f"got {self.content_order!r}"
+                "input_representation must be 'video' or 'independent_images', "
+                f"got {self.input_representation!r}"
+            )
+        default_order = (
+            "video_then_text"
+            if self.input_representation == "video"
+            else "images_then_text"
+        )
+        self.content_order = str(config.get("content_order", default_order))
+        valid_orders = (
+            {"video_then_text", "text_then_video"}
+            if self.input_representation == "video"
+            else {"images_then_text", "text_then_images"}
+        )
+        if self.content_order not in valid_orders:
+            raise ValueError(
+                f"Invalid content_order {self.content_order!r} for "
+                f"input_representation={self.input_representation!r}; "
+                f"choose one of {sorted(valid_orders)}"
             )
         self.video_sampling_mode = str(config.get("video_sampling_mode", "full_1fps"))
         processor_kwargs: dict[str, Any] = {
@@ -434,10 +477,46 @@ class NativeRoboReward:
     def infer(
         self, task: str, frame_paths: list[str], video_record: dict[str, Any]
     ) -> tuple[str, dict[str, Any]]:
-        is_native_mp4 = (
-            video_record.get("video_input_protocol") == "checkpoint_native_mp4_v1"
-        )
-        if is_native_mp4:
+        if self.input_representation == "independent_images":
+            message = _image_sequence_message(
+                task, frame_paths, content_order=self.content_order
+            )
+            inputs = self.processor.apply_chat_template(
+                message,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
+            image_token_id = int(getattr(self.model.config, "image_token_id", 151655))
+            grid = inputs.get("image_grid_thw")
+            grid_count = int(grid.shape[0]) if grid is not None else 0
+            if grid_count != len(frame_paths):
+                raise RuntimeError(
+                    "Independent-image processor alignment failed: "
+                    f"images={len(frame_paths)}, grids={grid_count}"
+                )
+            input_diagnostics = {
+                "input_representation": "uniform_independent_images_v1",
+                "processor_native_video": False,
+                "image_count": len(frame_paths),
+                "image_grid_thw": grid.detach().cpu().tolist(),
+                "image_token_count": int(
+                    (inputs["input_ids"] == image_token_id).sum()
+                ),
+                "preprocessor_mode": self.preprocessor_mode,
+                "content_order": self.content_order,
+                "media_order": (
+                    ["text", "image_sequence"]
+                    if self.content_order == "text_then_images"
+                    else ["image_sequence", "text"]
+                ),
+            }
+        else:
+            is_native_mp4 = (
+                video_record.get("video_input_protocol") == "checkpoint_native_mp4_v1"
+            )
+        if self.input_representation == "video" and is_native_mp4:
             if len(frame_paths) != 1:
                 raise ValueError("checkpoint_native_video requires exactly one MP4 path")
             # Let AutoProcessor decode and sample the original MP4.  This is
@@ -473,7 +552,7 @@ class NativeRoboReward:
                 "processor_native_video": True,
                 "video_metadata": _native_video_metadata(metadata),
             }
-        else:
+        elif self.input_representation == "video":
             sample_fps = float(
                 video_record.get(
                     "effective_sample_fps", video_record.get("sample_fps", 1.0)
@@ -535,12 +614,13 @@ class NativeRoboReward:
                 "preprocessor_mode": self.preprocessor_mode,
                 "processor_native_video": False,
             }
-        input_diagnostics["content_order"] = self.content_order
-        input_diagnostics["media_order"] = (
-            ["text", "video"]
-            if self.content_order == "text_then_video"
-            else ["video", "text"]
-        )
+        if self.input_representation == "video":
+            input_diagnostics["content_order"] = self.content_order
+            input_diagnostics["media_order"] = (
+                ["text", "video"]
+                if self.content_order == "text_then_video"
+                else ["video", "text"]
+            )
         device = self.model.device
         inputs = {key: value.to(device) for key, value in inputs.items()}
         generation = {"max_new_tokens": self.max_new_tokens, "do_sample": self.do_sample}
@@ -571,6 +651,25 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
     num_shards = int(evaluation.get("num_shards", 1))
     records_path = output_dir / f"records.shard-{shard_id:02d}.jsonl"
     sampling_mode = str(evaluation.get("video_sampling_mode", "full_1fps"))
+    input_representation = str(evaluation.get("input_representation", "video"))
+    if input_representation == "independent_images" and sampling_mode != "uniform_fixed_frames":
+        raise ValueError(
+            "independent_images requires video_sampling_mode='uniform_fixed_frames'"
+        )
+    content_order = str(evaluation.get("content_order", "video_then_text"))
+    image_count = int(
+        evaluation.get("num_images", evaluation.get("num_frames", 8))
+    )
+    valid_orders = (
+        {"text_then_images", "images_then_text"}
+        if input_representation == "independent_images"
+        else {"text_then_video", "video_then_text"}
+    )
+    if content_order not in valid_orders:
+        raise ValueError(
+            f"Invalid content_order {content_order!r} for "
+            f"input_representation={input_representation!r}"
+        )
     requested_ids = _requested_example_ids(evaluation)
     previous = latest_by_id(read_jsonl(records_path)) if records_path.exists() else {}
     manifest = provenance(sys.argv, config, Path(__file__).resolve().parents[2])
@@ -578,9 +677,9 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
         {
             "model_fingerprint": artifact_fingerprint(evaluation["model_path"]),
             "metadata_sha256": sha256_file(
-                Path(evaluation["dataset_root"])
-                / evaluation.get("split", "test")
-                / "metadata.jsonl"
+                metadata_path(
+                    evaluation["dataset_root"], evaluation.get("split", "test")
+                )
             ),
             "shard_id": shard_id,
             "num_shards": num_shards,
@@ -590,22 +689,41 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
                     ROBOREWARD_PROMPT.encode("utf-8")
                 ).hexdigest(),
                 "prompt_contract": "RoboReward model-card prompt; ANSWER: <1-5>",
+                "input_representation": input_representation,
+                "model_media_type": (
+                    "independent_images"
+                    if input_representation == "independent_images"
+                    else "video"
+                ),
                 "media_order": (
-                    ["text", "video"]
+                    ["text", "image_sequence"]
+                    if str(evaluation.get("content_order")) == "text_then_images"
+                    else ["image_sequence", "text"]
+                    if input_representation == "independent_images"
+                    else ["text", "video"]
                     if str(evaluation.get("content_order", "video_then_text"))
                     == "text_then_video"
                     else ["video", "text"]
                 ),
                 "video_input": {
                     "sampling_mode": sampling_mode,
-                    "protocol": {
-                        "full_1fps": "complete_rollout_1fps_frame_list_v1",
-                        "uniform_fixed_frames": "uniform_fixed_frames_v1",
-                        "checkpoint_native_video": "checkpoint_native_mp4_v1",
-                    }[sampling_mode],
+                    "protocol": (
+                        "uniform_independent_images_v1"
+                        if input_representation == "independent_images"
+                        else {
+                            "full_1fps": "complete_rollout_1fps_frame_list_v1",
+                            "uniform_fixed_frames": "uniform_fixed_frames_v1",
+                            "checkpoint_native_video": "checkpoint_native_mp4_v1",
+                        }[sampling_mode]
+                    ),
                     "num_frames": (
-                        int(evaluation.get("num_frames", 8))
+                        image_count
                         if sampling_mode == "uniform_fixed_frames"
+                        else None
+                    ),
+                    "num_images": (
+                        image_count
+                        if input_representation == "independent_images"
                         else None
                     ),
                 },
@@ -616,7 +734,7 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
                     "do_sample": bool(evaluation.get("do_sample", False)),
                     "max_new_tokens": int(evaluation.get("max_new_tokens", 128)),
                 },
-                "content_order": str(evaluation.get("content_order", "video_then_text")),
+                "content_order": content_order,
                 "frozen_id_cohort": {
                     "requested_id_count": len(requested_ids) if requested_ids else None,
                     "requested_ids_fingerprint": (
@@ -673,11 +791,18 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
             payload = episode.model_payload()
             if {"reward", "gpt5_mini_check"} & payload.keys():
                 raise AssertionError("Label leakage into RoboReward model payload")
-            frame_paths, video_record = _sample_video(
-                evaluation,
-                payload["video_path"],
-                output_dir / "frames" / sampling_mode / episode.video_sha256,
-            )
+            if input_representation == "independent_images":
+                frame_paths, video_record = extract_uniform_image_sequence(
+                    payload["video_path"],
+                    output_dir / "image_sequences" / episode.video_sha256,
+                    count=image_count,
+                )
+            else:
+                frame_paths, video_record = _sample_video(
+                    evaluation,
+                    payload["video_path"],
+                    output_dir / "frames" / sampling_mode / episode.video_sha256,
+                )
             if dry_run:
                 raw_output, prediction, status = "ANSWER: 1", 1, "dry_run"
                 input_diagnostics = {

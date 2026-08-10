@@ -60,7 +60,7 @@ def _compare(dino_run: Path, sam3_run: Path) -> dict:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="python rewardbench/run_grounding.py")
+    root = argparse.ArgumentParser(prog="python mydata_bench/run_grounding.py")
     commands = root.add_subparsers(dest="command", required=True)
     parse = commands.add_parser("parse")
     parse.add_argument("--config", required=True)
@@ -70,6 +70,8 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--config", required=True)
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--retry-failed", action="store_true")
+    run.add_argument("--shard-id", type=int)
+    run.add_argument("--num-shards", type=int)
     audit = commands.add_parser("audit")
     audit.add_argument("--run-dir", required=True)
     audit.add_argument(
@@ -86,7 +88,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = parser().parse_args(argv)
+    argument_parser = parser()
+    args = argument_parser.parse_args(argv)
     if args.command in {"parse", "run"}:
         from ..config import load_config
 
@@ -94,6 +97,15 @@ def main(argv: list[str] | None = None) -> None:
         if args.command == "parse":
             print(run_parser(config, dry_run=args.dry_run))
         else:
+            if (args.shard_id is None) != (args.num_shards is None):
+                argument_parser.error("--shard-id and --num-shards must be provided together")
+            if args.num_shards is not None:
+                if args.num_shards < 1 or not 0 <= args.shard_id < args.num_shards:
+                    argument_parser.error("require num_shards >= 1 and 0 <= shard_id < num_shards")
+                config = {**config, "grounding": dict(config["grounding"])}
+                config["grounding"].update(
+                    {"shard_id": args.shard_id, "num_shards": args.num_shards}
+                )
             print(
                 run_grounding(
                     config,

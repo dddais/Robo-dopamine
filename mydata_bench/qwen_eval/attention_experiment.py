@@ -28,6 +28,7 @@ from ..attention_eval.masking import (
 )
 from ..attention_eval.ranking import consensus_ranking
 from ..attention_eval.runtime import find_contiguous_spans
+from ..attention_eval.dataset import prepare_grounded_ranking_samples
 from ..attention_eval.stats import (
     exact_mcnemar_pvalue,
     paired_cluster_bootstrap,
@@ -37,25 +38,32 @@ from ..data import load_episodes
 from ..io import (
     append_jsonl,
     artifact_fingerprint,
+    deterministic_merge,
     object_fingerprint,
     provenance,
     read_jsonl,
     sha256_file,
+    stable_shard,
     write_json,
     write_jsonl,
 )
 from ..protocol import progress_to_reward
 from ..schemas import SCHEMA_VERSION
+from ..video import extract_uniform_image_sequence
 from .attention import (
     QwenAttentionRuntime,
     _native_video_message,
     _spatial_merge_size,
     build_forward_image_spans,
+    prepare_native_video_processor_input,
 )
 from .protocols import (
+    DISCRETE_PROTOCOLS,
     ROBO_DOPAMINE_FORWARD,
+    ROBOREWARDBENCH_IMAGE_SEQUENCE,
     ROBOREWARDBENCH_NATIVE,
     dopamine_forward_messages,
+    image_sequence_messages,
     validate_protocol,
 )
 
@@ -327,30 +335,52 @@ def build_aligned_ranking_manifest(config: dict[str, Any]) -> Path:
     return path
 
 
+def build_ranking_manifest(config: dict[str, Any]) -> Path:
+    attention = _section(config)
+    if attention.get("ranking_grounding_run"):
+        output = Path(attention["output_dir"]).resolve()
+        return prepare_grounded_ranking_samples(
+            attention, output / "grounded_ranking_inputs.jsonl"
+        )
+    if str(attention.get("protocol")) == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+        raise ValueError(
+            "Image-sequence ranking requires ranking_grounding_run so sampled "
+            "source-frame indices and tracking boxes remain aligned"
+        )
+    return build_aligned_ranking_manifest(config)
+
+
 def build_cohort_manifest(config: dict[str, Any]) -> Path:
-    """Materialize audited endpoint inputs without putting labels in JSONL."""
+    """Materialize audited or explicitly auto-grounded label-free inputs."""
     attention = _section(config)
     output = Path(attention["output_dir"]).resolve()
     output.mkdir(parents=True, exist_ok=True)
     requested = _ids(attention["example_ids_file"])
     grounding = Path(attention["grounding_run"]).resolve()
-    audit_path = grounding / "audit_final.jsonl"
-    formal = {
-        row["example_id"]
-        for row in read_jsonl(audit_path)
-        if row.get("formal_eligible") is True and isinstance(row.get("example_id"), str)
-    }
+    eligibility_mode = str(attention.get("eligibility_mode", "audited"))
+    endpoints = _latest_endpoints(grounding / "grounding.jsonl")
+    audit_path: Path | None = None
+    if eligibility_mode == "audited":
+        audit_path = grounding / "audit_final.jsonl"
+        formal = {
+            row["example_id"]
+            for row in read_jsonl(audit_path)
+            if row.get("formal_eligible") is True and isinstance(row.get("example_id"), str)
+        }
+    elif eligibility_mode == "auto_valid_grounding":
+        formal = set(endpoints)
+    else:
+        raise ValueError("Unknown attention eligibility_mode")
     missing_audit = set(requested) - formal
     if missing_audit:
         raise ValueError(
-            "Frozen cohort contains non-formal-audited examples: "
+            "Frozen cohort contains ineligible grounding examples: "
             f"{sorted(missing_audit)[:5]}"
         )
     episodes = {
         row.example_id: row
         for row in load_episodes(attention["dataset_root"], attention.get("split", "test"))
     }
-    endpoints = _latest_endpoints(grounding / "grounding.jsonl")
     rows = []
     for example_id in requested:
         episode = episodes.get(example_id)
@@ -360,25 +390,59 @@ def build_cohort_manifest(config: dict[str, Any]) -> Path:
         first, last = endpoint["first"], endpoint["last"]
         first_path = first.get("provenance", {}).get("image_path")
         last_path = last.get("provenance", {}).get("image_path")
+        first_bbox = first.get("bbox")
         bbox = last.get("bbox")
+        tracking_path = last.get("provenance", {}).get("tracking_path")
         if not isinstance(first_path, str) or not isinstance(last_path, str):
             raise ValueError(f"Missing endpoint images for {example_id}")
+        if not isinstance(first_bbox, list) or len(first_bbox) != 4:
+            raise ValueError(f"Missing first-frame bbox for {example_id}")
         if not isinstance(bbox, list) or len(bbox) != 4:
             raise ValueError(f"Missing endpoint bbox for {example_id}")
-        rows.append(
-            {
-                "schema_version": SCHEMA_VERSION,
-                "example_id": example_id,
-                "video_sha256": episode.video_sha256,
-                "subset": episode.subset,
-                "task": episode.task,
-                "video_path": episode.video_path,
-                "first_image_path": first_path,
-                "last_image_path": last_path,
-                "last_bbox": [float(value) for value in bbox],
-                "grounding_fingerprint": last.get("grounding_fingerprint"),
-            }
-        )
+        if not isinstance(tracking_path, str) or not Path(tracking_path).is_file():
+            raise ValueError(f"Missing tracking path for {example_id}")
+        row = {
+            "schema_version": SCHEMA_VERSION,
+            "example_id": example_id,
+            "video_sha256": episode.video_sha256,
+            "subset": episode.subset,
+            "task": episode.task,
+            "video_path": episode.video_path,
+            "first_image_path": first_path,
+            "last_image_path": last_path,
+            "first_bbox": [float(value) for value in first_bbox],
+            "last_bbox": [float(value) for value in bbox],
+            "tracking_path": str(Path(tracking_path).resolve()),
+            "grounding_fingerprint": last.get("grounding_fingerprint"),
+        }
+        views = last.get("provenance", {}).get("view_endpoint_paths", {})
+        if (
+            str(attention["protocol"]) == ROBO_DOPAMINE_FORWARD
+            and {"front", "left_wrist", "right_wrist"} <= set(views)
+        ):
+            blank = str(Path(attention["blank_goal"]).resolve())
+            row["image_paths"] = [
+                views["front"]["first"],
+                blank,
+                views["front"]["first"],
+                views["left_wrist"]["first"],
+                views["right_wrist"]["first"],
+                views["front"]["last"],
+                views["left_wrist"]["last"],
+                views["right_wrist"]["last"],
+            ]
+        elif str(attention["protocol"]) == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+            image_paths, sampling_record = extract_uniform_image_sequence(
+                episode.video_path,
+                output / "image_sequences" / "cohort" / episode.video_sha256,
+                count=int(attention.get("num_images", 8)),
+            )
+            row["image_paths"] = image_paths
+            row["image_source_indices"] = sampling_record[
+                "selected_source_indices"
+            ]
+            row["image_sampling_record"] = sampling_record
+        rows.append(row)
     path = output / "cohort_inputs.jsonl"
     write_jsonl(path, rows)
     write_json(
@@ -388,7 +452,16 @@ def build_cohort_manifest(config: dict[str, Any]) -> Path:
             "model_facing_labels_omitted": True,
             "example_ids_file": str(Path(attention["example_ids_file"]).resolve()),
             "example_ids_sha256": sha256_file(attention["example_ids_file"]),
-            "grounding_audit": str(audit_path),
+            "eligibility_mode": eligibility_mode,
+            "grounding_audit": str(audit_path) if audit_path is not None else None,
+            "automatic_tracking_assumed_correct": eligibility_mode == "auto_valid_grounding",
+            "input_representation": (
+                "uniform_independent_images_v1"
+                if str(attention["protocol"])
+                == ROBOREWARDBENCH_IMAGE_SEQUENCE
+                else None
+            ),
+            "num_images": attention.get("num_images"),
             "fingerprint": object_fingerprint(rows),
         },
     )
@@ -402,7 +475,7 @@ def validate_ranking_inputs(config: dict[str, Any]) -> Path:
     attention = _section(config)
     protocol = validate_protocol(str(attention["protocol"]))
     output = Path(attention["output_dir"]).resolve()
-    samples_path = build_aligned_ranking_manifest(config)
+    samples_path = build_ranking_manifest(config)
     samples = list(read_jsonl(samples_path))
     processor = AutoProcessor.from_pretrained(
         attention["model_path"], trust_remote_code=True
@@ -452,13 +525,75 @@ def validate_ranking_inputs(config: dict[str, Any]) -> Path:
                 raise RuntimeError(
                     f"Processor target path mismatch for {sample['example_id']}"
                 )
-        else:
+        elif protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+            paths = [str(Path(path).resolve()) for path in sample["image_paths"]]
             raw = processor.apply_chat_template(
-                _native_video_message(sample["task"], sample["video_path"]),
+                image_sequence_messages(
+                    sample["task"],
+                    paths,
+                    content_order=str(
+                        attention.get("content_order", "text_then_images")
+                    ),
+                ),
                 tokenize=True,
                 add_generation_prompt=True,
                 return_dict=True,
-                return_metadata=True,
+                return_tensors="pt",
+            )
+            ids = raw["input_ids"][0].tolist()
+            token_id = int(getattr(model_config, "image_token_id", 151655))
+            token_spans = find_contiguous_spans(ids, token_id)
+            grids = raw.get("image_grid_thw")
+            grid_count = int(grids.shape[0]) if grids is not None else 0
+            if len(token_spans) != len(paths) or grid_count != len(paths):
+                raise RuntimeError(
+                    f"Image-sequence span mismatch for {sample['example_id']}: "
+                    f"images={len(paths)}, spans={len(token_spans)}, grids={grid_count}"
+                )
+            from ..attention_eval.masking import ImageSpan
+
+            spans = [
+                ImageSpan(
+                    f"image_t{index}",
+                    path,
+                    int(start),
+                    int(end),
+                    tuple(int(value) for value in grid),
+                )
+                for index, (path, (start, end), grid) in enumerate(
+                    zip(paths, token_spans, grids.tolist())
+                )
+            ]
+            target = spans[-1]
+            source_indices = [
+                int(value) for value in sample["image_source_indices"]
+            ]
+            sampling_record = dict(sample["image_sampling_record"])
+            if (
+                len(source_indices) != len(spans)
+                or source_indices[-1]
+                != int(sampling_record["terminal_source_index"])
+            ):
+                raise RuntimeError(
+                    f"Terminal image alignment failed for {sample['example_id']}"
+                )
+            video_metadata = {
+                **sampling_record,
+                "span_source_frame_indices": [
+                    [value] for value in source_indices
+                ],
+                "target_source_frame_indices": [source_indices[-1]],
+                "independent_image_spans": True,
+            }
+        else:
+            raw, temporal_record = prepare_native_video_processor_input(
+                processor,
+                sample["task"],
+                sample["video_path"],
+                content_order=str(attention.get("content_order", "text_then_video")),
+                temporal_span_mode=str(
+                    attention.get("temporal_span_mode", "native_pairs")
+                ),
             )
             metadata = raw["video_metadata"]
             metadata = metadata[0] if isinstance(metadata, (list, tuple)) else metadata
@@ -504,10 +639,21 @@ def validate_ranking_inputs(config: dict[str, Any]) -> Path:
                 else None
             )
             video_metadata = {
+                **temporal_record,
                 "total_num_frames": total_frames,
                 "frames_indices": frame_indices,
                 "temporal_grid": temporal,
                 "spatial_grid": [height, width],
+                "span_source_frame_indices": (
+                    [
+                        frame_indices[
+                            index * frames_per_span : (index + 1) * frames_per_span
+                        ]
+                        for index in range(temporal)
+                    ]
+                    if frames_per_span
+                    else [None] * (temporal - 1) + [[frame_indices[-1]]]
+                ),
                 "target_source_frame_indices": (
                     frame_indices[-frames_per_span:]
                     if frames_per_span
@@ -515,7 +661,7 @@ def validate_ranking_inputs(config: dict[str, Any]) -> Path:
                 ),
                 "terminal_frame_in_target_span": True,
             }
-        with Image.open(sample["last_image_path"]) as image:
+        with Image.open(target.path) as image:
             image_size = image.size
         target_positions = bbox_to_token_positions(
             target,
@@ -555,6 +701,13 @@ def validate_ranking_inputs(config: dict[str, Any]) -> Path:
             "all_valid": len(records) == len(samples),
             "processor_model_path": str(Path(attention["model_path"]).resolve()),
             "attention_video_max_frames": attention.get("attention_video_max_frames"),
+            "num_images": attention.get("num_images"),
+            "temporal_span_mode": attention.get(
+                "temporal_span_mode", "native_pairs"
+            ),
+            "temporal_bbox_reduce": attention.get(
+                "temporal_bbox_reduce", "last"
+            ),
             "fingerprint": object_fingerprint(records),
         },
     )
@@ -622,7 +775,7 @@ def _ranking_artifact(
 def rank(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
     attention = _section(config)
     output = Path(attention["output_dir"]).resolve()
-    samples_path = build_aligned_ranking_manifest(config)
+    samples_path = build_ranking_manifest(config)
     samples = list(read_jsonl(samples_path))
     records_path = output / "aligned_ranking_mass.jsonl"
     previous = {row.get("example_id"): row for row in read_jsonl(records_path)} if records_path.exists() else {}
@@ -662,7 +815,11 @@ def rank(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
         if row.get("status") != "ok":
             raise RuntimeError(f"Ranking failed for {sample['example_id']}: {row.get('error')}")
         successful[str(sample["ranking_source"])].append(row)
-    source_names = [str(source["name"]) for source in attention["aligned_ranking_sources"]]
+    source_names = (
+        ["mydata_ranking_data"]
+        if attention.get("ranking_grounding_run")
+        else [str(source["name"]) for source in attention["aligned_ranking_sources"]]
+    )
     if set(successful) != set(source_names):
         raise RuntimeError("Ranking did not produce all configured aligned sources")
     artifact_paths: dict[str, list[Path]] = {kind: [] for kind in RANKING_SCORE_KINDS}
@@ -694,6 +851,13 @@ def rank(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
                 "aligned_manifest": str(samples_path),
                 "attention_video_max_frames": attention.get(
                     "attention_video_max_frames"
+                ),
+                "num_images": attention.get("num_images"),
+                "temporal_span_mode": attention.get(
+                    "temporal_span_mode", "native_pairs"
+                ),
+                "temporal_bbox_reduce": attention.get(
+                    "temporal_bbox_reduce", "last"
                 ),
             }
         )
@@ -729,6 +893,7 @@ def _record(
         "schema_version": SCHEMA_VERSION,
         "example_id": sample["example_id"],
         "video_sha256": sample["video_sha256"],
+        "grounding_fingerprint": sample.get("grounding_fingerprint"),
         "subset": sample["subset"],
         "condition": condition,
         "heads": [{"layer": head.layer, "head": head.head} for head in heads],
@@ -740,39 +905,106 @@ def _record(
     }
 
 
+def _completed_conditions(
+    records_path: Path, *, ranking_fingerprint: str
+) -> dict[tuple[str, str], set[str]]:
+    done: dict[tuple[str, str], set[str]] = defaultdict(set)
+    if not records_path.exists():
+        return done
+    latest: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in read_jsonl(records_path):
+        example_id = row.get("example_id")
+        grounding_fingerprint = row.get("grounding_fingerprint")
+        condition = row.get("condition")
+        if not isinstance(example_id, str) or not example_id:
+            continue
+        if not isinstance(grounding_fingerprint, str) or not grounding_fingerprint:
+            continue
+        if row.get("ranking_fingerprint") != ranking_fingerprint:
+            continue
+        if not isinstance(condition, str) or not condition:
+            continue
+        latest[(example_id, grounding_fingerprint, condition)] = row
+    for (example_id, grounding_fingerprint, condition), row in latest.items():
+        if row.get("status") == "ok":
+            done[(example_id, grounding_fingerprint)].add(condition)
+    return done
+
+
 def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
     attention = _section(config)
     output = Path(attention["output_dir"]).resolve()
     samples = list(read_jsonl(build_cohort_manifest(config)))
+    shard_id = int(attention.get("shard_id", 0))
+    num_shards = int(attention.get("num_shards", 1))
+    if num_shards <= 0 or not 0 <= shard_id < num_shards:
+        raise ValueError("Require 0 <= shard_id < num_shards")
+    samples = [
+        sample
+        for sample in samples
+        if stable_shard(str(sample["video_sha256"]), num_shards) == shard_id
+    ]
     ranking_path = Path(attention.get("ranking_path", output / "consensus_ranking.json")).resolve()
-    top_k = int(attention.get("top_k", 8))
-    candidate, ranking_rows, ranking_data = _load_ranking(ranking_path, top_k)
-    low = select_low_ranked_heads(ranking_rows, top_k, candidate)
+    top_values = sorted(
+        {int(value) for value in attention.get("top_k_values", [8, 32, 64])}
+    )
+    if not top_values or top_values[0] < 1:
+        raise ValueError("top_k_values must contain positive integers")
+    _largest, ranking_rows, ranking_data = _load_ranking(ranking_path, max(top_values))
+    ranking_fingerprint = str(ranking_data["fingerprint"])
+    head_sets = {}
+    for top_k in top_values:
+        candidate = [
+            Head(int(row["layer"]), int(row["head"]))
+            for row in ranking_rows[:top_k]
+        ]
+        head_sets[top_k] = (
+            candidate,
+            select_low_ranked_heads(ranking_rows, top_k, candidate),
+        )
     bias = float(attention.get("swap_bias", 6))
     scope = str(attention.get("steering_query_scope", "last_prompt"))
-    records_path = output / "steering.jsonl"
-    done = defaultdict(set)
-    if records_path.exists():
-        for row in read_jsonl(records_path):
-            if row.get("status") == "ok":
-                done[str(row.get("example_id"))].add(str(row.get("condition")))
-    runtime = QwenAttentionRuntime(attention)
+    negative_scope = str(attention.get("negative_scope", "other_spans"))
+    condition_names = [
+        f"{kind}_k{top_k}"
+        for top_k in top_values
+        for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
+    ]
+    records_path = (
+        output / "steering.jsonl"
+        if num_shards == 1
+        else output / f"steering.shard-{shard_id:02d}.jsonl"
+    )
+    done = _completed_conditions(records_path, ranking_fingerprint=ranking_fingerprint)
+    runtime = None
     for sample in samples:
-        required = {"baseline", "candidate_target", "candidate_wrong", "low_rank_target"}
-        if required <= done[sample["example_id"]]:
+        grounding_fingerprint = sample.get("grounding_fingerprint")
+        if not isinstance(grounding_fingerprint, str) or not grounding_fingerprint:
+            raise ValueError(
+                f"Missing grounding_fingerprint for {sample.get('example_id')}"
+            )
+        completion_key = (str(sample["example_id"]), grounding_fingerprint)
+        required = {"baseline", *condition_names}
+        if required <= done[completion_key]:
             continue
         try:
+            if runtime is None:
+                runtime = QwenAttentionRuntime(attention)
             prepared = runtime.prepare(sample)
             target = runtime.target_positions(sample, prepared)
             wrong, wrong_mode = runtime.wrong_control_positions(prepared, target)
-            specs = [
-                ("baseline", (), 0.0, target, "target_reference"),
-                ("candidate_target", candidate, bias, target, "target_reference"),
-                ("candidate_wrong", candidate, bias, wrong, wrong_mode),
-                ("low_rank_target", low, bias, target, "target_reference"),
-            ]
+            specs = [("baseline", (), 0.0, target, "target_reference")]
+            for top_k in top_values:
+                candidate, low = head_sets[top_k]
+                specs.extend(
+                    [
+                        (f"candidate_target_k{top_k}", candidate, bias, target, "target_reference"),
+                        (f"candidate_wrong_k{top_k}", candidate, bias, wrong, wrong_mode),
+                        (f"low_rank_target_k{top_k}", low, bias, target, "target_reference"),
+                    ]
+                )
             for condition, heads, magnitude, positions, control_region in specs:
-                if condition in done[sample["example_id"]]:
+                if condition in done[completion_key]:
                     continue
                 result = runtime.generate(
                     sample,
@@ -782,6 +1014,7 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
                     visual_positions=prepared.visual_positions,
                     bias=magnitude,
                     query_scope=scope,
+                    negative_scope=negative_scope,
                 )
                 append_jsonl(
                     records_path,
@@ -791,7 +1024,7 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
                         heads,
                         magnitude,
                         result,
-                        str(ranking_data["fingerprint"]),
+                        ranking_fingerprint,
                         control_region,
                     ),
                 )
@@ -810,19 +1043,63 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
             )
             if not retry_failed:
                 continue
-    write_json(
-        output / "steering_manifest.json",
-        {
+    manifest = {
             **provenance(sys.argv, config, Path(__file__).resolve().parents[2]),
             "model_fingerprint": artifact_fingerprint(attention["model_path"]),
             "ranking_path": str(ranking_path),
             "ranking_sha256": sha256_file(ranking_path),
             "protocol": attention["protocol"],
             "attention_video_max_frames": attention.get("attention_video_max_frames"),
-            "conditions": ["baseline", "candidate_target", "candidate_wrong", "low_rank_target"],
+            "num_images": attention.get("num_images"),
+            "content_order": attention.get("content_order", "text_then_video"),
+            "temporal_intervention_scope": attention.get(
+                "temporal_intervention_scope", "last_frame"
+            ),
+            "temporal_span_mode": attention.get(
+                "temporal_span_mode", "native_pairs"
+            ),
+            "temporal_bbox_reduce": attention.get(
+                "temporal_bbox_reduce", "last"
+            ),
+            "steering_query_scope": scope,
+            "negative_scope": negative_scope,
+            "top_k_values": top_values,
+            "conditions": ["baseline", *condition_names],
             "labels_model_facing": False,
-        },
+            "shard_id": shard_id,
+            "num_shards": num_shards,
+        }
+    manifest_path = (
+        output / "steering_manifest.json"
+        if num_shards == 1
+        else output / f"steering_manifest.shard-{shard_id:02d}.json"
     )
+    write_json(manifest_path, manifest)
+    if num_shards > 1:
+        shard_paths = [
+            output / f"steering.shard-{index:02d}.jsonl"
+            for index in range(num_shards)
+        ]
+        manifest_paths = [
+            output / f"steering_manifest.shard-{index:02d}.json"
+            for index in range(num_shards)
+        ]
+        if all(path.exists() for path in [*shard_paths, *manifest_paths]):
+            deterministic_merge(shard_paths, output / "steering.jsonl")
+            manifests = [json.loads(path.read_text()) for path in manifest_paths]
+            write_json(
+                output / "steering_manifest.json",
+                {
+                    **manifests[0],
+                    "shards": [
+                        {
+                            "shard_id": item["shard_id"],
+                            "config_fingerprint": item["config_fingerprint"],
+                        }
+                        for item in manifests
+                    ],
+                },
+            )
     return records_path
 
 
@@ -834,7 +1111,7 @@ def _summary(rows: list[dict[str, Any]], labels: dict[str, int], protocol: str) 
             continue
         prediction = (
             int(row["native_prediction"])
-            if protocol == ROBOREWARDBENCH_NATIVE
+            if protocol in DISCRETE_PROTOCOLS
             else progress_to_reward(float(row["progress"]))
         )
         valid.append((str(example_id), prediction, labels[str(example_id)]))
@@ -856,6 +1133,14 @@ def score(config: dict[str, Any]) -> Path:
     attention = _section(config)
     output = Path(attention["output_dir"]).resolve()
     protocol = validate_protocol(str(attention["protocol"]))
+    top_values = sorted(
+        {int(value) for value in attention.get("top_k_values", [8, 32, 64])}
+    )
+    top_conditions = [
+        f"{kind}_k{top_k}"
+        for top_k in top_values
+        for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
+    ]
     expected_ids = _ids(attention["example_ids_file"])
     expected_id_set = set(expected_ids)
     labels = {
@@ -869,7 +1154,7 @@ def score(config: dict[str, Any]) -> Path:
     for row in read_jsonl(output / "steering.jsonl"):
         key = (str(row.get("example_id")), str(row.get("condition")))
         latest[key] = row
-    required_conditions = ("baseline", "candidate_target", "candidate_wrong", "low_rank_target")
+    required_conditions = ("baseline", *top_conditions)
     succeeded_by_id = {
         example_id
         for example_id in expected_id_set
@@ -891,14 +1176,14 @@ def score(config: dict[str, Any]) -> Path:
     def continuous_value(row: dict[str, Any]) -> float:
         return (
             float(row["native_prediction"])
-            if protocol == ROBOREWARDBENCH_NATIVE
+            if protocol in DISCRETE_PROTOCOLS
             else float(row["progress"])
         )
 
     def discrete_prediction(row: dict[str, Any]) -> int:
         return (
             int(row["native_prediction"])
-            if protocol == ROBOREWARDBENCH_NATIVE
+            if protocol in DISCRETE_PROTOCOLS
             else progress_to_reward(float(row["progress"]))
         )
 
@@ -976,6 +1261,21 @@ def score(config: dict[str, Any]) -> Path:
     )
     result = {
         "protocol": protocol,
+        "top_k_values": top_values,
+        "by_top_k": {
+            str(top_k): {
+                "by_condition": {
+                    kind: summaries.get(f"{kind}_k{top_k}", {})
+                    for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
+                },
+                "paired_vs_baseline": {
+                    kind: paired.get(f"{kind}_k{top_k}", {})
+                    for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
+                },
+            }
+            for top_k in top_values
+        },
+        "discrete_output": protocol in DISCRETE_PROTOCOLS,
         "official_native_discrete_output": protocol == ROBOREWARDBENCH_NATIVE,
         "adapter_metric": protocol != ROBOREWARDBENCH_NATIVE,
         "completion": {

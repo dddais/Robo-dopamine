@@ -26,9 +26,9 @@ from ..io import (
 from ..schemas import SCHEMA_VERSION, GroundingRecord, TargetSpec
 from ..video import extract_endpoints
 from .dino import GroundingDINOGrounder
-from .base import select_temporal_pair
+from .base import select_relational_candidate, select_temporal_pair
 from .audit import wilson_interval
-from .parser import InstructionParser, build_queries
+from .parser import SPATIAL_RELATIONS, InstructionParser, build_queries, reference_queries
 from .sam3 import SAM3Grounder
 
 
@@ -59,6 +59,10 @@ def _requested_example_ids(grounding: dict[str, Any]) -> set[str]:
 def _target_from_row(row: dict) -> TargetSpec:
     value = dict(row)
     value.pop("schema_version", None)
+    relation = value.get("relation")
+    if relation not in SPATIAL_RELATIONS:
+        value["relation"] = None
+        value["reference_object"] = None
     value["attributes"] = tuple(value.get("attributes", []))
     value["targets"] = tuple(value.get("targets", []))
     return TargetSpec(**value)
@@ -111,6 +115,90 @@ def _save_mask(candidate: dict, path: Path) -> str | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(path), np.asarray(mask, dtype=np.uint8) * 255)
     return str(path.resolve())
+
+
+def _artifact_key(example_id: str) -> str:
+    """Filesystem-safe instruction key for one-to-many counterfactual videos."""
+    return object_fingerprint({"example_id": example_id})[:20]
+
+
+def _render_tracking_artifacts(
+    video_path: str,
+    tracks: list[dict[str, Any]],
+    output_dir: Path,
+    label: str,
+    *,
+    max_width: int = 960,
+) -> tuple[str, str]:
+    """Write a boxed tracking MP4 and a six-timepoint contact sheet."""
+    if not tracks:
+        raise ValueError("Cannot render an empty track")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    preview_path = output_dir / "tracking_preview.mp4"
+    contact_path = output_dir / "tracking_contact_sheet.jpg"
+    by_frame = {int(row["frame_index"]): row for row in tracks}
+    tracked_indices = sorted(by_frame)
+    wanted = {
+        int(round(value))
+        for value in np.linspace(tracked_indices[0], tracked_indices[-1], num=min(6, len(tracked_indices)))
+    }
+    capture = cv2.VideoCapture(video_path)
+    if not capture.isOpened():
+        raise RuntimeError(f"Cannot decode tracking preview source: {video_path}")
+    source_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    source_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    scale = min(1.0, max_width / max(1, source_width))
+    output_size = (max(1, round(source_width * scale)), max(1, round(source_height * scale)))
+    writer = cv2.VideoWriter(
+        str(preview_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps if fps > 0 else 20.0,
+        output_size,
+    )
+    if not writer.isOpened():
+        capture.release()
+        raise RuntimeError(f"Cannot create tracking preview: {preview_path}")
+    contacts: list[np.ndarray] = []
+    index = 0
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            row = by_frame.get(index)
+            if row is not None:
+                x1, y1, x2, y2 = (round(float(value)) for value in row["bbox"])
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                cv2.putText(
+                    frame,
+                    f"{label}  frame={index}",
+                    (max(4, x1), max(24, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+            resized = cv2.resize(frame, output_size) if scale != 1.0 else frame
+            writer.write(resized)
+            if index in wanted:
+                contacts.append(resized.copy())
+            index += 1
+    finally:
+        capture.release()
+        writer.release()
+    if not contacts:
+        raise RuntimeError("No frames were decoded for tracking contact sheet")
+    cell_width = min(480, output_size[0])
+    cell_height = max(1, round(output_size[1] * cell_width / output_size[0]))
+    cells = [cv2.resize(frame, (cell_width, cell_height)) for frame in contacts]
+    while len(cells) < 6:
+        cells.append(np.full_like(cells[0], 245))
+    sheet = np.vstack((np.hstack(cells[:3]), np.hstack(cells[3:6])))
+    if not cv2.imwrite(str(contact_path), sheet):
+        raise RuntimeError(f"Cannot write tracking contact sheet: {contact_path}")
+    return str(preview_path.resolve()), str(contact_path.resolve())
 
 
 def run_grounding(
@@ -169,6 +257,13 @@ def run_grounding(
         if target is None:
             continue
         queries = build_queries(target)
+        ref_queries = reference_queries(target)
+        artifact_key = _artifact_key(episode.example_id)
+        track_path = None
+        tracking_preview_path = None
+        tracking_contact_sheet_path = None
+        tracking_preview_error = None
+        reference_selected = None
         try:
             frames = extract_endpoints(
                 episode.example_id,
@@ -176,6 +271,29 @@ def run_grounding(
                 episode.video_path,
                 run_dir / "frames" / episode.video_sha256,
             )
+            view_endpoints = {
+                "front": {
+                    "first": frames.first_path,
+                    "last": frames.last_path,
+                    "first_index": frames.first_index,
+                    "last_index": frames.last_index,
+                }
+            }
+            for camera, view_video_path in episode.views.items():
+                if camera == "front":
+                    continue
+                view_frames = extract_endpoints(
+                    episode.example_id,
+                    episode.video_sha256,
+                    view_video_path,
+                    run_dir / "frames" / episode.video_sha256 / camera,
+                )
+                view_endpoints[camera] = {
+                    "first": view_frames.first_path,
+                    "last": view_frames.last_path,
+                    "first_index": view_frames.first_index,
+                    "last_index": view_frames.last_index,
+                }
         except Exception as exc:
             for frame_name in ("first", "last"):
                 append_jsonl(
@@ -210,6 +328,94 @@ def run_grounding(
                 candidates_by_frame = {"first": [], "last": []}
                 selected_by_frame = {"first": None, "last": None}
                 selection_reason = "dry_run"
+            elif backend == "sam3" and bool(backend_config.get("tracking", True)):
+                first_candidates = grounder.candidates(frames.first_path, queries)
+                if target.relation:
+                    reference_candidates = grounder.candidates(
+                        frames.first_path, ref_queries
+                    )
+                    first_selected, reference_selected, relation_reason = (
+                        select_relational_candidate(
+                            frames.first_path,
+                            first_candidates,
+                            reference_candidates,
+                            target.relation,
+                        )
+                    )
+                else:
+                    reference_candidates = []
+                    first_selected = grounder.select(
+                        frames.first_path, first_candidates, len(queries)
+                    )
+                    relation_reason = "first_frame_open_vocabulary_detection"
+                tracks = (
+                    grounder.track(
+                        episode.video_path,
+                        first_selected["bbox"],
+                        frames.first_index,
+                    )
+                    if first_selected is not None
+                    else []
+                )
+                track_by_frame = {int(row["frame_index"]): row for row in tracks}
+                last_selected = track_by_frame.get(frames.last_index)
+                candidates_by_frame = {
+                    "first": first_candidates,
+                    "last": [last_selected] if last_selected is not None else [],
+                }
+                selected_by_frame = {
+                    "first": first_selected,
+                    "last": last_selected,
+                }
+                selection_reason = f"{relation_reason}_then_sam3_box_tracking"
+                track_dir = run_dir / "tracks" / episode.video_sha256 / artifact_key
+                serializable_tracks = [
+                    {key: value for key, value in row.items() if key != "_mask"}
+                    for row in tracks
+                ]
+                track_path_obj = track_dir / "track.json"
+                write_json(
+                    track_path_obj,
+                    {
+                        "example_id": episode.example_id,
+                        "video_sha256": episode.video_sha256,
+                        "anchor_bbox": first_selected.get("bbox") if first_selected else None,
+                        "anchor_frame_index": frames.first_index,
+                        "terminal_frame_index": frames.last_index,
+                        "relation": target.relation,
+                        "reference_queries": ref_queries,
+                        "reference_candidate": {
+                            key: value
+                            for key, value in (reference_selected or {}).items()
+                            if key != "_mask"
+                        }
+                        or None,
+                        "frames": serializable_tracks,
+                    },
+                )
+                track_path = str(track_path_obj.resolve())
+                if tracks and bool(backend_config.get("tracking_preview", True)):
+                    try:
+                        tracking_preview_path, tracking_contact_sheet_path = (
+                            _render_tracking_artifacts(
+                                episode.video_path,
+                                tracks,
+                                track_dir,
+                                target.target_phrase,
+                                max_width=int(
+                                    backend_config.get(
+                                        "tracking_preview_max_width", 960
+                                    )
+                                ),
+                            )
+                        )
+                    except Exception as preview_exc:
+                        # A missing MP4 codec must not turn a valid bbox track
+                        # into an invalid grounding sample. The JSON track and
+                        # endpoint visualizations remain reviewable.
+                        tracking_preview_error = (
+                            f"{type(preview_exc).__name__}: {preview_exc}"
+                        )
             else:
                 candidates_by_frame = {
                     frame_name: grounder.candidates(image_path, queries)
@@ -255,7 +461,11 @@ def run_grounding(
                 if selected is not None:
                     mask_path = _save_mask(
                         selected,
-                        run_dir / "masks" / episode.video_sha256 / f"{frame_name}.png",
+                        run_dir
+                        / "masks"
+                        / episode.video_sha256
+                        / artifact_key
+                        / f"{frame_name}.png",
                     )
                 record_payload = {
                     "example_id": episode.example_id,
@@ -281,7 +491,22 @@ def run_grounding(
                         "image_path": image_path,
                         "task": episode.task,
                         "video_path": episode.video_path,
+                        "view_paths": episode.views,
+                        "view_endpoint_paths": view_endpoints,
                         "target_phrase": target.target_phrase,
+                        "relation": target.relation,
+                        "reference_object": target.reference_object,
+                        "reference_queries": ref_queries,
+                        "reference_candidate": {
+                            key: value
+                            for key, value in (reference_selected or {}).items()
+                            if key != "_mask"
+                        }
+                        or None,
+                        "tracking_path": track_path,
+                        "tracking_preview_path": tracking_preview_path,
+                        "tracking_contact_sheet_path": tracking_contact_sheet_path,
+                        "tracking_preview_error": tracking_preview_error,
                     },
                     "status": "dry_run" if dry_run else ("ok" if selected else "no_detection"),
                 }
@@ -292,7 +517,11 @@ def run_grounding(
                     image_path,
                     record.bbox,
                     target.target_phrase,
-                    run_dir / "visualizations" / episode.video_sha256 / f"{frame_name}.jpg",
+                    run_dir
+                    / "visualizations"
+                    / episode.video_sha256
+                    / artifact_key
+                    / f"{frame_name}.jpg",
                 )
             except Exception as exc:
                 append_jsonl(

@@ -144,6 +144,69 @@ def native_endpoint_payload(
     return payload
 
 
+def multiview_endpoint_payload(
+    episode: EpisodeRecord,
+    frames_by_view: dict[str, FrameRecord],
+    blank_goal: str | Path,
+    *,
+    prompt_mode: str = "official",
+    eval_mode: str = "forward",
+    before_paths: dict[str, str] | None = None,
+    after_paths: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build the eight-slot GRM payload from real front/left/right views."""
+    missing = {"front", "left_wrist", "right_wrist"} - set(frames_by_view)
+    if missing:
+        raise ValueError(f"Missing required endpoint views: {sorted(missing)}")
+    if eval_mode not in {"forward", "incremental"}:
+        raise ValueError("eval_mode must be 'forward' or 'incremental'")
+    if before_paths is not None:
+        missing_before = {"front", "left_wrist", "right_wrist"} - set(before_paths)
+        if missing_before:
+            raise ValueError(f"Missing before image views: {sorted(missing_before)}")
+    if after_paths is not None:
+        missing_after = {"front", "left_wrist", "right_wrist"} - set(after_paths)
+        if missing_after:
+            raise ValueError(f"Missing after image views: {sorted(missing_after)}")
+    front = frames_by_view["front"]
+    left = frames_by_view["left_wrist"]
+    right = frames_by_view["right_wrist"]
+    blank = str(Path(blank_goal).resolve())
+    if not Path(blank).is_file():
+        raise FileNotFoundError(blank)
+    before = before_paths or {
+        "front": front.first_path,
+        "left_wrist": left.first_path,
+        "right_wrist": right.first_path,
+    }
+    after = after_paths or {
+        "front": front.last_path,
+        "left_wrist": left.last_path,
+        "right_wrist": right.last_path,
+    }
+    payload = episode.model_payload()
+    payload.update(
+        {
+            "protocol": f"native_endpoint_{eval_mode}_multiview_v1",
+            "eval_mode": eval_mode,
+            "image": [
+                front.first_path,
+                blank,
+                before["front"],
+                before["left_wrist"],
+                before["right_wrist"],
+                after["front"],
+                after["left_wrist"],
+                after["right_wrist"],
+            ],
+            "image_labels": list(IMAGE_LABELS),
+            "prompt_mode": prompt_mode,
+            "prompt": system_prompt(prompt_mode).format(task=episode.task),
+        }
+    )
+    return payload
+
+
 def chat_messages(task: str, prompt_mode: str = "simplified") -> list[dict[str, Any]]:
     chunks = system_prompt(prompt_mode).format(task=task).split("<image>")
     content: list[dict[str, str]] = []
@@ -202,6 +265,42 @@ def parse_score(text: str) -> float:
 
 def progress(signed_score: float) -> float:
     return min(1.0, max(0.0, float(signed_score)))
+
+
+def official_incremental_indices(last_frame_index: int, frame_interval: int) -> list[int]:
+    """Match ``examples/inference.py`` fixed-interval sampling exactly.
+
+    ``last_frame_index`` is the inclusive terminal frame index, whereas the
+    reference helper accepts a frame count.  The terminal frame is appended
+    when it is not already an interval boundary.
+    """
+    terminal = int(last_frame_index)
+    interval = int(frame_interval)
+    if terminal < 0:
+        return []
+    if interval < 1:
+        raise ValueError("frame_interval must be positive")
+    indices = list(range(0, terminal + 1, interval))
+    if not indices or indices[-1] != terminal:
+        indices.append(terminal)
+    return indices
+
+
+def accumulate_incremental_progress(previous: float | None, hop_score: float) -> float:
+    """Apply the official GRM incremental accumulation recurrence.
+
+    The first hop is used directly, including a possible negative value.  This
+    intentionally does not clamp: it is byte-for-byte semantic parity with the
+    post-processing in ``examples/inference.py`` and preserves diagnostics for
+    out-of-range trajectories.
+    """
+    hop = float(hop_score)
+    if previous is None:
+        return hop
+    prior = float(previous)
+    if hop >= 0:
+        return prior + (1.0 - prior) * hop
+    return prior + prior * hop
 
 
 def progress_to_reward(value: float) -> int:

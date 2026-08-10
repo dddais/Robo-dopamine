@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from .data import load_episodes
-from .io import object_fingerprint, provenance, sha256_file, write_json, write_jsonl
+from .io import (
+    object_fingerprint,
+    provenance,
+    read_jsonl,
+    sha256_file,
+    write_json,
+    write_jsonl,
+)
 
 
 def freeze_reward_cohort(
@@ -52,7 +59,11 @@ def freeze_reward_cohort(
         "source_reward_used_only_for_offline_selection": reward,
         "selected_count": len(records),
         "selected_subsets": dict(sorted(Counter(row.subset for row in records).items())),
-        "source_metadata_sha256": sha256_file(root / split / "metadata.jsonl"),
+        "source_metadata_sha256": sha256_file(
+            root / "metadata.jsonl"
+            if (root / "metadata.jsonl").is_file()
+            else root / split / "metadata.jsonl"
+        ),
         "model_safe_episode_manifest": str(episodes_path),
         "model_safe_episode_manifest_fingerprint": object_fingerprint(model_safe_rows),
         "example_ids_file": str(ids_path),
@@ -69,26 +80,152 @@ def freeze_reward_cohort(
     return summary
 
 
+def freeze_audited_cohort(
+    dataset_root: str | Path,
+    audit_final: str | Path,
+    output_dir: str | Path,
+    *,
+    split: str = "all",
+) -> dict[str, Any]:
+    """Freeze every human-audited, formally eligible grounding example."""
+    root = Path(dataset_root).resolve()
+    audit_path = Path(audit_final).resolve()
+    destination = Path(output_dir).resolve()
+    eligible = {
+        str(row["example_id"])
+        for row in read_jsonl(audit_path)
+        if row.get("formal_eligible") is True
+    }
+    episodes = {
+        episode.example_id: episode
+        for episode in load_episodes(root, split)
+    }
+    missing = eligible - set(episodes)
+    if missing:
+        raise ValueError(f"Audit contains unknown dataset IDs: {sorted(missing)[:5]}")
+    rows = [episodes[example_id].model_payload() for example_id in sorted(eligible)]
+    destination.mkdir(parents=True, exist_ok=True)
+    episodes_path = destination / "episodes.jsonl"
+    ids_path = destination / "example_ids.json"
+    write_jsonl(episodes_path, rows)
+    write_json(ids_path, [row["example_id"] for row in rows])
+    summary = {
+        "cohort": "human_audited_formal_grounding",
+        "selection_rule": "audit_final.formal_eligible is true",
+        "dataset_root": str(root),
+        "split": split,
+        "selected_count": len(rows),
+        "audit_final": str(audit_path),
+        "audit_final_sha256": sha256_file(audit_path),
+        "model_safe_episode_manifest": str(episodes_path),
+        "model_safe_episode_manifest_fingerprint": object_fingerprint(rows),
+        "example_ids_file": str(ids_path),
+        "labels_model_facing": False,
+    }
+    write_json(destination / "cohort_summary.json", summary)
+    write_json(
+        destination / "cohort_manifest.json",
+        {**provenance(sys.argv, {}, Path(__file__).resolve().parents[1]), "summary": summary},
+    )
+    return summary
+
+
+def freeze_auto_grounded_cohort(
+    dataset_root: str | Path,
+    grounding_run: str | Path,
+    output_dir: str | Path,
+    *,
+    split: str = "all",
+) -> dict[str, Any]:
+    """Freeze examples whose automatic SAM3 tracking has both endpoints."""
+    root = Path(dataset_root).resolve()
+    run = Path(grounding_run).resolve()
+    records_path = run / "grounding.jsonl"
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in read_jsonl(records_path):
+        example_id = row.get("example_id")
+        frame = row.get("frame")
+        if isinstance(example_id, str) and frame in {"first", "last"}:
+            latest[(example_id, frame)] = row
+    endpoint_ok: dict[str, set[str]] = {}
+    for (example_id, frame), row in latest.items():
+        if row.get("status") == "ok":
+            endpoint_ok.setdefault(example_id, set()).add(frame)
+    eligible = {
+        example_id
+        for example_id, frames in endpoint_ok.items()
+        if frames == {"first", "last"}
+    }
+    episodes = {
+        episode.example_id: episode for episode in load_episodes(root, split)
+    }
+    unknown = eligible - set(episodes)
+    if unknown:
+        raise ValueError(f"Grounding contains unknown dataset IDs: {sorted(unknown)[:5]}")
+    rows = [episodes[example_id].model_payload() for example_id in sorted(eligible)]
+    destination = Path(output_dir).resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    episodes_path = destination / "episodes.jsonl"
+    ids_path = destination / "example_ids.json"
+    write_jsonl(episodes_path, rows)
+    write_json(ids_path, [row["example_id"] for row in rows])
+    summary = {
+        "cohort": "automatic_sam3_tracking_dual_endpoint",
+        "selection_rule": "latest automatic grounding status is ok at first and last endpoints",
+        "dataset_root": str(root),
+        "split": split,
+        "selected_count": len(rows),
+        "grounding_run": str(run),
+        "grounding_records_sha256": sha256_file(records_path),
+        "model_safe_episode_manifest": str(episodes_path),
+        "model_safe_episode_manifest_fingerprint": object_fingerprint(rows),
+        "example_ids_file": str(ids_path),
+        "labels_model_facing": False,
+        "human_audit_completed": False,
+        "automatic_tracking_assumed_correct_by_experiment_plan": True,
+    }
+    write_json(destination / "cohort_summary.json", summary)
+    write_json(destination / "cohort_manifest.json", {**provenance(sys.argv, {}, Path(__file__).resolve().parents[1]), "summary": summary})
+    return summary
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="python rewardbench/prepare_reward_cohort.py",
+        prog="python mydata_bench/prepare_reward_cohort.py",
         description="Freeze a full source-reward cohort before grounding or inference.",
     )
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--reward", required=True, type=int)
+    selector = parser.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--reward", type=int)
+    selector.add_argument("--audit-final")
+    selector.add_argument("--grounding-run")
     parser.add_argument("--split", default="test")
     parser.add_argument("--expected-count", type=int)
     args = parser.parse_args(argv)
-    print(
-        freeze_reward_cohort(
+    if args.grounding_run:
+        result = freeze_auto_grounded_cohort(
+            args.dataset_root,
+            args.grounding_run,
+            args.output_dir,
+            split=args.split,
+        )
+    elif args.audit_final:
+        result = freeze_audited_cohort(
+            args.dataset_root,
+            args.audit_final,
+            args.output_dir,
+            split=args.split,
+        )
+    else:
+        result = freeze_reward_cohort(
             args.dataset_root,
             args.output_dir,
             reward=args.reward,
             split=args.split,
             expected_count=args.expected_count,
-        )["model_safe_episode_manifest"]
-    )
+        )
+    print(result["model_safe_episode_manifest"])
 
 
 if __name__ == "__main__":

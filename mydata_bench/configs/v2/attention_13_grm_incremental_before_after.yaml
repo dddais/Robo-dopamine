@@ -1,0 +1,44 @@
+experiment_id: attention_13_grm_incremental_before_after
+attention_eval:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2/attention_13_grm_incremental_before_after
+  grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2/sam3
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/cohorts/auto_grounded_v2/example_ids.json
+  eligibility_mode: auto_valid_grounding
+  model_path: /home/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  prompt_mode: official
+  eval_mode: incremental
+  frame_interval: 20
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2/attention_13_grm_incremental_before_after/in_domain_ranking.json
+  ranking_metadata_file: /home/dais/workspace/data/mydata_v2/new/ranking_data.jsonl
+  ranking_grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/ranking_grounding_v2/sam3
+  ranking_split: suc
+  ranking_expected_source_count: 36
+  ranking_require_complete_grounding: false
+  intervention_location: before_after_cam_high
+  steering_partition: all_eligible
+  seed: 20260805
+  discovery_fraction: 0.3333333333333333
+  num_layers: 36
+  num_heads: 32
+  skip_early_layers: 8
+  top_k: 8
+  top_k_values: [8, 32, 64]
+  swap_bias: 6
+  steering_query_scope: all
+  negative_scope: target_span
+  run_sensitivity: false
+  query_scope_sensitivity: []
+  automatic_tracking_assumed_correct: true
+  include_all_heads_control: false
+  run_duplicate_location_sensitivity: false
+  run_paired: false
+  top_k_sensitivity: [8, 64]
+  bias_sensitivity: [0, 2, 4, 6]
+  dtype: bfloat16
+  device_map: auto
+  min_pixels: 12544
+  max_pixels: 76800
+  max_new_tokens: 16

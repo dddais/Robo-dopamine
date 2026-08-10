@@ -12,13 +12,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rewardbench.attention_eval.stats import (
+from mydata_bench.attention_eval.stats import (
     exact_mcnemar_pvalue,
     paired_cluster_bootstrap,
     paired_sign_flip_pvalue,
 )
-from rewardbench.io import object_fingerprint, read_jsonl, sha256_file, write_json
-from rewardbench.protocol import progress, progress_to_reward
+from mydata_bench.io import object_fingerprint, read_jsonl, sha256_file, write_json
+from mydata_bench.protocol import progress, progress_to_reward
 
 
 CONDITIONS = (

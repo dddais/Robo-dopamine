@@ -1,0 +1,20 @@
+experiment_id: baseline_05_grm_forward
+raw_eval:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2/baseline_05_grm_forward
+  model_path: /home/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  prompt_mode: official
+  eval_mode: forward
+  frame_interval: 20
+  min_pixels: 12544
+  max_pixels: 76800
+  max_model_len: 8192
+  temperature: 0.1
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 1024
+  gpu_memory_utilization: 0.9
+  shard_id: 0
+  num_shards: 1

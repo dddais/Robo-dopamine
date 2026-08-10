@@ -9,7 +9,11 @@ from ..data import inventory as build_inventory
 from ..data import load_episodes
 from ..io import latest_by_id, read_jsonl, write_json
 from ..metrics import clustered_stratified_bootstrap, compute_metrics
-from .protocols import ROBOREWARDBENCH_NATIVE, validate_protocol
+from .protocols import (
+    DISCRETE_PROTOCOLS,
+    ROBOREWARDBENCH_NATIVE,
+    validate_protocol,
+)
 from .runner import requested_example_ids, run
 
 
@@ -55,6 +59,7 @@ def _score(run_dir: Path, bootstrap_samples: int) -> dict:
         {
             "model_family": "Qwen3-VL-8B-Instruct",
             "protocol": protocol,
+            "discrete_output": protocol in DISCRETE_PROTOCOLS,
             "official_native_discrete_output": protocol == ROBOREWARDBENCH_NATIVE,
             "adapter_metric": protocol != ROBOREWARDBENCH_NATIVE,
             "completion": completion,
@@ -84,7 +89,7 @@ def _score(run_dir: Path, bootstrap_samples: int) -> dict:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="python rewardbench/run_qwen_eval.py")
+    root = argparse.ArgumentParser(prog="python mydata_bench/run_qwen_eval.py")
     commands = root.add_subparsers(dest="command", required=True)
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--config", required=True)
@@ -92,6 +97,8 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--config", required=True)
     run_parser.add_argument("--dry-run", action="store_true")
     run_parser.add_argument("--retry-failed", action="store_true")
+    run_parser.add_argument("--shard-id", type=int)
+    run_parser.add_argument("--num-shards", type=int)
     score = commands.add_parser("score")
     score.add_argument("--run-dir", required=True)
     score.add_argument("--bootstrap-samples", type=int, default=10_000)
@@ -113,6 +120,13 @@ def main(argv: list[str] | None = None) -> None:
             )
             print(output)
         else:
+            if (args.shard_id is None) != (args.num_shards is None):
+                raise ValueError("--shard-id and --num-shards must be provided together")
+            if args.shard_id is not None:
+                if args.num_shards <= 0 or not 0 <= args.shard_id < args.num_shards:
+                    raise ValueError("Require 0 <= shard-id < num-shards")
+                evaluation["shard_id"] = args.shard_id
+                evaluation["num_shards"] = args.num_shards
             print(run(config, dry_run=args.dry_run, retry_failed=args.retry_failed))
     else:
         metrics = _score(Path(args.run_dir).resolve(), args.bootstrap_samples)

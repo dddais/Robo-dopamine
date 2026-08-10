@@ -8,7 +8,7 @@ from .pairs import prepare, run, score
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="python rewardbench/run_paired_raw_eval.py")
+    root = argparse.ArgumentParser(prog="python mydata_bench/run_paired_raw_eval.py")
     commands = root.add_subparsers(dest="command", required=True)
     for name in ("prepare", "run"):
         item = commands.add_parser(name)

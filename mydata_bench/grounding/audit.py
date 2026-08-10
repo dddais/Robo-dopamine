@@ -69,13 +69,13 @@ def _visualization_order(run_dir: Path, rows: list[dict]) -> dict[str, int]:
 
 
 def _audit_visualization_path(run_dir: Path, row: dict) -> Path:
-    side = str(row["example_id"]).rsplit("/", 1)[-1]
+    instruction_key = object_fingerprint({"example_id": row["example_id"]})[:20]
     return (
         run_dir
         / "visualizations"
         / str(row["video_sha256"])
         / "by_instruction"
-        / side
+        / instruction_key
         / f"{row['frame']}.jpg"
     )
 
@@ -119,6 +119,13 @@ def create_template(run_dir: Path, rows: list[dict]) -> Path:
                 "grounding_fingerprint": grounding_fingerprint(sample),
                 "instruction": sample[0].get("provenance", {}).get("task"),
                 "video_path": sample[0].get("provenance", {}).get("video_path"),
+                "tracking_path": sample[0].get("provenance", {}).get("tracking_path"),
+                "tracking_preview_path": sample[0]
+                .get("provenance", {})
+                .get("tracking_preview_path"),
+                "tracking_contact_sheet_path": sample[0]
+                .get("provenance", {})
+                .get("tracking_contact_sheet_path"),
                 "endpoints": {
                     row["frame"]: {
                         "image_path": row.get("provenance", {}).get("image_path"),

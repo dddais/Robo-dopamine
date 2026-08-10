@@ -31,3 +31,8 @@ python rewardbench/run_roboreward_eval.py score \
 论文没有公开独立 benchmark evaluator；因此该实现是对已发表统计定义的可审计复现，而不是对
 未公开官方代码的声称性复刻。配置保留 checkpoint 原生 MP4 processor，避免把论文数据构建的
 1 FPS 描述误作推理输入规定。
+# Legacy reference
+
+This file was copied with rewardbench. For the new dataset, use
+mydata_bench/exp_use.md and the mydata_*.yaml configurations; commands below
+refer to historical rewardbench runs.

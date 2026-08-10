@@ -11,7 +11,7 @@ from .video import run_video
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="python rewardbench/run_attention_eval.py")
+    root = argparse.ArgumentParser(prog="python mydata_bench/run_attention_eval.py")
     commands = root.add_subparsers(dest="command", required=True)
     prepare_parser = commands.add_parser("prepare")
     prepare_parser.add_argument("--config", required=True)
@@ -24,6 +24,8 @@ def parser() -> argparse.ArgumentParser:
     steer_parser.add_argument("--config", required=True)
     steer_parser.add_argument("--dry-run", action="store_true")
     steer_parser.add_argument("--retry-failed", action="store_true")
+    steer_parser.add_argument("--shard-id", type=int)
+    steer_parser.add_argument("--num-shards", type=int)
     metrics_parser = commands.add_parser("metrics")
     metrics_parser.add_argument("--run-dir", required=True)
     metrics_parser.add_argument("--config")
@@ -68,9 +70,17 @@ def main(argv: list[str] | None = None) -> None:
             )
         )
     elif args.command == "steer":
+        config = load_config(args.config)
+        if (args.shard_id is None) != (args.num_shards is None):
+            raise ValueError("--shard-id and --num-shards must be provided together")
+        if args.shard_id is not None:
+            if args.num_shards <= 0 or not 0 <= args.shard_id < args.num_shards:
+                raise ValueError("Require 0 <= shard-id < num-shards")
+            config["attention_eval"]["shard_id"] = args.shard_id
+            config["attention_eval"]["num_shards"] = args.num_shards
         print(
             steer(
-                load_config(args.config),
+                config,
                 dry_run=args.dry_run,
                 retry_failed=args.retry_failed,
             )
