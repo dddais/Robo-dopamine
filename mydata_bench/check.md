@@ -5,6 +5,8 @@ attention mask相关：
 3.ranking head是否排除了前n层
 4.ranking head用的指标是 raw mass还是什么
 5.ranking head用的是last_prompt token还是 decode token
+6.wrong region是怎么选取的
+7.+bias施加的target img token是最后一帧的bbox区域还是所有帧的bbox区域，-bias的施加的target img token是最后一帧的非bbox区域还是所有帧的非bbox区域
 
 baseline相关：
 1.text video的输入顺序

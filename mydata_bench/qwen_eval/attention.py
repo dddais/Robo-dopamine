@@ -40,9 +40,11 @@ from .protocols import (
     DISCRETE_PROTOCOLS,
     ROBO_DOPAMINE_FORWARD,
     ROBOREWARDBENCH_IMAGE_SEQUENCE,
+    ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
     ROBOREWARDBENCH_NATIVE,
     dopamine_forward_messages,
     image_sequence_messages,
+    interleaved_image_sequence_messages,
     parse_protocol_output,
     validate_protocol,
 )
@@ -303,17 +305,19 @@ class QwenAttentionRuntime:
         self.torch = torch
         self.config = dict(config)
         self.protocol = validate_protocol(str(config["protocol"]))
-        default_order = (
-            "text_then_images"
-            if self.protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE
-            else "text_then_video"
-        )
+        if self.protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+            default_order = "text_then_images"
+        elif self.protocol == ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE:
+            default_order = "interleaved"
+        else:
+            default_order = "text_then_video"
         self.content_order = str(config.get("content_order", default_order))
-        valid_orders = (
-            {"text_then_images", "images_then_text"}
-            if self.protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE
-            else {"text_then_video", "video_then_text"}
-        )
+        if self.protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+            valid_orders = {"text_then_images", "images_then_text"}
+        elif self.protocol == ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE:
+            valid_orders = {"interleaved"}
+        else:
+            valid_orders = {"text_then_video", "video_then_text"}
         if self.protocol != ROBO_DOPAMINE_FORWARD and self.content_order not in valid_orders:
             raise ValueError(
                 f"Unknown attention content_order {self.content_order!r} for "
@@ -458,10 +462,15 @@ class QwenAttentionRuntime:
         missing = [path for path in paths if not Path(path).is_file()]
         if missing:
             raise FileNotFoundError(f"Missing image-sequence inputs: {missing}")
-        inputs = self.processor.apply_chat_template(
-            image_sequence_messages(
+        messages = (
+            interleaved_image_sequence_messages(sample["task"], paths)
+            if self.protocol == ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE
+            else image_sequence_messages(
                 sample["task"], paths, content_order=self.content_order
-            ),
+            )
+        )
+        inputs = self.processor.apply_chat_template(
+            messages,
             tokenize=True,
             add_generation_prompt=True,
             return_dict=True,
@@ -609,7 +618,10 @@ class QwenAttentionRuntime:
     def prepare(self, sample: dict[str, Any]) -> PreparedAttentionInput:
         if self.protocol == ROBO_DOPAMINE_FORWARD:
             return self._prepare_forward(sample)
-        if self.protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+        if self.protocol in {
+            ROBOREWARDBENCH_IMAGE_SEQUENCE,
+            ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
+        }:
             return self._prepare_image_sequence(sample)
         return self._prepare_native(sample)
 
@@ -618,7 +630,10 @@ class QwenAttentionRuntime:
             size = image.size
         if prepared.protocol == ROBO_DOPAMINE_FORWARD:
             selected = [(prepared.target_span, sample["last_bbox"], None)]
-        elif prepared.protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+        elif prepared.protocol in {
+            ROBOREWARDBENCH_IMAGE_SEQUENCE,
+            ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
+        }:
             metadata = prepared.video_metadata or {}
             source_indices = [
                 int(values[0])

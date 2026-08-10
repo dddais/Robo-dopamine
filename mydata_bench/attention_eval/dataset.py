@@ -12,6 +12,13 @@ from ..video import extract_uniform_image_sequence
 
 
 IMAGE_SEQUENCE_PROTOCOL = "roborewardbench_image_sequence"
+INTERLEAVED_IMAGE_SEQUENCE_PROTOCOL = (
+    "roborewardbench_interleaved_image_sequence"
+)
+IMAGE_SEQUENCE_PROTOCOLS = {
+    IMAGE_SEQUENCE_PROTOCOL,
+    INTERLEAVED_IMAGE_SEQUENCE_PROTOCOL,
+}
 
 
 def _latest_ok_endpoints(rows: Any) -> dict[str, dict[str, dict]]:
@@ -128,7 +135,7 @@ def prepare_grounded_ranking_samples(
                 views["left_wrist"]["last"],
                 views["right_wrist"]["last"],
             ]
-        elif str(attention.get("protocol")) == IMAGE_SEQUENCE_PROTOCOL:
+        elif str(attention.get("protocol")) in IMAGE_SEQUENCE_PROTOCOLS:
             image_paths, sampling_record = extract_uniform_image_sequence(
                 episode.video_path,
                 Path(output_path).resolve().parent
@@ -169,7 +176,10 @@ def prepare_grounded_ranking_samples(
             ),
             "labels_model_facing": False,
             "input_representation": (
-                "uniform_independent_images_v1"
+                "uniform_interleaved_images_v1"
+                if str(attention.get("protocol"))
+                == INTERLEAVED_IMAGE_SEQUENCE_PROTOCOL
+                else "uniform_independent_images_v1"
                 if str(attention.get("protocol")) == IMAGE_SEQUENCE_PROTOCOL
                 else None
             ),

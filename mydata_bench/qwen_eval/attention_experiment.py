@@ -59,11 +59,14 @@ from .attention import (
 )
 from .protocols import (
     DISCRETE_PROTOCOLS,
+    IMAGE_SEQUENCE_PROTOCOLS,
     ROBO_DOPAMINE_FORWARD,
     ROBOREWARDBENCH_IMAGE_SEQUENCE,
+    ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
     ROBOREWARDBENCH_NATIVE,
     dopamine_forward_messages,
     image_sequence_messages,
+    interleaved_image_sequence_messages,
     validate_protocol,
 )
 
@@ -342,7 +345,7 @@ def build_ranking_manifest(config: dict[str, Any]) -> Path:
         return prepare_grounded_ranking_samples(
             attention, output / "grounded_ranking_inputs.jsonl"
         )
-    if str(attention.get("protocol")) == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+    if str(attention.get("protocol")) in IMAGE_SEQUENCE_PROTOCOLS:
         raise ValueError(
             "Image-sequence ranking requires ranking_grounding_run so sampled "
             "source-frame indices and tracking boxes remain aligned"
@@ -431,7 +434,7 @@ def build_cohort_manifest(config: dict[str, Any]) -> Path:
                 views["left_wrist"]["last"],
                 views["right_wrist"]["last"],
             ]
-        elif str(attention["protocol"]) == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+        elif str(attention["protocol"]) in IMAGE_SEQUENCE_PROTOCOLS:
             image_paths, sampling_record = extract_uniform_image_sequence(
                 episode.video_path,
                 output / "image_sequences" / "cohort" / episode.video_sha256,
@@ -456,9 +459,11 @@ def build_cohort_manifest(config: dict[str, Any]) -> Path:
             "grounding_audit": str(audit_path) if audit_path is not None else None,
             "automatic_tracking_assumed_correct": eligibility_mode == "auto_valid_grounding",
             "input_representation": (
-                "uniform_independent_images_v1"
+                "uniform_interleaved_images_v1"
                 if str(attention["protocol"])
-                == ROBOREWARDBENCH_IMAGE_SEQUENCE
+                == ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE
+                else "uniform_independent_images_v1"
+                if str(attention["protocol"]) == ROBOREWARDBENCH_IMAGE_SEQUENCE
                 else None
             ),
             "num_images": attention.get("num_images"),
@@ -525,16 +530,21 @@ def validate_ranking_inputs(config: dict[str, Any]) -> Path:
                 raise RuntimeError(
                     f"Processor target path mismatch for {sample['example_id']}"
                 )
-        elif protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+        elif protocol in IMAGE_SEQUENCE_PROTOCOLS:
             paths = [str(Path(path).resolve()) for path in sample["image_paths"]]
-            raw = processor.apply_chat_template(
-                image_sequence_messages(
+            messages = (
+                interleaved_image_sequence_messages(sample["task"], paths)
+                if protocol == ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE
+                else image_sequence_messages(
                     sample["task"],
                     paths,
                     content_order=str(
                         attention.get("content_order", "text_then_images")
                     ),
-                ),
+                )
+            )
+            raw = processor.apply_chat_template(
+                messages,
                 tokenize=True,
                 add_generation_prompt=True,
                 return_dict=True,

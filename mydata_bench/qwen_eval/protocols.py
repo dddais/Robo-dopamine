@@ -19,16 +19,88 @@ from ..schemas import EpisodeRecord, FrameRecord
 
 ROBOREWARDBENCH_NATIVE = "roborewardbench_native"
 ROBOREWARDBENCH_IMAGE_SEQUENCE = "roborewardbench_image_sequence"
+ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE = (
+    "roborewardbench_interleaved_image_sequence"
+)
 ROBO_DOPAMINE_FORWARD = "robo_dopamine_forward"
 PROTOCOLS = {
     ROBOREWARDBENCH_NATIVE,
     ROBOREWARDBENCH_IMAGE_SEQUENCE,
+    ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
     ROBO_DOPAMINE_FORWARD,
 }
 DISCRETE_PROTOCOLS = {
     ROBOREWARDBENCH_NATIVE,
     ROBOREWARDBENCH_IMAGE_SEQUENCE,
+    ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
 }
+IMAGE_SEQUENCE_PROTOCOLS = frozenset(
+    {
+        ROBOREWARDBENCH_IMAGE_SEQUENCE,
+        ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
+    }
+)
+
+
+INTERLEAVED_REWARD_PROMPT = """You are a rigorous, impartial vision evaluator for robot task progress.
+Given the task and an ordered sequence of eight single-view observations from
+one robot rollout, assign a discrete end-of-episode progress score
+(1, 2, 3, 4, or 5).
+
+<Task>
+`{task}`
+</Task>
+
+<Robot Trajectory>
+The following observations are ordered chronologically and belong to the same
+robot rollout. Observation 1 is the initial state, and Observation 8 is the
+true terminal state.
+
+OBSERVATION 1 — INITIAL:
+<image>
+
+OBSERVATION 2:
+<image>
+
+OBSERVATION 3:
+<image>
+
+OBSERVATION 4:
+<image>
+
+OBSERVATION 5:
+<image>
+
+OBSERVATION 6:
+<image>
+
+OBSERVATION 7:
+<image>
+
+OBSERVATION 8 — TERMINAL:
+<image>
+</Robot Trajectory>
+
+Rubric for end-of-episode progress:
+Judge the task progress from the terminal state in Observation 8.
+Use Observations 1–7 only as temporal context for understanding what changed.
+
+1 - No Success: The terminal state shows no goal-relevant change for the command.
+2 - Minimal Progress: The terminal state shows a small but insufficient change
+    toward the goal.
+3 - Partial Completion: The terminal state shows good progress toward the goal
+    but violates more than one requirement or one major requirement.
+4 - Near Completion: The terminal state is correct in region and intent but
+    misses a single minor requirement.
+5 - Perfect Completion: The terminal state satisfies all requirements.
+
+Output Format (STRICT)
+Return ONLY one line in exactly this format:
+ANSWER: <score>
+
+Replace <score> with exactly one integer from 1 to 5.
+Do not output any explanation or additional text.
+"""
 
 
 def validate_protocol(value: str) -> str:
@@ -83,6 +155,31 @@ def protocol_descriptor(
             "prompt_contract": "RoboRewardBench discrete progress rubric",
             "content_order": content_order,
             "media_order": media_order,
+            "adapter_protocol": True,
+        }
+    if protocol == ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE:
+        if content_order != "interleaved":
+            raise ValueError(
+                f"{ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE} requires "
+                f"content_order='interleaved', got {content_order!r}"
+            )
+        return {
+            "name": protocol,
+            "input": "uniform_independent_images_grm_interleaved",
+            "output": "ANSWER: <1-5>",
+            "progress_mapping": "(answer - 1) / 4",
+            "prompt_sha256": hashlib.sha256(
+                INTERLEAVED_REWARD_PROMPT.encode("utf-8")
+            ).hexdigest(),
+            "prompt_contract": (
+                "shared RoboReward/Qwen chronological interleaved-image rubric"
+            ),
+            "content_order": content_order,
+            "media_order": [
+                "task_text",
+                "alternating_observation_text_and_image_x8",
+                "rubric_and_output_text",
+            ],
             "adapter_protocol": True,
         }
     # ``native_endpoint_payload`` validates the requested named prompt.
@@ -149,6 +246,37 @@ def image_sequence_messages(
     return [{"role": "user", "content": content}]
 
 
+def interleaved_image_sequence_messages(
+    task: str,
+    image_paths: list[str] | tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Insert eight chronological images at the shared GRM-style placeholders."""
+    protocol_descriptor(
+        ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
+        content_order="interleaved",
+    )
+    paths = [str(Path(path).resolve()) for path in image_paths]
+    if len(paths) != 8:
+        raise ValueError(
+            "Interleaved image-sequence protocol requires exactly eight images"
+        )
+    missing = [path for path in paths if not Path(path).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Missing interleaved image inputs: {missing}")
+    parts = INTERLEAVED_REWARD_PROMPT.format(task=task).split("<image>")
+    if len(parts) != len(paths) + 1:
+        raise RuntimeError(
+            "Interleaved prompt/image contract mismatch: "
+            f"parts={len(parts)}, images={len(paths)}"
+        )
+    content: list[dict[str, Any]] = []
+    for text, path in zip(parts[:-1], paths):
+        content.append({"type": "text", "text": text})
+        content.append({"type": "image", "image": path})
+    content.append({"type": "text", "text": parts[-1]})
+    return [{"role": "user", "content": content}]
+
+
 def image_sequence_payload(
     episode: EpisodeRecord,
     image_paths: list[str],
@@ -173,6 +301,32 @@ def image_sequence_payload(
             if content_order == "text_then_images"
             else ["image_sequence", "text"]
         ),
+    }
+
+
+def interleaved_image_sequence_payload(
+    episode: EpisodeRecord,
+    image_paths: list[str],
+    sampling_record: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the shared GRM-style chronological image request."""
+    protocol_descriptor(
+        ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
+        content_order="interleaved",
+    )
+    payload = episode.model_payload()
+    paths = [str(Path(path).resolve()) for path in image_paths]
+    return {
+        "protocol": ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
+        "task": payload["task"],
+        "image": paths,
+        "sampling_record": dict(sampling_record),
+        "content_order": "interleaved",
+        "media_order": [
+            "task_text",
+            "alternating_observation_text_and_image_x8",
+            "rubric_and_output_text",
+        ],
     }
 
 

@@ -18,6 +18,7 @@ def validate_roboreward_config(path: str) -> None:
     allowed = {
         "roborewardbench_native",
         "roborewardbench_image_sequence",
+        "roborewardbench_interleaved_image_sequence",
     }
     if attention.get("protocol") not in allowed:
         raise ValueError(

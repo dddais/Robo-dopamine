@@ -23,13 +23,17 @@ from ..schemas import SCHEMA_VERSION
 from ..video import extract_endpoints, extract_uniform_image_sequence
 from ..protocol import multiview_endpoint_payload
 from .protocols import (
+    IMAGE_SEQUENCE_PROTOCOLS,
     ROBO_DOPAMINE_FORWARD,
     ROBOREWARDBENCH_IMAGE_SEQUENCE,
+    ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
     ROBOREWARDBENCH_NATIVE,
     dopamine_forward_messages,
     dopamine_forward_payload,
     image_sequence_messages,
     image_sequence_payload,
+    interleaved_image_sequence_messages,
+    interleaved_image_sequence_payload,
     native_video_payload,
     parse_protocol_output,
     protocol_descriptor,
@@ -195,10 +199,16 @@ class Qwen3VLBaseline:
     def _infer_image_sequence(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         paths = [str(Path(path).resolve()) for path in payload["image"]]
         content_order = str(payload["content_order"])
-        inputs = self.processor.apply_chat_template(
-            image_sequence_messages(
+        messages = (
+            interleaved_image_sequence_messages(payload["task"], paths)
+            if payload["protocol"]
+            == ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE
+            else image_sequence_messages(
                 payload["task"], paths, content_order=content_order
-            ),
+            )
+        )
+        inputs = self.processor.apply_chat_template(
+            messages,
             tokenize=True,
             add_generation_prompt=True,
             return_dict=True,
@@ -214,7 +224,12 @@ class Qwen3VLBaseline:
             )
         return self._decode(inputs), {
             "processor_native_video": False,
-            "input_representation": "uniform_independent_images_v1",
+            "input_representation": (
+                "uniform_interleaved_images_v1"
+                if payload["protocol"]
+                == ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE
+                else "uniform_independent_images_v1"
+            ),
             "image_count": len(paths),
             "image_grid_thw": grid.detach().cpu().tolist(),
             "image_token_count": int((inputs["input_ids"] == image_token_id).sum()),
@@ -226,7 +241,7 @@ class Qwen3VLBaseline:
     def infer(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if payload["protocol"] == ROBOREWARDBENCH_NATIVE:
             return self._infer_native_video(payload)
-        if payload["protocol"] == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+        if payload["protocol"] in IMAGE_SEQUENCE_PROTOCOLS:
             return self._infer_image_sequence(payload)
         if payload["protocol"] == ROBO_DOPAMINE_FORWARD:
             return self._infer_endpoint_images(payload)
@@ -331,17 +346,24 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
             frame_records = None
             if protocol == ROBOREWARDBENCH_NATIVE:
                 payload = native_video_payload(episode, content_order=content_order)
-            elif protocol == ROBOREWARDBENCH_IMAGE_SEQUENCE:
+            elif protocol in IMAGE_SEQUENCE_PROTOCOLS:
                 image_paths, sampling_record = extract_uniform_image_sequence(
                     episode.video_path,
                     output_dir / "image_sequences" / episode.video_sha256,
                     count=int(evaluation.get("num_images", 8)),
                 )
-                payload = image_sequence_payload(
-                    episode,
-                    image_paths,
-                    sampling_record,
-                    content_order=content_order,
+                payload = (
+                    interleaved_image_sequence_payload(
+                        episode, image_paths, sampling_record
+                    )
+                    if protocol
+                    == ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE
+                    else image_sequence_payload(
+                        episode,
+                        image_paths,
+                        sampling_record,
+                        content_order=content_order,
+                    )
                 )
             else:
                 frame_dir = output_dir / "frames" / episode.video_sha256
@@ -382,6 +404,7 @@ def run(config: dict[str, Any], *, dry_run: bool = False, retry_failed: bool = F
                     if protocol in {
                         ROBOREWARDBENCH_NATIVE,
                         ROBOREWARDBENCH_IMAGE_SEQUENCE,
+                        ROBOREWARDBENCH_INTERLEAVED_IMAGE_SEQUENCE,
                     }
                     else "<score>0%</score>"
                 )
