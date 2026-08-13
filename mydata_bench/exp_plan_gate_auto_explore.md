@@ -9,15 +9,14 @@
 ## 已有背景：
 
 - 基于/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan.md的规划，进行了baseline 和attention steering的实验，目前发现在robo-dopamine的GRM上该方法的效果十分明显，但是在qwen3-vl-8b和roboreward-8b的效果不是很明显。
-- 考虑使用门控方案，核心是利用wrong region和target的差异来消除非特异化干扰对模型的影响，详情参考 /home/dais/workspace/Robo-Dopamine/mydata_bench/gate_method_design.md
+- 考虑使用门控方案，核心是利用baseline,wrong region和target的关系来消除非特异化干扰对模型的影响，详情参考 /home/dais/workspace/Robo-Dopamine/mydata_bench/gate_method_design.md
 
 ## 主线目标1
 
-基于robo-dopamine的 GRM的attention ranking 和 steering 方法，实现门控方案：/home/dais/workspace/Robo-Dopamine/mydata_bench/gate_method_design.md
-（参考下面列出的“可参考相关代码/文献”以及可以网络调研搜索其它相关的论文，比如调节attention权重等。）
+基于robo-dopamine的 GRM的attention ranking 和 steering 方法，尝试实现各种门控方案：/home/dais/workspace/Robo-Dopamine/mydata_bench/gate_method_design.md （参考下面列出的“可参考相关代码/文献”以及可以网络调研搜索其它相关的论文，比如调节attention权重等。）
 
-- 实现该门控方案，使其能够改良原 attention steering方法，在五种输入构造下都能稳定提升roboreward-8b 和qwen3-vl-8b 在数据集上的表现（MAE下降，suc,fail准确率提高）
-- 分析该机制/方法能work的原理
+- 分析提出方案，最好原理上比较优雅，看起来能work
+- 尝试各种门控方案，使其能够改良原 attention steering方法，在五种输入构造下都能稳定提升roboreward-8b 和qwen3-vl-8b 在数据集上的表现（MAE下降，suc,fail准确率提高）
 
 
 
@@ -40,7 +39,7 @@
 
 ## 相关文档
 
-- gate方案设计文档：/home/dais/workspace/Robo-Dopamine/mydata_bench/gate_method_design.md
+- gate方案设计文档（需要更新）：/home/dais/workspace/Robo-Dopamine/mydata_bench/gate_method_design.md
 - gate探索文档（需要更新）： /home/dais/workspace/Robo-Dopamine/mydata_bench/auto_explore_gate.md
 - cross_model探索文档（之前的结果，不更新）： /home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_crossmodel_auto_explore.md ；/home/dais/workspace/Robo-Dopamine/mydata_bench/auto_explore_crossmodel.md
 
