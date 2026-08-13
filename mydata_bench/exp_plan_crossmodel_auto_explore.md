@@ -130,15 +130,3 @@ GRM一次推理只获得before 和after 两个时刻的图像，而roboreward-8b
 - **Qwen3-VL-8B 最佳严格完整配置**：`attention_08_qwen_images_text` 的 target k64；8-image images→text、last-frame、all-query、top-64、bias 6。846/846、invalid=0。总体 Exact 22.81%→45.63%，MAE 1.4326→1.0449，suc 55.97%→59.70%，fail 7.44%→39.10%；wrong 为 21.39%/1.4527，low-rank 为 23.40%/1.4374。
 - 原方法在 GRM 上更容易呈现稳定增益，主要来自 before/after 集中视觉证据、连续 readout 和短因果路径；两个自回归离散模型还受时序稀释、causal prompt adjacency、离散阈值与协议条件化 ranking 影响。RoboReward 的 all-frame vs last-frame 消融直接支持 temporal dilution 解释。
 
-### 主线目标 2：完成
-
-新增 `Spatial-Counterfactual Endpoint Gate (SC-EG)`：仅当 target-steered 预测为端点 1/5 且 wrong-region 未给出同一端点时接受 target，否则回退 baseline。gate 完全不读取 label/split/task；标签只在预测冻结后评分。
-
-- RoboReward 主配置：Exact 23.52%→57.92%，MAE 1.5674→1.0768，suc 48.88%→58.96%，fail 11.76%→57.44%；cluster 误差变化 95% CI `[-0.6410,-0.4716]`。
-- Qwen 主配置：Exact 22.81%→44.33%，MAE 1.4326→1.1879，suc 55.97%→67.16%，fail 7.44%→33.74%；95% CI `[-0.2687,-0.1695]`。
-- 扩展到 8 个严格完整协议配置时 7/8 通过全部总体标准；唯一失败项（RoboReward images→text/last/k64）因 suc 下降而被保留并判失败。故结论为跨模型、总体及多数 task 稳健，不宣称每配置/每 task 全指标必升。
-- 增量实现：`mydata_bench/analyze_spatial_counterfactual_gate.py`；测试 11/11 passed；输出在 `results/mydata_bench/experiments_v2_corssmodel/auto_explore_spatial_counterfactual_gate*`。原代码、原配置、原结果均未修改。
-
-### 证据边界
-
-固定 steering 来自完整真实模型推理；SC-EG 是在这些不可变真实 forward outputs 上完成的新机制仲裁与 10,000 次 video-cluster bootstrap，验证状态为 `ANALYZED`，没有声称重新执行模型。cohort 使用计划认可的自动 grounding，但未经人工 endpoint audit，因此因果结论保持 exploratory；建议在未参与配置搜索的新冻结 cohort 上做确认性复现。

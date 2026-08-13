@@ -9,7 +9,7 @@
 ## 已有背景：
 
 - 基于/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan.md的规划，进行了baseline 和attention steering的实验，目前发现在robo-dopamine的GRM上该方法的效果十分明显，但是在qwen3-vl-8b和roboreward-8b的效果不是很明显。
-- 考虑使用门控方案，核心是利用baseline,wrong region和target的关系来消除非特异化干扰对模型的影响，详情参考 /home/dais/workspace/Robo-Dopamine/mydata_bench/gate_method_design.md
+- 考虑使用门控方案，核心是利用baseline,wrong region和target的关系探索合理的利用方法，详情参考 /home/dais/workspace/Robo-Dopamine/mydata_bench/gate_method_design.md
 
 ## 主线目标1
 
