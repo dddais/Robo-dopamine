@@ -4,6 +4,8 @@
 
 必要时进行文献搜索，开源仓库参考。我要睡觉了，需要我确认的部分先跳过，进行你能进行的内容。
 
+既要进行真实实验，也需要进行原理性分析。
+
 ## 已有背景：
 
 - 基于/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan.md的规划，进行了baseline 和attention steering的实验，目前发现在robo-dopamine的GRM上该方法的效果十分明显，但是在qwen3-vl-8b和roboreward-8b的效果不是很明显。
@@ -15,6 +17,7 @@
 
 - 找到一种steering 配置，能使得 roboreward-8b 在steering之后能表现出明显的性能改善（MAE，suc准确率提高/不变，fail成功率明显提高，总体准确率明显提高）且比wrong rigion等对照组明显表现更好
 - 找到一种steering 配置，能使得 qwen3-vl-8b 在steering之后能表现出明显的性能改善（MAE，suc准确率提高/不变，fail成功率明显提高，总体准确率明显提高）且比wrong rigion等对照组明显表现更好
+- 分析为什么该方法对GRM的效果这么好，对roboreward-8b和qwen3-vl-8b效果不稳定
 
 
 
@@ -25,6 +28,7 @@
 对目前GRM的attention steering方法进行分析与改善，因为目前该方法只在GRM上表现出了稳定的性能提升，对于另外两个模型都不是很稳定，效果不太理想：
 
 - 找到一种机制/方法能够改良原 attention steering方法，稳定提升roboreward-8b 和qwen3-vl-8b 在数据集上的表现（MAE下降，suc,fail准确率提高）
+- 分析该机制/方法能work的原理
 
 
 
