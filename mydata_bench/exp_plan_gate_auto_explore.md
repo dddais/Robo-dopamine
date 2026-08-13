@@ -16,7 +16,7 @@
 基于robo-dopamine的 GRM的attention ranking 和 steering 方法，实现门控方案：/home/dais/workspace/Robo-Dopamine/mydata_bench/gate_method_design.md
 （参考下面列出的“可参考相关代码/文献”以及可以网络调研搜索其它相关的论文，比如调节attention权重等。）
 
-- 实现该门控方案，使其能够改良原 attention steering方法，稳定提升roboreward-8b 和qwen3-vl-8b 在数据集上的表现（MAE下降，suc,fail准确率提高）
+- 实现该门控方案，使其能够改良原 attention steering方法，在五种输入构造下都能稳定提升roboreward-8b 和qwen3-vl-8b 在数据集上的表现（MAE下降，suc,fail准确率提高）
 - 分析该机制/方法能work的原理
 
 
@@ -53,6 +53,8 @@
 **数据集** ：/home/dais/workspace/data/mydata_v2/new ;/home/dais/workspace/Robo-Dopamine/results/mydata_bench/cohorts/auto_grounded_v2 (认为这就是正确的，不需要人工审核)
 
 **config** 放在：/home/dais/workspace/Robo-Dopamine/mydata_bench/configs/v2_gate
+
+**输入**：video->text ; text->video; image->text ; text->image ;interleaved ;以上五种都需要尝试，方法最好能在大部分输入构造下work
 
 **输出** 在：/home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_gate
 
