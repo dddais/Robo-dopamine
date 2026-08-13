@@ -13,8 +13,10 @@
 
 基于robo-dopamine的 GRM的attention ranking 和 steering 方法，参考其它文献/代码：
 
-- 找到一种steering 配置，能使得 roboreward-8b 在steering之后能表现出明显的性能改善（MAE，suc准确率提高/下降较低，fail成功率明显提高，总体准确率提高）
-- 找到一种steering 配置，能使得 qwen3-vl-8b 在steering之后能表现出明显的性能改善（MAE，suc准确率提高/下降较低，fail成功率明显提高，总体准确率提高）
+- 找到一种steering 配置，能使得 roboreward-8b 在steering之后能表现出明显的性能改善（MAE，suc准确率提高/不变，fail成功率明显提高，总体准确率明显提高）且比wrong rigion等对照组明显表现更好
+- 找到一种steering 配置，能使得 qwen3-vl-8b 在steering之后能表现出明显的性能改善（MAE，suc准确率提高/不变，fail成功率明显提高，总体准确率明显提高）且比wrong rigion等对照组明显表现更好
+
+
 
 ## 主线目标2
 
@@ -24,6 +26,8 @@
 
 - 找到一种机制/方法能够改良原 attention steering方法，稳定提升roboreward-8b 和qwen3-vl-8b 在数据集上的表现（MAE下降，suc,fail准确率提高）
 
+
+
 ## 基本原则
 
 - 尽量不修改现有代码库，如果需要修改，进行增量式修改，比如增加可选配置项等；
@@ -31,13 +35,19 @@
 - 不允许对本地数据，结果等进行删除修改等操作，只能新增；
 - 探索过程有价值的尝试可以详细记录在 /home/dais/workspace/Robo-Dopamine/mydata_bench/auto_explore.md ；本文档简要更新探索的内容及结果；
 
+
+
 ## 可参考相关代码/文献
 
 - /home/dais/workspace/gaze-heads : [https://arxiv.org/pdf/2606.14703v1](https://arxiv.org/pdf/2606.14703v1)
 - /home/dais/workspace/PAI : [https://arxiv.org/pdf/2311.02262](https://arxiv.org/pdf/2311.02262)
 - /home/dais/workspace/PASTA : [https://arxiv.org/pdf/2407.21771](https://arxiv.org/pdf/2407.21771)
 
+
+
 ## 原因分析
+
+
 
 ### video input
 
