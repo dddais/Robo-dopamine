@@ -6,29 +6,20 @@
 
 既要进行真实实验，也需要进行原理性分析。
 
-## 已有背景：
+## 研究背景：
 
-- 基于/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan.md的规划，进行了baseline 和attention steering的实验，目前发现在robo-dopamine的GRM上该方法的效果十分明显，但是在qwen3-vl-8b和roboreward-8b的效果不是很明显。
+- 基于/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan.md的规划，进行了baseline 和attention steering的实验，目前发现在robo-dopamine的GRM上该方法的效果十分明显，但是在qwen3-vl-8b和roboreward-8b的效果不是很明显,只有/home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_13_roboreward_interleaved_all_frames/exp_record.md 这一个配置能够给roboreward-8b带来稳定提升，其它的配置效果都比较差。
 - 目前进行了初步探索（见本文档的 “原因分析” 和 “已经完成的实验”部分 ），但是效果仍然不是很理想。
 
 ## 主线目标1
 
-基于robo-dopamine的 GRM的attention ranking 和 steering 方法，参考其它文献/代码：
-
-- 找到一种steering 配置，能使得 roboreward-8b 在steering之后能表现出明显的性能改善（MAE，suc准确率提高/不变，fail成功率明显提高，总体准确率明显提高）且比wrong rigion等对照组明显表现更好
-- 找到一种steering 配置，能使得 qwen3-vl-8b 在steering之后能表现出明显的性能改善（MAE，suc准确率提高/不变，fail成功率明显提高，总体准确率明显提高）且比wrong rigion等对照组明显表现更好
-- 分析为什么该方法对GRM的效果这么好，对roboreward-8b和qwen3-vl-8b效果不稳定
-
-
+- 调研相关文章，理论分析为什么该方法对GRM的效果这么好，对roboreward-8b和qwen3-vl-8b效果不稳定；必要时可以做实验说明
 
 ## 主线目标2
 
-使用方法不要太局限于GRM的attention steering，参考下面列出的“可参考相关代码/文献”以及可以网络调研搜索其它相关的论文，比如调节attention权重等。
-
-对目前GRM的attention steering方法进行分析与改善，因为目前该方法只在GRM上表现出了稳定的性能提升，对于另外两个模型都不是很稳定，效果不太理想：
-
-- 找到一种机制/方法能够改良原 attention steering方法，稳定提升roboreward-8b 和qwen3-vl-8b 在数据集上的表现（MAE下降，suc,fail准确率提高）
-- 分析该机制/方法能work的原理
+- 基于调研的结果和方法，从理论角度思考能够改进目前attention steering的方法
+- 不断尝试，直到有一种方法能稳定提升roboreward-8b 和qwen3-vl-8b 在完整数据集上的表现（MAE下降，suc,fail准确率提高）
+- 严禁使用端点hard coding这种类似作弊的方法！！！
 
 
 
@@ -38,6 +29,7 @@
 - 不允许进行git 操作本地已有的仓库，只能git clone开源仓库进行参考；
 - 不允许对本地数据，结果等进行删除修改等操作，只能新增；
 - 探索过程有价值的尝试可以详细记录在 /home/dais/workspace/Robo-Dopamine/mydata_bench/auto_explore.md ；本文档简要更新探索的内容及结果；
+- 尽量充分调研，思考，提出有道理的优雅的方案，严禁作弊的方法
 
 
 
@@ -61,7 +53,7 @@
 
 自回归的casual masking可能影响了attention mask的作用 。因此已经进行了下面 **改造输入格式：GRM类型输入**的实验。
 
-temporal prior
+## temporal prior
 
 GRM一次推理只获得before 和after 两个时刻的图像，而roboreward-8b获取了8个时刻的图像，这有可能时序的进展成为模型的主要判断依据，指令token的贡献被稀释。目前还没进行实验验证。
 
@@ -109,7 +101,7 @@ GRM一次推理只获得before 和after 两个时刻的图像，而roboreward-8b
 11.qwen3-vl-8b +attention ranking + steering ：先输入text再输入img;-bias加在所有帧的非target区域，+bias加在所有帧的target区域
 12.qwen3-vl-8b +attention ranking + steering ：先输入img再输入text;-bias加在所有帧的非target区域，+bias加在所有帧的target区域
 
-### 改造输入格式：GRM类型输入
+### 改造输入格式：GRM类型嵌入式输入
 
 考虑到自回归模型casual masking的影响，不把image text完全分开，不直接输入video，而是类似于GRM那种，把img嵌入到text prompt当中。当然具体的system prompt内容需要改一下。
 
