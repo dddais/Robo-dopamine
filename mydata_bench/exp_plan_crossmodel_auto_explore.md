@@ -6,8 +6,6 @@
 
 我要睡觉了，需要我确认的部分先跳过，进行你能进行的内容。
 
-
-
 ## 研究背景：
 
 - 基于/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan.md的规划，进行了baseline 和attention steering的实验，目前发现在robo-dopamine的GRM上该方法的效果十分明显，但是在qwen3-vl-8b和roboreward-8b的效果不是很明显,只有/home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_13_roboreward_interleaved_all_frames/exp_record.md 这一个配置能够给roboreward-8b带来提升，其它的配置效果都比较差。
@@ -45,6 +43,9 @@
 
 
 ## 原因分析
+
+
+
 ### video input
 
 我怀疑有可能和输入形式有关。GRM输入两个时刻的三视图，而另外两个模型直接输入完整视频序列，video processor采样8帧，并且每两帧成为一个temporal span。一方面我觉得这个两帧作为一个temporal span可能会有问题，比如target img token找不准等。因此已经进行了下面的 **改造输入格式video->image：** 实验来验证
@@ -58,8 +59,8 @@
 GRM一次推理只获得before 和after 两个时刻的图像，而roboreward-8b获取了8个时刻的图像，这有可能时序的进展成为模型的主要判断依据，指令token的贡献被稀释。目前还没进行实验验证。
 
 ## 其它原因
-请你进行调研思考理论分析后补充。
 
+请你进行调研思考理论分析后补充。
 
 ## 实验基础设置
 
@@ -70,7 +71,7 @@ GRM一次推理只获得before 和after 两个时刻的图像，而roboreward-8b
 **config** 放在：/home/dais/workspace/Robo-Dopamine/mydata_bench/configs/v2_crossmodel
 
 **输入**：video->text ; text->video; image->text ; text->image ;interleaved ;以上五种都需要尝试，方法最好能在大部分输入构造下work
-**输出** 在：/home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel
+**输出** 在：/home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research
 
 **conda环境**：sam3:rewardbench-sam3 ；其它实验：robo-dopamine
 
@@ -116,8 +117,4 @@ GRM一次推理只获得before 和after 两个时刻的图像，而roboreward-8b
 4.qwen3-vl-8b +attention ranking + steering ：-bias加在最后一帧的非target区域，+bias加在最后一帧的target区域
 
 ## 待探索的实验：
-
-
-
-
 
