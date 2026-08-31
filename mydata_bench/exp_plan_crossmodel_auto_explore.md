@@ -42,6 +42,20 @@
 
 
 
+### Auto research 补充
+
+- **PASTA — Post-hoc Attention Steering for LLMs**（ICLR 2024）：[arXiv:2311.02262](https://arxiv.org/abs/2311.02262)。选择小部分 task-specific/task-agnostic heads，并以 `log(alpha)` 修改 attention mask，相当于对非强调 token 做乘法降权；说明 soft multiplicative reweighting 比固定饱和 bias 更适合保留原能力。
+- **PAI — Paying More Attention to Image**（ECCV 2024）：[arXiv:2407.21771](https://arxiv.org/abs/2407.21771)。只在最后 query 放大 image-token attention，并使用 image-free branch 做 logits 对比以抵消 text inertia；启发本任务比较 query scope，并区分“视觉证据增强”与“全局输出校准”。
+- **ASCD — Attention-Steerable Contrastive Decoding**（AAAI 2026）：[arXiv:2506.14766](https://arxiv.org/abs/2506.14766)，DOI 10.1609/aaai.v40i12.38000。用 500 张参考图统计 `textAttn/visAttn`，每样本 top-32 投票得到 model-specific text-centric heads；正向分支只增强这些 heads，负向分支只抑制动态选出的关键视觉 token。其核心证据是选择性 head/token 操作优于随机或全量操作。
+- **CAST — Caption-Guided Visual Attention Steering**：[arXiv:2605.04641](https://arxiv.org/abs/2605.04641)。以 caption-query vs non-caption-query 的 attention-output 差异训练 probe 选 head，并对选中 head 加入对比均值 steering direction；启发用“对比敏感度”而非 raw target mass 作为 ranking 目标。
+- **Gaze Heads: How VLMs Look at What They Describe**：[arXiv:2606.14703](https://arxiv.org/abs/2606.14703)。在独立 comics 语料上发现少量 model-specific gaze heads；top-100 干预有效而 all-head 干预破坏生成。工作区已有 RoboReward/Qwen 各自在 500 个独立 comics 样本上得到的完整 ranking，可作为无评测标签泄漏的外部候选。
+- **HAS — Highlight-guided Attention Steering for Multimodal LLM Video Summarization**：[arXiv:2607.17994](https://arxiv.org/abs/2607.17994)。把连续帧重要性平滑到 `[0,1]`，再以 `log(h+epsilon)` 注入 attention logits，等价于温和乘法重标定；支持使用连续时序 prior，避免 hard frame selection。
+- **Arbitration Failure, Not Perceptual Blindness**：[arXiv:2604.09364](https://arxiv.org/abs/2604.09364)。报告 VLM 失败时视觉证据通常仍被编码，瓶颈更接近末层 arbitration；last-token patching 仅改变 0–1% 输出，而 full-sequence patching 改变 60–84%。这说明只增加注意力质量未必提高准确率，必须直接验证输出与配对区分度。
+- **Inference-Time Attention Steering for VLA Driving Models**（ECCV 2026）：[arXiv:2608.17095](https://arxiv.org/abs/2608.17095)。在 Qwen3-VL 上发现 bias 强度和 late-layer 数量都有单调剂量效应，并强调逐调用 exposure audit；支持本研究进行 K-aware 剂量归一化和 hook 生效审计。
+- **Attention is Case-Sensitive**（ECCV 2026）：[arXiv:2608.03711](https://arxiv.org/abs/2608.03711)。注意力集中并不保证准确率提高，强 salience 甚至会降性能；作为本研究不能用 attention-mass 增加替代任务指标的反例证据。
+
+
+
 ## 原因分析
 
 
