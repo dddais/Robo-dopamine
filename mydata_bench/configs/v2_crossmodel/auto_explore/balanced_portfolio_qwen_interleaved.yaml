@@ -1,0 +1,8 @@
+experiment_id: crossmodel_balanced_portfolio_qwen_interleaved
+balanced_portfolio:
+  adaptive_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_adaptive_rank_qwen_interleaved/adaptive_conflict_ranking.json
+  fallback_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_weighted_rank_qwen_interleaved/bidirectional_causal_weighted_ranking.json
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_balanced_portfolio_qwen_interleaved
+  pair_count: 4
+  padding_top_k: 64
+  padding_multiplier: 0.1

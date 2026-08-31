@@ -1,0 +1,13 @@
+experiment_id: crossmodel_exact_endpoint_rank_roboreward_video_text_v1
+exact_endpoint_rank:
+  positive_success_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_rank_roboreward_video_text
+  positive_fail_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_contrastive_rank_roboreward_video_text
+  positive_profile_num_head_shards: 2
+  negative_success_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_signed_negative_success_roboreward_video_text
+  negative_fail_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_signed_negative_fail_roboreward_video_text
+  negative_profile_num_head_shards: 1
+  fallback_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_weighted_rank_roboreward_video_text/bidirectional_causal_weighted_ranking.json
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_exact_endpoint_rank_roboreward_video_text_v1
+  minimum_safe_heads: 8
+  safe_padding_top_k: 64
+  padding_multiplier: 0.1

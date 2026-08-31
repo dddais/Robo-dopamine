@@ -1,0 +1,23 @@
+experiment_id: crossmodel_attention_42_qwen_interleaved_contrastive_causal_bias4_screen
+attention_steer:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  eligibility_mode: auto_valid_grounding
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_42_qwen_interleaved_contrastive_causal_bias4_screen
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+  protocol: roborewardbench_interleaved_image_sequence
+  content_order: interleaved
+  num_images: 8
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/cohorts/auto_grounded_v2/example_ids.json
+  grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2/sam3
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_contrastive_rank_qwen_interleaved/contrastive_causal_safe_padding_ranking.json
+  min_pixels: 784
+  max_pixels: 50176
+  torch_dtype: bfloat16
+  device_map: auto
+  temporal_intervention_scope: all_frames
+  max_new_tokens: 128
+  top_k_values: [8, 32, 64]
+  swap_bias: 4
+  steering_query_scope: all
+  negative_scope: none

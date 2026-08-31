@@ -1,0 +1,27 @@
+experiment_id: crossmodel_attention_78_roboreward_video_text_lastframe_bidirectional_weighted_bias6_screen
+attention_steer:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  eligibility_mode: auto_valid_grounding
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_78_roboreward_video_text_lastframe_bidirectional_weighted_bias6_screen
+  model_path: /home/dais/workspace/model/RoboReward-8B
+  protocol: roborewardbench_native
+  content_order: video_then_text
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/cohorts/auto_grounded_v2/example_ids.json
+  grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2/sam3
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_weighted_rank_roboreward_video_text_lastframe/bidirectional_causal_weighted_ranking.json
+  ranking_bias_field: steering_multiplier
+  exact_low_rank_multipliers: true
+  torch_dtype: bfloat16
+  min_pixels: 784
+  max_pixels: 50176
+  device_map: auto
+  attention_video_max_frames: 8
+  temporal_span_mode: native_pairs
+  temporal_bbox_reduce: last
+  temporal_intervention_scope: last_frame
+  max_new_tokens: 128
+  top_k_values: [8, 32, 64]
+  swap_bias: 6
+  steering_query_scope: all
+  negative_scope: none

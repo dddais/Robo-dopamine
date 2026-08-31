@@ -1,0 +1,38 @@
+experiment_id: crossmodel_causal_signed_negative_fail_qwen_video_text
+attention_steer:
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+  protocol: roborewardbench_native
+  content_order: video_then_text
+  blank_goal: /home/dais/workspace/Robo-Dopamine/examples/blank_goal.png
+  prompt_mode: official
+  min_pixels: 784
+  max_pixels: 50176
+  torch_dtype: bfloat16
+  device_map: auto
+  attention_video_max_frames: 8
+  temporal_intervention_scope: all_frames
+  max_new_tokens: 128
+  steering_query_scope: all
+  negative_scope: none
+causal_rank:
+  source_ranking_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_69_qwen_video_text_ranking_source
+  ranking_inputs_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_69_qwen_video_text_ranking_source/grounded_ranking_inputs.jsonl
+  development_cohort_inputs_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_69_qwen_video_text_ranking_source/cohort_inputs.jsonl
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_signed_negative_fail_qwen_video_text
+  candidate_depth_per_metric: 64
+  candidate_filter_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_contrastive_rank_qwen_video_text/contrastive_causal_safe_padding_ranking.json
+  candidate_filter_direction: -1
+  expected_success_samples: 32
+  profiling_bias: -6
+  query_scope: all
+  negative_scope: none
+  contrastive_fail_development: true
+  positive_contrastive_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_contrastive_rank_qwen_video_text/contrastive_causal_safe_padding_ranking.json
+  negative_success_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_signed_negative_success_qwen_video_text
+  negative_fail_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_signed_negative_fail_qwen_video_text
+  negative_profile_num_head_shards: 1
+  bidirectional_output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_rank_qwen_video_text
+  safe_padding_top_k: 64
+  bidirectional_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_rank_qwen_video_text/bidirectional_causal_safe_padding_ranking.json
+  weighted_output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_weighted_rank_qwen_video_text
+  weighted_multiplier_floor: 0.1

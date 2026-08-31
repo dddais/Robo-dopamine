@@ -85,6 +85,133 @@ GRM一次推理只获得before 和after 两个时刻的图像，而roboreward-8b
 4.pairwise区分度分析：因为数据集构成原理是1条suc数据，对应了1条或多条相同视频，不同instruction的fail数据，所以需要先找到suc数据所对应的fail数据，分析相同视频下不同instruction带来的影响。对于roboreward-8b,qwen这种输出离散的模型，计算统计配对数据中suc数据的预测值与fail数据的预测值的差值，把差值分成：负，0，1，2，3，4几档统计一下；
 5.ranking head统计:列出具体的top 8，统计top 8,32,64在不同模型的重合度
 
+## 最终改良方法：布局特定的双向因果加权 Attention Steering
+
+> 本节是自动探索完成后的方法补充。完整运行过程、失败分支、统计检验和最终裁决见 `mydata_bench/auto_explore.md`。
+
+### 方法动机
+
+原始 ranking 主要按 target 区域的 attention mass 选 head，容易找到“看见目标”的 localization heads，但这些 heads 不一定会使用目标信息判断指令是否完成。固定方向、固定权重地干预这些 heads，还会出现以下问题：
+
+- 同一个 head 可能同时把 success 和 fail 推向高分，只改善一侧；
+- 某些 head 的有效方向实际是负方向，不能根据 `+bias` 的结果直接代数反号；
+- top-k 从8增加到64时，弱或有害 heads 会累积过强剂量；
+- target-region 与 wrong-region 都有效时，变化可能只是一般视觉扰动，而不是目标区域特异效应。
+
+最终方法不再把“原始 attention 大”直接等同于“对 reward 判断有用”，而是对每个模型、每种输入布局单独执行 paired causal profiling，选择能同时帮助 success/fail 且具有空间特异性的 heads。
+
+### 数据划分与隔离
+
+所有划分以 `video_sha256`/video cluster 为单位，不能让同一视频因换了 instruction 而跨 partition：
+
+| 阶段 | 数据 | 唯一视频簇 | 用途 |
+| --- | ---: | ---: | --- |
+| ranking / head profiling | 34 suc + 32 paired fail = 66 条 video-instruction records | 34 | 候选 head、方向和权重 |
+| screening | 35 records | 11 | 判断冻结方法是否值得进入 held-out |
+| final held-out | 697 records（223 suc、474 fail） | 254 | 只做最终确认 |
+
+三部分的 video-cluster 重合为0。冻结 partition fingerprint：
+
+```text
+4d65d16add4129b3afc0b16f24495189d47580e5688b7167b4921c0cd528fee2
+```
+
+早期发现原846条 evaluation cohort 包含34个 ranking 视频后，已把这些 ranking clusters 和11个 screening clusters 全部排除；最终 H1–H4 只使用修正后的697条 held-out。
+
+### 第一步：构建 layout-specific 候选池
+
+每个模型、每个输入构造独立执行，禁止跨模型或跨布局复用 ranking。候选池取该模型/布局已有三种 ranking 的 top-64 并集：
+
+- raw target attention mass；
+- target excess mass；
+- visual enrichment。
+
+候选池只用于缩小逐 head 因果实验范围，最终顺序不再由原始 attention mass 决定。
+
+### 第二步：逐 head paired causal profiling
+
+对每个候选 head，在34条 development success 和32条同视频 paired fail 上分别运行：
+
+1. `baseline`：不干预；
+2. `target`：只对真实 target region 施加该 head 的 bias；
+3. `wrong`：对等 token 数、尽量远离 target 的错误区域施加相同 bias。
+
+使用 teacher-forced `ANSWER: 1..5` choice logits 计算连续 margin：
+
+- success 侧要求 reward-5 margin 增加；
+- fail 侧要求 reward-5 margin 降低，即不再把错误指令判断为高完成度；
+- target 干预必须优于 wrong-region 干预，保证空间特异性；
+- 聚合时先按 task 求均值，再对 task 求均值，避免大 task 支配 ranking。
+
+这里的 development 标签只用于离线选 head；最终推理时不读取 suc/fail 标签。
+
+### 第三步：显式确定正负方向
+
+首先对候选 heads 实测 `+6`：
+
+- success/fail 两侧 correct-margin 与 paired spatial effect 均安全的 heads，保留正方向；
+- 若一个 head 在 `+6` 下对 success/fail 两侧都产生负 correct-margin，则只把它列为负方向候选；
+- 对负方向候选重新完整运行 `-6` 的 success、fail、target 和 wrong-region profiles；
+- 只有 `-6` 实测通过双侧与空间 gate 后，才保留为 negative head。
+
+严禁仅根据 `+6` 的数值做代数反号推断。最终每个 `(layer, head)` 只保留一个实际验证过的方向。
+
+### 第四步：双侧因果强度加权
+
+安全 head 的权重由较弱的一侧决定，避免 success-specialist 或 fail-specialist 独占排序。开发强度定义为：
+
+```text
+strength = max(0, min(success_correct_effect, fail_correct_effect))
+           + max(0, paired_spatial_effect)
+
+abs(multiplier) = max(0.1, sqrt(strength / max_strength))
+```
+
+`multiplier` 的符号继承前一步实际验证的 `+6/-6` 方向。直观上，一个 head 即使对 success 很强，只要对 fail 很弱，其最终权重也不会很高。
+
+### 第五步：安全 padding 与 top-k
+
+如果双侧安全 heads 少于64，则从未进入 causal 候选的低 raw-mass heads 中补齐到64，并固定：
+
+```text
+padding multiplier = 0.1
+```
+
+同时为 low-rank control 保留互斥 tail。这样 top-k=8/32/64 是嵌套组合，但 k32/k64 新增的 padding 不会承受完整剂量，避免 head 数增加导致干预强度失控。
+
+### 最终推理协议
+
+推理时只加载冻结的 `(layer, head, direction, multiplier)` ranking：
+
+- 不使用评测标签；
+- 不根据当前样本预测端点选择 success/fail branch；
+- 不使用 held-out 输出调 threshold、head、权重或 bias；
+- 对 target region 使用 layout-specific、all-frame attention steering；
+- `steering_query_scope=all`，最终强配置使用 `negative_scope=none`；
+- 同时评价 top-k=8、32、64，并保留 wrong-region 与 low-rank controls。
+
+最终两个强配置为：
+
+| 模型/布局 | ranking artifact | base bias | held-out config |
+| --- | --- | ---: | --- |
+| RoboReward interleaved | `causal_bidirectional_weighted_rank_roboreward_interleaved/bidirectional_causal_weighted_ranking.json` | 8 | `attention_48_roboreward_interleaved_bidirectional_weighted_bias8_heldout.yaml` |
+| Qwen `images→text` | `causal_bidirectional_weighted_rank_qwen_images_text/bidirectional_causal_weighted_ranking.json` | 6 | `attention_64_qwen_images_text_bidirectional_weighted_bias6_heldout.yaml` |
+
+### 最终确认结果
+
+| 模型与输入 | k | MAE baseline→target | suc accuracy | fail accuracy | 结论 |
+| --- | ---: | --- | --- | --- | --- |
+| RoboReward interleaved | 8 | 1.5968→1.3974 | 44.39→55.16% | 12.87→18.57% | 强确认 |
+|  | 32 | 1.5968→1.4103 | 44.39→54.71% | 12.87→17.72% | 强确认 |
+|  | 64 | 1.5968→1.3945 | 44.39→54.26% | 12.87→18.35% | 强确认 |
+| Qwen `images→text` | 8 | 1.5222→1.4003 | 52.91→69.06% | 6.75→19.83% | 强确认 |
+|  | 32 | 1.5222→1.3816 | 52.91→74.44% | 6.75→21.10% | 强确认 |
+|  | 64 | 1.5222→1.3816 | 52.91→73.99% | 6.75→20.89% | 强确认 |
+
+两个强配置各自的九个主检验均通过 cluster-aware bootstrap 与 Holm 校正；四次正式 held-out 都是697 examples×10 conditions=`6970/6970` 有效记录。Qwen native `video→text` 的三个 k 点估计也均满足 MAE↓、suc↑、fail↑，但 k8 MAE cluster CI 跨0，因此只记为 `ANALYZED / CAUTION`，不计入强确认。
+
+严格主线状态：RoboReward 与 Qwen 各只有1个强 held-out-confirmed layout，尚未达到“每个模型至少2种输入布局”的完整目标。不能通过继续消费当前 held-out、移动阈值或放宽统计门槛来补足计数。
+
 ## 已经完成的实验
 
 
@@ -117,7 +244,4 @@ GRM一次推理只获得before 和after 两个时刻的图像，而roboreward-8b
 
 ## 待探索的实验：
 
-
-
-
-
+当前 partition 与 held-out 已完成最终统计审计，不应继续用于调参。若开启下一阶段，应先冻结新的 video-cluster cohort，再研究更大的独立 development set、带不确定性校准的 head 组合/路由，或 attention-probability budget redistribution；这些属于新研究阶段，而不是本轮结果的追加调参。

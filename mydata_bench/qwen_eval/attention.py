@@ -875,12 +875,20 @@ class QwenAttentionRuntime:
         negative_scope: str,
         spans: Sequence[ImageSpan],
         diagnostics: dict[str, Any],
+        head_bias_multipliers: Sequence[float] | None = None,
     ):
         if query_scope not in QUERY_SCOPES:
             raise ValueError(f"Unknown query scope {query_scope!r}")
-        grouped: dict[int, list[int]] = {}
-        for head in heads:
-            grouped.setdefault(int(head.layer), []).append(int(head.head))
+        multipliers = (
+            [1.0] * len(heads)
+            if head_bias_multipliers is None
+            else [float(value) for value in head_bias_multipliers]
+        )
+        if len(multipliers) != len(heads):
+            raise ValueError("head_bias_multipliers must align one-to-one with heads")
+        grouped: dict[int, list[tuple[int, float]]] = {}
+        for head, multiplier in zip(heads, multipliers):
+            grouped.setdefault(int(head.layer), []).append((int(head.head), multiplier))
         handles = []
         other, selected_span_labels = resolve_negative_positions(
             spans, selected_positions, negative_scope
@@ -898,7 +906,11 @@ class QwenAttentionRuntime:
             }
         )
         try:
-            for layer, layer_heads in sorted(grouped.items()):
+            for layer, layer_entries in sorted(grouped.items()):
+                layer_heads = [head for head, _multiplier in layer_entries]
+                layer_biases = {
+                    head: float(bias) * multiplier for head, multiplier in layer_entries
+                }
                 layer_diagnostics: dict[str, Any] = {}
                 hook = make_attention_mask_hook(
                     layer_heads,
@@ -908,6 +920,7 @@ class QwenAttentionRuntime:
                     bias,
                     layer_diagnostics,
                     query_scope=query_scope,
+                    head_biases=layer_biases,
                 )
                 handles.append(
                     self.layers[layer].self_attn.register_forward_pre_hook(
@@ -929,6 +942,7 @@ class QwenAttentionRuntime:
         selected_positions: Sequence[int] = (),
         visual_positions: Sequence[int] = (),
         bias: float = 0.0,
+        head_bias_multipliers: Sequence[float] | None = None,
         query_scope: str = "last_prompt",
         negative_scope: str | None = None,
     ) -> dict[str, Any]:
@@ -958,6 +972,7 @@ class QwenAttentionRuntime:
                 negative,
                 prepared.spans,
                 diagnostics,
+                head_bias_multipliers,
             )
             if heads and bias != 0
             else _nullcontext()
@@ -993,6 +1008,140 @@ class QwenAttentionRuntime:
             # impossible to silently coerce into a low score.
             result["native_prediction"] = parse_native_score(raw)
         return result
+
+    def spatial_reward5_probe_features(
+        self,
+        sample: dict[str, Any],
+        *,
+        prepared: PreparedAttentionInput | None = None,
+        probe_heads: Sequence[Head],
+        probe_multipliers: Sequence[float],
+        selected_positions: Sequence[int] = (),
+        wrong_positions: Sequence[int] = (),
+        probe_bias: float = 6.0,
+        query_scope: str = "all",
+        negative_scope: str = "none",
+    ) -> dict[str, Any]:
+        """Measure label-free, spatially controlled reward-5 probe features.
+
+        Each feature is the target-region minus wrong-region reward-5 margin
+        under a single signed probe head.  The sign and magnitude are frozen in
+        the ranking artifact; no sample outcome or evaluation label is read.
+        """
+        if len(probe_heads) != len(probe_multipliers):
+            raise ValueError("probe heads and multipliers must align one-to-one")
+        prepared = prepared or self.prepare(sample)
+        target = list(selected_positions) or self.target_positions(sample, prepared)
+        if wrong_positions:
+            wrong = list(wrong_positions)
+            wrong_mode = "provided_equal_size_wrong_region"
+        else:
+            wrong, wrong_mode = self.wrong_control_positions(prepared, target)
+        if len(target) != len(wrong) or set(target) & set(wrong):
+            raise RuntimeError("Adaptive probe requires equal-size disjoint regions")
+
+        tokenizer = self.processor.tokenizer
+        prefix_text = "ANSWER: "
+        prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
+        if tokenizer.decode(prefix_ids) != prefix_text:
+            raise RuntimeError("ANSWER prefix does not round-trip through tokenizer")
+        inputs = dict(prepared.inputs)
+        input_ids = inputs["input_ids"]
+        prefix = self.torch.tensor(
+            prefix_ids, dtype=input_ids.dtype, device=input_ids.device
+        )[None, :]
+        inputs["input_ids"] = self.torch.cat([input_ids, prefix], dim=1)
+        original_length = int(input_ids.shape[1])
+        for key, value in list(inputs.items()):
+            if key == "input_ids" or not self.torch.is_tensor(value):
+                continue
+            if value.ndim != 2 or int(value.shape[1]) != original_length:
+                continue
+            if key == "attention_mask":
+                extension = self.torch.ones(
+                    (value.shape[0], len(prefix_ids)),
+                    dtype=value.dtype,
+                    device=value.device,
+                )
+            else:
+                extension = value[:, -1:].expand(value.shape[0], len(prefix_ids))
+            inputs[key] = self.torch.cat([value, extension], dim=1)
+
+        choice_ids = []
+        for value in range(1, 6):
+            ids = tokenizer.encode(str(value), add_special_tokens=False)
+            if len(ids) != 1:
+                raise RuntimeError(f"Reward choice {value} is not a single token")
+            choice_ids.append(ids[0])
+
+        def reward5_margin() -> tuple[float, list[float]]:
+            with self.torch.inference_mode():
+                logits = self.model(**inputs, use_cache=False).logits[
+                    0, -1, choice_ids
+                ].float()
+            margin = logits[4] - self.torch.logsumexp(logits[:4], dim=0)
+            return float(margin.cpu()), [float(value) for value in logits.cpu().tolist()]
+
+        features = []
+        per_head = []
+        for head, multiplier in zip(probe_heads, probe_multipliers):
+            sign = -1.0 if float(multiplier) < 0 else 1.0
+            target_diagnostics: dict[str, Any] = {}
+            with self.steering_hooks(
+                [head],
+                target,
+                prepared.visual_positions,
+                float(probe_bias),
+                query_scope,
+                negative_scope,
+                prepared.spans,
+                target_diagnostics,
+                [sign],
+            ):
+                target_margin, target_logits = reward5_margin()
+            wrong_diagnostics: dict[str, Any] = {}
+            with self.steering_hooks(
+                [head],
+                wrong,
+                prepared.visual_positions,
+                float(probe_bias),
+                query_scope,
+                negative_scope,
+                prepared.spans,
+                wrong_diagnostics,
+                [sign],
+            ):
+                wrong_margin, wrong_logits = reward5_margin()
+            spatial_margin = target_margin - wrong_margin
+            feature = abs(float(multiplier)) * spatial_margin
+            features.append(feature)
+            per_head.append(
+                {
+                    "layer": int(head.layer),
+                    "head": int(head.head),
+                    "frozen_multiplier": float(multiplier),
+                    "probe_signed_bias": float(probe_bias) * sign,
+                    "target_reward5_margin": target_margin,
+                    "wrong_reward5_margin": wrong_margin,
+                    "spatial_reward5_margin": spatial_margin,
+                    "weighted_feature": feature,
+                    "target_choice_logits": target_logits,
+                    "wrong_choice_logits": wrong_logits,
+                    "target_hook_diagnostics": target_diagnostics,
+                    "wrong_hook_diagnostics": wrong_diagnostics,
+                }
+            )
+        return {
+            "features": features,
+            "probe_bias": float(probe_bias),
+            "query_scope": query_scope,
+            "negative_scope": negative_scope,
+            "wrong_region_mode": wrong_mode,
+            "target_positions": target,
+            "wrong_positions": wrong,
+            "per_head": per_head,
+            "labels_model_facing": False,
+        }
 
 
 class _nullcontext:

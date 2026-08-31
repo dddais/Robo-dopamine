@@ -1,0 +1,30 @@
+experiment_id: crossmodel_attention_17_roboreward_interleaved_decode_all_visual_screen
+attention_steer:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  eligibility_mode: auto_valid_grounding
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_17_roboreward_interleaved_decode_all_visual_screen
+  model_path: /home/dais/workspace/model/RoboReward-8B
+  protocol: roborewardbench_interleaved_image_sequence
+  content_order: interleaved
+  num_images: 8
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/cohorts/auto_grounded_v2/example_ids.json
+  grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2/sam3
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_13_roboreward_interleaved_all_frames/consensus_ranking.json
+  ranking_metadata_file: /home/dais/workspace/data/mydata_v2/new/ranking_data.jsonl
+  ranking_grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/ranking_grounding_v2/sam3
+  ranking_split: suc
+  ranking_expected_source_count: 36
+  ranking_require_complete_grounding: false
+  torch_dtype: bfloat16
+  min_pixels: 784
+  max_pixels: 50176
+  device_map: auto
+  temporal_intervention_scope: all_frames
+  max_new_tokens: 128
+  ranking_score_kind: raw_mass
+  top_k_values: [8, 32, 64]
+  swap_bias: 6
+  skip_early_layers: 8
+  steering_query_scope: decode
+  negative_scope: all_visual

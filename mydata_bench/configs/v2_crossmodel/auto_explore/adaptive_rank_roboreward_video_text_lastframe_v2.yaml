@@ -1,0 +1,20 @@
+experiment_id: crossmodel_adaptive_rank_roboreward_video_text_lastframe_v2
+attention_steer:
+  model_path: /home/dais/workspace/model/RoboReward-8B
+  protocol: roborewardbench_native
+  content_order: video_then_text
+causal_rank:
+  source_ranking_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2/attention_14_roboreward_last_frame
+  ranking_inputs_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2/attention_14_roboreward_last_frame/grounded_ranking_inputs.jsonl
+  candidate_depth_per_metric: 64
+  candidate_filter_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_contrastive_rank_roboreward_video_text_lastframe_v2/contrastive_causal_safe_padding_ranking.json
+  candidate_filter_direction: -1
+  positive_contrastive_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_contrastive_rank_roboreward_video_text_lastframe_v2/contrastive_causal_safe_padding_ranking.json
+  negative_success_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_signed_negative_success_roboreward_video_text_lastframe_v2
+  negative_fail_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_signed_negative_fail_roboreward_video_text_lastframe_v2
+  negative_profile_num_head_shards: 1
+  positive_success_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_rank_roboreward_video_text_lastframe
+  positive_fail_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_contrastive_rank_roboreward_video_text_lastframe
+  positive_profile_num_head_shards: 2
+  probe_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_weighted_rank_roboreward_video_text_lastframe_v2/bidirectional_causal_weighted_ranking.json
+  adaptive_output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_adaptive_rank_roboreward_video_text_lastframe_v2

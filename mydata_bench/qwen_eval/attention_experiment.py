@@ -890,6 +890,73 @@ def _load_ranking(path: Path, top_k: int) -> tuple[list[Head], list[dict[str, An
     return heads, rows, data
 
 
+def _build_head_sets(
+    ranking_rows: list[dict[str, Any]],
+    top_values: Iterable[int],
+    ranking_bias_field: str | None,
+    *,
+    exact_low_rank_multipliers: bool = False,
+) -> dict[int, tuple[list[Head], list[Head], list[float], list[float]]]:
+    """Build candidate/control sets without changing legacy control weights."""
+    result = {}
+    row_by_head = {
+        (int(row["layer"]), int(row["head"])): row for row in ranking_rows
+    }
+    for top_k in top_values:
+        candidate_rows = ranking_rows[:top_k]
+        candidate = [
+            Head(int(row["layer"]), int(row["head"])) for row in candidate_rows
+        ]
+        candidate_multipliers = [
+            float(row.get(ranking_bias_field, 1.0)) if ranking_bias_field else 1.0
+            for row in candidate_rows
+        ]
+        low = select_low_ranked_heads(ranking_rows, top_k, candidate)
+        if exact_low_rank_multipliers:
+            low_multipliers = [
+                float(
+                    row_by_head[(int(head.layer), int(head.head))].get(
+                        ranking_bias_field, 1.0
+                    )
+                )
+                if ranking_bias_field
+                else 1.0
+                for head in low
+            ]
+        else:
+            # Preserve the historical behavior for every non-adaptive config.
+            low_multipliers = list(candidate_multipliers)
+        result[top_k] = (
+            candidate,
+            low,
+            candidate_multipliers,
+            low_multipliers,
+        )
+    return result
+
+
+def _adaptive_router_decision(
+    features: Iterable[float], router: dict[str, Any]
+) -> tuple[float, str, list[float]]:
+    values = np.asarray(list(features), dtype=np.float64)
+    center = np.asarray(router["feature_center"], dtype=np.float64)
+    scale = np.asarray(router["feature_scale"], dtype=np.float64)
+    coefficients = np.asarray(
+        router["coefficients_with_intercept"], dtype=np.float64
+    )
+    if values.shape != center.shape or values.shape != scale.shape:
+        raise ValueError("Adaptive router feature dimensions do not match")
+    if coefficients.shape != (values.size + 1,):
+        raise ValueError("Adaptive router coefficient dimensions do not match")
+    if np.any(scale <= 0) or not np.all(np.isfinite(values)):
+        raise ValueError("Adaptive router received invalid feature values or scales")
+    standardized = (values - center) / scale
+    score = float(coefficients[0] + standardized @ coefficients[1:])
+    threshold = float(router["fail_branch_if_score_below"])
+    branch = "fail" if score < threshold else "success"
+    return score, branch, standardized.tolist()
+
+
 def _record(
     sample: dict[str, Any],
     condition: str,
@@ -898,6 +965,8 @@ def _record(
     result: dict[str, Any],
     ranking_fingerprint: str,
     control_region: str,
+    head_bias_multipliers: Iterable[float] = (),
+    adaptive_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -907,10 +976,12 @@ def _record(
         "subset": sample["subset"],
         "condition": condition,
         "heads": [{"layer": head.layer, "head": head.head} for head in heads],
+        "head_bias_multipliers": [float(value) for value in head_bias_multipliers],
         "bias": float(bias),
         "ranking_fingerprint": ranking_fingerprint,
         "control_region": control_region,
         "status": "ok",
+        "adaptive_gate": adaptive_gate,
         **result,
     }
 
@@ -962,15 +1033,59 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
         raise ValueError("top_k_values must contain positive integers")
     _largest, ranking_rows, ranking_data = _load_ranking(ranking_path, max(top_values))
     ranking_fingerprint = str(ranking_data["fingerprint"])
-    head_sets = {}
-    for top_k in top_values:
-        candidate = [
-            Head(int(row["layer"]), int(row["head"]))
-            for row in ranking_rows[:top_k]
+    ranking_bias_field = attention.get("ranking_bias_field")
+    if ranking_bias_field is not None and not isinstance(ranking_bias_field, str):
+        raise ValueError("ranking_bias_field must be a string when provided")
+    adaptive_conflict_router = bool(attention.get("adaptive_conflict_router", False))
+    if adaptive_conflict_router:
+        if not str(ranking_data.get("schema_version", "")).startswith(
+            "conflict-gated-branch-ranking-"
+        ):
+            raise ValueError("Adaptive routing requires a conflict-gated ranking artifact")
+        if ranking_data.get("inference_uses_labels") is not False:
+            raise ValueError("Adaptive routing artifact must explicitly exclude labels")
+        router = ranking_data.get("router")
+        success_rows = ranking_data.get("success_ranking")
+        fail_rows = ranking_data.get("fail_ranking")
+        if not isinstance(router, dict) or not isinstance(success_rows, list) or not isinstance(fail_rows, list):
+            raise ValueError("Adaptive ranking artifact is missing router branches")
+        branch_head_sets = {
+            "success": _build_head_sets(
+                success_rows,
+                top_values,
+                ranking_bias_field,
+                exact_low_rank_multipliers=True,
+            ),
+            "fail": _build_head_sets(
+                fail_rows,
+                top_values,
+                ranking_bias_field,
+                exact_low_rank_multipliers=True,
+            ),
+        }
+        probe_rows = router.get("probe_heads")
+        if not isinstance(probe_rows, list) or not probe_rows:
+            raise ValueError("Adaptive router has no probe heads")
+        probe_heads = [
+            Head(int(row["layer"]), int(row["head"])) for row in probe_rows
         ]
-        head_sets[top_k] = (
-            candidate,
-            select_low_ranked_heads(ranking_rows, top_k, candidate),
+        probe_multipliers = [
+            float(row.get(ranking_bias_field, 1.0)) if ranking_bias_field else 1.0
+            for row in probe_rows
+        ]
+        head_sets = None
+    else:
+        router = None
+        probe_heads = []
+        probe_multipliers = []
+        branch_head_sets = None
+        head_sets = _build_head_sets(
+            ranking_rows,
+            top_values,
+            ranking_bias_field,
+            exact_low_rank_multipliers=bool(
+                attention.get("exact_low_rank_multipliers", False)
+            ),
         )
     bias = float(attention.get("swap_bias", 6))
     scope = str(attention.get("steering_query_scope", "last_prompt"))
@@ -1003,17 +1118,50 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
             prepared = runtime.prepare(sample)
             target = runtime.target_positions(sample, prepared)
             wrong, wrong_mode = runtime.wrong_control_positions(prepared, target)
-            specs = [("baseline", (), 0.0, target, "target_reference")]
+            adaptive_gate = None
+            if adaptive_conflict_router:
+                assert router is not None and branch_head_sets is not None
+                probe_result = runtime.spatial_reward5_probe_features(
+                    sample,
+                    prepared=prepared,
+                    probe_heads=probe_heads,
+                    probe_multipliers=probe_multipliers,
+                    selected_positions=target,
+                    wrong_positions=wrong,
+                    probe_bias=float(router["probe_bias"]),
+                    query_scope=str(attention.get("adaptive_probe_query_scope", "all")),
+                    negative_scope=str(attention.get("adaptive_probe_negative_scope", "none")),
+                )
+                router_score, selected_branch, standardized = _adaptive_router_decision(
+                    probe_result["features"], router
+                )
+                selected_head_sets = branch_head_sets[selected_branch]
+                adaptive_gate = {
+                    "schema_version": str(router["schema_version"]),
+                    "selected_branch": selected_branch,
+                    "router_score": router_score,
+                    "fail_branch_if_score_below": float(
+                        router["fail_branch_if_score_below"]
+                    ),
+                    "features": probe_result["features"],
+                    "standardized_features": standardized,
+                    "probe_diagnostics": probe_result,
+                    "inference_uses_labels": False,
+                }
+            else:
+                assert head_sets is not None
+                selected_head_sets = head_sets
+            specs = [("baseline", (), (), 0.0, target, "target_reference")]
             for top_k in top_values:
-                candidate, low = head_sets[top_k]
+                candidate, low, multipliers, low_multipliers = selected_head_sets[top_k]
                 specs.extend(
                     [
-                        (f"candidate_target_k{top_k}", candidate, bias, target, "target_reference"),
-                        (f"candidate_wrong_k{top_k}", candidate, bias, wrong, wrong_mode),
-                        (f"low_rank_target_k{top_k}", low, bias, target, "target_reference"),
+                        (f"candidate_target_k{top_k}", candidate, multipliers, bias, target, "target_reference"),
+                        (f"candidate_wrong_k{top_k}", candidate, multipliers, bias, wrong, wrong_mode),
+                        (f"low_rank_target_k{top_k}", low, low_multipliers, bias, target, "target_reference"),
                     ]
                 )
-            for condition, heads, magnitude, positions, control_region in specs:
+            for condition, heads, multipliers, magnitude, positions, control_region in specs:
                 if condition in done[completion_key]:
                     continue
                 result = runtime.generate(
@@ -1023,6 +1171,7 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
                     selected_positions=positions,
                     visual_positions=prepared.visual_positions,
                     bias=magnitude,
+                    head_bias_multipliers=multipliers,
                     query_scope=scope,
                     negative_scope=negative_scope,
                 )
@@ -1036,6 +1185,8 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
                         result,
                         ranking_fingerprint,
                         control_region,
+                        multipliers,
+                        adaptive_gate,
                     ),
                 )
         except Exception as exc:
@@ -1058,6 +1209,17 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
             "model_fingerprint": artifact_fingerprint(attention["model_path"]),
             "ranking_path": str(ranking_path),
             "ranking_sha256": sha256_file(ranking_path),
+            "ranking_bias_field": ranking_bias_field,
+            "adaptive_conflict_router": adaptive_conflict_router,
+            "adaptive_router_schema": (
+                None if router is None else router.get("schema_version")
+            ),
+            "adaptive_probe_query_scope": attention.get(
+                "adaptive_probe_query_scope", "all"
+            ),
+            "adaptive_probe_negative_scope": attention.get(
+                "adaptive_probe_negative_scope", "none"
+            ),
             "protocol": attention["protocol"],
             "attention_video_max_frames": attention.get("attention_video_max_frames"),
             "num_images": attention.get("num_images"),

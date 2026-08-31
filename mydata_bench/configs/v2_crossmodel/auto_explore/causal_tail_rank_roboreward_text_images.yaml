@@ -1,0 +1,26 @@
+experiment_id: crossmodel_causal_tail_rank_roboreward_text_images
+attention_steer:
+  model_path: /home/dais/workspace/model/RoboReward-8B
+  protocol: roborewardbench_image_sequence
+  content_order: text_then_images
+  num_images: 8
+  torch_dtype: bfloat16
+  min_pixels: 784
+  max_pixels: 50176
+  device_map: auto
+  temporal_intervention_scope: all_frames
+  max_new_tokens: 128
+  steering_query_scope: all
+  negative_scope: none
+causal_rank:
+  source_ranking_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_09_roboreward_text_images_all_frames
+  ranking_inputs_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_09_roboreward_text_images_all_frames/grounded_ranking_inputs.jsonl
+  explicit_candidate_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_weighted_rank_roboreward_text_images/bidirectional_causal_weighted_ranking.json
+  explicit_candidate_ranking_field: ranking
+  explicit_candidate_tail_count: 64
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_tail_rank_roboreward_text_images
+  expected_success_samples: 34
+  profiling_bias: 6
+  query_scope: all
+  negative_scope: none
+  safe_padding_top_k: 64

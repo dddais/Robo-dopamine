@@ -1,0 +1,36 @@
+experiment_id: crossmodel_causal_signed_negative_fail_roboreward_text_images
+attention_steer:
+  model_path: /home/dais/workspace/model/RoboReward-8B
+  protocol: roborewardbench_image_sequence
+  content_order: text_then_images
+  num_images: 8
+  torch_dtype: bfloat16
+  min_pixels: 784
+  max_pixels: 50176
+  device_map: auto
+  temporal_intervention_scope: all_frames
+  max_new_tokens: 128
+  steering_query_scope: all
+  negative_scope: none
+causal_rank:
+  source_ranking_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_09_roboreward_text_images_all_frames
+  ranking_inputs_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_09_roboreward_text_images_all_frames/grounded_ranking_inputs.jsonl
+  development_cohort_inputs_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_09_roboreward_text_images_all_frames/cohort_inputs.jsonl
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_signed_negative_fail_roboreward_text_images
+  candidate_depth_per_metric: 64
+  candidate_filter_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_contrastive_rank_roboreward_text_images/contrastive_causal_safe_padding_ranking.json
+  candidate_filter_direction: -1
+  expected_success_samples: 32
+  profiling_bias: -6
+  query_scope: all
+  negative_scope: none
+  contrastive_fail_development: true
+  positive_contrastive_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_contrastive_rank_roboreward_text_images/contrastive_causal_safe_padding_ranking.json
+  negative_success_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_signed_negative_success_roboreward_text_images
+  negative_fail_profile_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_signed_negative_fail_roboreward_text_images
+  negative_profile_num_head_shards: 1
+  bidirectional_output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_rank_roboreward_text_images
+  safe_padding_top_k: 64
+  bidirectional_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_rank_roboreward_text_images/bidirectional_causal_safe_padding_ranking.json
+  weighted_output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_bidirectional_weighted_rank_roboreward_text_images
+  weighted_multiplier_floor: 0.1

@@ -181,6 +181,7 @@ def make_attention_mask_hook(
     diagnostics: dict | None = None,
     *,
     query_scope: str = "all",
+    head_biases: dict[int, float] | None = None,
 ):
     """Build an additive pre-softmax attention hook for a declared query scope.
 
@@ -203,11 +204,16 @@ def make_attention_mask_hook(
         raise ValueError("Selected head index is outside query-head range")
     base_length = max(selected + other, default=-1) + 1
     base = torch.zeros((1, num_query_heads, 1, base_length), dtype=torch.float32)
+    resolved_head_biases = {
+        head: float(head_biases.get(head, swap_bias) if head_biases is not None else swap_bias)
+        for head in heads
+    }
     for head in heads:
+        magnitude = resolved_head_biases[head]
         if selected:
-            base[0, head, 0, selected] = float(swap_bias)
+            base[0, head, 0, selected] = magnitude
         if other:
-            base[0, head, 0, other] = -float(swap_bias)
+            base[0, head, 0, other] = -magnitude
     diagnostics = diagnostics if diagnostics is not None else {}
     diagnostics.update(
         {
@@ -227,6 +233,7 @@ def make_attention_mask_hook(
             "other_visual_token_count": len(other),
             "selected_other_disjoint": not bool(set(selected) & set(other)),
             "swap_bias": float(swap_bias),
+            "head_biases": {str(head): value for head, value in resolved_head_biases.items()},
             "query_scope": query_scope,
             "new_text_keys_zero_bias": True,
         }

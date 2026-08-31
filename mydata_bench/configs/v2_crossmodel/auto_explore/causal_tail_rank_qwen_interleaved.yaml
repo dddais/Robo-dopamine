@@ -1,0 +1,26 @@
+experiment_id: crossmodel_causal_tail_rank_qwen_interleaved
+attention_steer:
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+  protocol: roborewardbench_interleaved_image_sequence
+  content_order: interleaved
+  num_images: 8
+  torch_dtype: bfloat16
+  min_pixels: 784
+  max_pixels: 50176
+  device_map: auto
+  temporal_intervention_scope: all_frames
+  max_new_tokens: 128
+  steering_query_scope: all
+  negative_scope: none
+causal_rank:
+  source_ranking_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_15_qwen_interleaved_all_frames
+  ranking_inputs_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_15_qwen_interleaved_all_frames/grounded_ranking_inputs.jsonl
+  explicit_candidate_ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_adaptive_rank_qwen_interleaved_v3/adaptive_conflict_ranking_v3.json
+  explicit_candidate_ranking_field: fail_ranking
+  explicit_candidate_tail_count: 64
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/causal_tail_rank_qwen_interleaved
+  expected_success_samples: 34
+  profiling_bias: 6
+  query_scope: all
+  negative_scope: none
+  safe_padding_top_k: 64
