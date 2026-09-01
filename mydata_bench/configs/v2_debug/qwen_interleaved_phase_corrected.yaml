@@ -1,0 +1,26 @@
+experiment_id: debug_qwen_interleaved_phase_corrected
+attention_steer:
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+  protocol: roborewardbench_interleaved_image_sequence
+  content_order: interleaved
+  torch_dtype: bfloat16
+  min_pixels: 784
+  max_pixels: 50176
+  device_map: auto
+  temporal_intervention_scope: all_frames
+  temporal_span_mode: native_pairs
+  temporal_bbox_reduce: last
+gaze_debug:
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_debug/qwen_interleaved_phase_corrected
+  cohort_inputs: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_15_qwen_interleaved_all_frames/cohort_inputs.jsonl
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_15_qwen_interleaved_all_frames/consensus_ranking.json
+  targets_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2/targets.jsonl
+  example_ids: [fail/ljx_lfz_task_1_1/1, fail/ljx_lfz_task_1_1/2, fail/ljx_lfz_task_1_1/3, suc/ljx_lfz_task_1_1/1, fail/ljx_lfz_task_1_1/10, fail/ljx_lfz_task_1_1/11, fail/ljx_lfz_task_1_1/12, suc/ljx_lfz_task_1_1/4]
+  top_k: 8
+  strong_bias: 6.0
+  random_seed: 20260901
+  reward_max_new_tokens: 8
+  probe_max_new_tokens: 48
+  generation_conditions: [zero_bias_hook, gaze_prefill, gaze_decode, gaze_last_prompt, random_both_target_vs_all]
+  logprob_conditions: [gaze_prefill, gaze_decode, gaze_last_prompt]
+  probe_conditions: [zero_bias_hook, gaze_prefill, gaze_decode, gaze_last_prompt, random_both_target_vs_all]

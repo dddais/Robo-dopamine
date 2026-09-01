@@ -43,6 +43,17 @@ Task: {task}"""
 ANSWER_RE = re.compile(r"\bANSWER\s*:\s*([1-5])\b", flags=re.IGNORECASE)
 
 
+def _model_load_kwargs(config: dict[str, Any], dtype: Any) -> dict[str, Any]:
+    """Keep the historical backend default unless explicitly overridden."""
+    kwargs: dict[str, Any] = {
+        "torch_dtype": dtype,
+        "device_map": config.get("device_map", "auto"),
+    }
+    if config.get("attn_implementation"):
+        kwargs["attn_implementation"] = str(config["attn_implementation"])
+    return kwargs
+
+
 def _validate_paper_protocol_configuration(evaluation: dict[str, Any]) -> None:
     """Reject a config that labels a custom input path as the paper protocol.
 
@@ -462,12 +473,14 @@ class NativeRoboReward:
             dtype = getattr(torch, dtype_name)
         except AttributeError as exc:
             raise ValueError(f"Unknown torch_dtype {dtype_name!r}") from exc
+        model_kwargs = _model_load_kwargs(config, dtype)
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-            config["model_path"],
-            torch_dtype=dtype,
-            device_map=config.get("device_map", "auto"),
+            config["model_path"], **model_kwargs
         )
         self.model.eval()
+        self.attention_backend = str(
+            getattr(self.model.config, "_attn_implementation", "unknown")
+        )
         self.max_new_tokens = int(config.get("max_new_tokens", 128))
         self.do_sample = bool(config.get("do_sample", False))
         self.temperature = float(config.get("temperature", 0.7))
@@ -621,6 +634,7 @@ class NativeRoboReward:
                 if self.content_order == "text_then_video"
                 else ["video", "text"]
             )
+        input_diagnostics["attention_backend"] = self.attention_backend
         device = self.model.device
         inputs = {key: value.to(device) for key, value in inputs.items()}
         generation = {"max_new_tokens": self.max_new_tokens, "do_sample": self.do_sample}

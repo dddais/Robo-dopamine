@@ -60,6 +60,17 @@ def requested_example_ids(evaluation: dict[str, Any]) -> set[str]:
     return requested
 
 
+def _model_load_kwargs(config: dict[str, Any], dtype: Any) -> dict[str, Any]:
+    """Keep the historical backend default unless explicitly overridden."""
+    kwargs: dict[str, Any] = {
+        "torch_dtype": dtype,
+        "device_map": config.get("device_map", "auto"),
+    }
+    if config.get("attn_implementation"):
+        kwargs["attn_implementation"] = str(config["attn_implementation"])
+    return kwargs
+
+
 class Qwen3VLBaseline:
     """Direct Transformers runner for both explicitly frozen baseline contracts."""
 
@@ -86,11 +97,13 @@ class Qwen3VLBaseline:
             dtype = getattr(torch, dtype_name)
         except AttributeError as exc:
             raise ValueError(f"Unknown torch_dtype {dtype_name!r}") from exc
+        model_kwargs = _model_load_kwargs(config, dtype)
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-            config["model_path"],
-            torch_dtype=dtype,
-            device_map=config.get("device_map", "auto"),
+            config["model_path"], **model_kwargs
         ).eval()
+        self.attention_backend = str(
+            getattr(self.model.config, "_attn_implementation", "unknown")
+        )
         self.max_new_tokens = int(config.get("max_new_tokens", 128))
         self.do_sample = bool(config.get("do_sample", False))
         self.temperature = float(config.get("temperature", 0.7))
@@ -175,6 +188,7 @@ class Qwen3VLBaseline:
             "video_token_count": int((inputs["input_ids"] == video_token_id).sum()),
             "video_metadata": metadata_record,
             "content_order": content_order,
+            "attention_backend": self.attention_backend,
         }
 
     def _infer_endpoint_images(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -194,6 +208,7 @@ class Qwen3VLBaseline:
             "image_count": len(paths),
             "image_grid_thw": grid.detach().cpu().tolist() if grid is not None else None,
             "image_token_count": int((inputs["input_ids"] == image_token_id).sum()),
+            "attention_backend": self.attention_backend,
         }
 
     def _infer_image_sequence(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -236,6 +251,7 @@ class Qwen3VLBaseline:
             "content_order": content_order,
             "media_order": payload["media_order"],
             "sampling_record": payload["sampling_record"],
+            "attention_backend": self.attention_backend,
         }
 
     def infer(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
