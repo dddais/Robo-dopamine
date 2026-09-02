@@ -35,6 +35,11 @@
 
 
 
+## 已有实验与结果
+已有实验可供参考：
+- 目前已进行的跨模型实验：/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_crossmodel.md
+- 该实验结果：/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_crossmodel_summary.md
+
 ## 可参考相关代码/文献
 
 - /home/dais/workspace/gaze-heads : [https://arxiv.org/pdf/2606.14703v1](https://arxiv.org/pdf/2606.14703v1)
@@ -53,22 +58,6 @@
 
 
 ## 原因分析
-
-
-
-### video input
-
-我怀疑有可能和输入形式有关。GRM输入两个时刻的三视图，而另外两个模型直接输入完整视频序列，video processor采样8帧，并且每两帧成为一个temporal span。一方面我觉得这个两帧作为一个temporal span可能会有问题，比如target img token找不准等。因此已经进行了下面的 **改造输入格式video->image：** 实验来验证
-
-### casual masking
-
-自回归的casual masking可能影响了attention mask的作用 。因此已经进行了下面 **改造输入格式：GRM类型输入**的实验。
-
-## temporal prior
-
-GRM一次推理只获得before 和after 两个时刻的图像，而roboreward-8b获取了8个时刻的图像，这有可能时序的进展成为模型的主要判断依据，指令token的贡献被稀释。目前还没进行实验验证。
-
-## 其它原因
 
 请你进行调研思考理论分析后补充。
 
@@ -96,35 +85,6 @@ GRM一次推理只获得before 和after 两个时刻的图像，而roboreward-8b
 4.pairwise区分度分析：因为数据集构成原理是1条suc数据，对应了1条或多条相同视频，不同instruction的fail数据，所以需要先找到suc数据所对应的fail数据，分析相同视频下不同instruction带来的影响。对于roboreward-8b,qwen这种输出离散的模型，计算统计配对数据中suc数据的预测值与fail数据的预测值的差值，把差值分成：负，0，1，2，3，4几档统计一下；
 5.ranking head统计:列出具体的top 8，统计top 8,32,64在不同模型的重合度
 
-## 已经完成的实验
+## 最终有效方案
 
-
-
-### 改造输入格式video->image：
-
-不直接输入video，而是先采样img，以img的形式输入，类似于GRM，只是输入的内容不同（一个是三视角after，before,一个是时序的单视角）。然后以这个输入格式进行实验：
-1.roboreward-8b baseline :先输入text再输入img
-2.roboreward-8b baseline :先输入img再输入text
-3.roboreward-8b +attention ranking + steering ：先输入text再输入img
-4.roboreward-8b +attention ranking + steering ：先输入img再输入text
-5.qwen3-vl-8b baseline: 先输入text再输入img
-6.qwen3-vl-8b baseline:先输入img再输入text
-7.qwen3-vl-8b +attention ranking + steering ：先输入text再输入img
-8.qwen3-vl-8b +attention ranking + steering ：先输入img再输入text
-
-9.roboreward-8b +attention ranking + steering ：先输入text再输入img;-bias加在所有帧的非target区域，+bias加在所有帧的target区域
-10.roboreward-8b +attention ranking + steering ：先输入img再输入text;-bias加在所有帧的非target区域，+bias加在所有帧的target区域
-11.qwen3-vl-8b +attention ranking + steering ：先输入text再输入img;-bias加在所有帧的非target区域，+bias加在所有帧的target区域
-12.qwen3-vl-8b +attention ranking + steering ：先输入img再输入text;-bias加在所有帧的非target区域，+bias加在所有帧的target区域
-
-### 改造输入格式：GRM类型嵌入式输入
-
-考虑到自回归模型casual masking的影响，不把image text完全分开，不直接输入video，而是类似于GRM那种，把img嵌入到text prompt当中。当然具体的system prompt内容需要改一下。
-
-1.roboreward-8b +attention ranking + steering ：-bias加在所有帧的非target区域，+bias加在所有帧的target区域
-2.roboreward-8b +attention ranking + steering ：-bias加在最后一帧的非target区域，+bias加在最后一帧的target区域
-3.qwen3-vl-8b +attention ranking + steering ：-bias加在所有帧的非target区域，+bias加在所有帧的target区域
-4.qwen3-vl-8b +attention ranking + steering ：-bias加在最后一帧的非target区域，+bias加在最后一帧的target区域
-
-## 待探索的实验：
-
+请你进行研究后，在这写明满足主线目标的最终方案
