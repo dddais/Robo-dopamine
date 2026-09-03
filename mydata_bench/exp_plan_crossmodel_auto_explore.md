@@ -8,8 +8,11 @@
 
 ## 研究背景：
 
-- 基于/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan.md的规划，进行了baseline 和attention steering的实验，目前发现在robo-dopamine的GRM上该方法的效果十分明显，但是在qwen3-vl-8b和roboreward-8b的效果不是很明显,只有/home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_13_roboreward_interleaved_all_frames/exp_record.md 这一个配置能够给roboreward-8b带来提升，其它的配置效果都比较差。
-- 目前进行了初步探索（见本文档的 “原因分析” 和 “已经完成的实验”部分 ），但是效果仍然不是很理想。
+- 基于/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan.md的规划，进行了baseline 和attention steering的实验，目前发现在robo-dopamine的GRM上该方法的效果十分明显;
+- 但是在qwen3-vl-8b和roboreward-8b的效果不是很明显
+- 已有实验可供参考：
+  - 目前已进行的跨模型实验：/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_crossmodel.md
+  - 该实验结果：/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_crossmodel_summary.md
 
 ## 主线目标1
 
@@ -34,11 +37,6 @@
 - 不用担心耗时，进行充分的调研、思考、理论分析，提出有道理的优雅的方案，严禁作弊的方法
 
 
-
-## 已有实验与结果
-已有实验可供参考：
-- 目前已进行的跨模型实验：/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_crossmodel.md
-- 该实验结果：/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_crossmodel_summary.md
 
 ## 可参考相关代码/文献
 
