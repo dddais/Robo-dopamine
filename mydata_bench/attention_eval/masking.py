@@ -6,7 +6,9 @@ from typing import Sequence
 import numpy as np
 
 
-QUERY_SCOPES = frozenset({"all", "prefill", "last_prompt", "decode"})
+QUERY_SCOPES = frozenset(
+    {"all", "prefill", "last_prompt", "decode", "last_prompt_and_decode"}
+)
 NEGATIVE_SCOPES = frozenset({"all_visual", "target_span", "other_spans", "none"})
 
 
@@ -14,6 +16,8 @@ NEGATIVE_SCOPES = frozenset({"all_visual", "target_span", "other_spans", "none"}
 class Head:
     layer: int
     head: int
+    # Fixed cohort-level steering strength. Existing rankings remain uniform.
+    weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -181,6 +185,9 @@ def make_attention_mask_hook(
     diagnostics: dict | None = None,
     *,
     query_scope: str = "all",
+    positive_bias_scale: float = 1.0,
+    negative_bias_scale: float = 1.0,
+    head_bias_weights: Sequence[float] | None = None,
 ):
     """Build an additive pre-softmax attention hook for a declared query scope.
 
@@ -196,7 +203,23 @@ def make_attention_mask_hook(
     if query_scope not in QUERY_SCOPES:
         choices = ", ".join(sorted(QUERY_SCOPES))
         raise ValueError(f"Unknown query_scope {query_scope!r}; choose one of {choices}")
-    heads = sorted({int(value) for value in head_indices})
+    raw_heads = [int(value) for value in head_indices]
+    if len(raw_heads) != len(set(raw_heads)):
+        raise ValueError("Selected head indices must be unique within a layer")
+    if head_bias_weights is None:
+        raw_weights = [1.0] * len(raw_heads)
+    else:
+        raw_weights = [float(value) for value in head_bias_weights]
+        if len(raw_weights) != len(raw_heads):
+            raise ValueError("head_bias_weights must align with head_indices")
+    if any(not np.isfinite(value) or value < 0 for value in raw_weights):
+        raise ValueError("head_bias_weights must be finite and non-negative")
+    weight_by_head = dict(zip(raw_heads, raw_weights, strict=True))
+    heads = sorted(weight_by_head)
+    positive_bias_scale = float(positive_bias_scale)
+    negative_bias_scale = float(negative_bias_scale)
+    if positive_bias_scale < 0 or negative_bias_scale < 0:
+        raise ValueError("positive/negative bias scales must be non-negative")
     selected = sorted({int(value) for value in selected_positions})
     other = sorted({int(value) for value in other_visual_positions})
     if any(value < 0 or value >= num_query_heads for value in heads):
@@ -204,10 +227,15 @@ def make_attention_mask_hook(
     base_length = max(selected + other, default=-1) + 1
     base = torch.zeros((1, num_query_heads, 1, base_length), dtype=torch.float32)
     for head in heads:
+        head_weight = weight_by_head[head]
         if selected:
-            base[0, head, 0, selected] = float(swap_bias)
+            base[0, head, 0, selected] = (
+                float(swap_bias) * positive_bias_scale * head_weight
+            )
         if other:
-            base[0, head, 0, other] = -float(swap_bias)
+            base[0, head, 0, other] = (
+                -float(swap_bias) * negative_bias_scale * head_weight
+            )
     diagnostics = diagnostics if diagnostics is not None else {}
     diagnostics.update(
         {
@@ -220,6 +248,9 @@ def make_attention_mask_hook(
             "decode_applied_calls": 0,
             "applied_query_rows": 0,
             "selected_heads": heads,
+            "head_bias_weights": {
+                str(head): weight_by_head[head] for head in heads
+            },
             # Per-record outputs retain the selected/visual token positions.
             # Keep only compact evidence here because this dictionary is
             # replicated once for every steered layer and every cohort sample.
@@ -227,6 +258,8 @@ def make_attention_mask_hook(
             "other_visual_token_count": len(other),
             "selected_other_disjoint": not bool(set(selected) & set(other)),
             "swap_bias": float(swap_bias),
+            "positive_bias_scale": positive_bias_scale,
+            "negative_bias_scale": negative_bias_scale,
             "query_scope": query_scope,
             "new_text_keys_zero_bias": True,
         }
@@ -247,6 +280,7 @@ def make_attention_mask_hook(
             query_scope == "all"
             or (query_scope in {"prefill", "last_prompt"} and not is_decode)
             or (query_scope == "decode" and is_decode)
+            or query_scope == "last_prompt_and_decode"
         )
         if not should_apply:
             diagnostics["skipped_calls"] += 1
@@ -257,7 +291,7 @@ def make_attention_mask_hook(
             bias = torch.nn.functional.pad(bias, (0, key_length - base_length))
         else:
             bias = bias[..., :key_length]
-        if query_scope == "last_prompt":
+        if query_scope in {"last_prompt", "last_prompt_and_decode"} and not is_decode:
             scoped = torch.zeros(
                 (1, num_query_heads, query_length, key_length),
                 device=mask.device,

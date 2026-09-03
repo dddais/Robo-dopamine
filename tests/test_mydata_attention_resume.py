@@ -5,11 +5,27 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import torch
+
 from mydata_bench.attention_eval.experiment import _record as grm_record
+from mydata_bench.attention_eval.masking import make_attention_mask_hook
 from mydata_bench.qwen_eval.attention_experiment import _completed_conditions
 
 
 class AttentionResumeTests(unittest.TestCase):
+    def test_per_head_bias_weights_scale_selected_heads(self) -> None:
+        mask = torch.zeros((1, 1, 2, 5), dtype=torch.float32)
+        hook = make_attention_mask_hook(
+            [0, 2], [1], [3], 3, 4, head_bias_weights=[1.0, 0.25]
+        )
+        _, output = hook(None, (), {"attention_mask": mask})
+        changed = output["attention_mask"]
+        self.assertTrue(torch.all(changed[0, 0, :, 1] == 4))
+        self.assertTrue(torch.all(changed[0, 0, :, 3] == -4))
+        self.assertTrue(torch.all(changed[0, 2, :, 1] == 1))
+        self.assertTrue(torch.all(changed[0, 2, :, 3] == -1))
+        self.assertTrue(torch.all(changed[0, 1] == 0))
+
     def test_resume_requires_current_fingerprints_and_latest_ok_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "steering.jsonl"

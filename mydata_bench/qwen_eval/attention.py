@@ -123,6 +123,24 @@ def reduce_temporal_bboxes(
     return result
 
 
+def expand_bbox(
+    bbox: Sequence[float], image_size: tuple[int, int], ratio: float
+) -> list[float]:
+    """Expand an xyxy box symmetrically to retain local relational context."""
+    if ratio < 0:
+        raise ValueError("bbox_expand_ratio must be non-negative")
+    x1, y1, x2, y2 = (float(value) for value in bbox)
+    width, height = image_size
+    dx = max(0.0, x2 - x1) * ratio / 2
+    dy = max(0.0, y2 - y1) * ratio / 2
+    return [
+        max(0.0, x1 - dx),
+        max(0.0, y1 - dy),
+        min(float(width), x2 + dx),
+        min(float(height), y2 + dy),
+    ]
+
+
 def prepare_native_video_processor_input(
     processor: Any,
     task: str,
@@ -340,6 +358,9 @@ class QwenAttentionRuntime:
                 f"Unknown temporal_bbox_reduce {self.temporal_bbox_reduce!r}; "
                 f"choose one of {choices}"
             )
+        self.bbox_expand_ratio = float(config.get("bbox_expand_ratio", 0.0))
+        if self.bbox_expand_ratio < 0:
+            raise ValueError("bbox_expand_ratio must be non-negative")
         if (
             self.protocol != ROBOREWARDBENCH_NATIVE
             and self.temporal_span_mode != "native_pairs"
@@ -747,8 +768,12 @@ class QwenAttentionRuntime:
                     }
                 )
             metadata["intervention_span_tracking_alignment"] = alignment
+        effective = [
+            (span, expand_bbox(bbox, size, self.bbox_expand_ratio), source_index)
+            for span, bbox, source_index in selected
+        ]
         positions = []
-        for span, bbox, _source_index in selected:
+        for span, bbox, _source_index in effective:
             positions.extend(
                 bbox_to_token_positions(span, bbox, size, self.merge_size)
             )
@@ -758,8 +783,14 @@ class QwenAttentionRuntime:
         if prepared.video_metadata is not None:
             prepared.video_metadata["temporal_intervention_scope"] = self.temporal_scope
             prepared.video_metadata["temporal_bbox_reduce"] = self.temporal_bbox_reduce
+            prepared.video_metadata["bbox_expand_ratio"] = self.bbox_expand_ratio
+            for item, (_span, bbox, _source_index) in zip(
+                prepared.video_metadata.get("intervention_span_tracking_alignment", []),
+                effective,
+            ):
+                item["effective_bbox"] = bbox
             prepared.video_metadata["selected_target_span_labels"] = [
-                span.label for span, _bbox, _source_index in selected
+                span.label for span, _bbox, _source_index in effective
             ]
         return positions
 
@@ -878,9 +909,9 @@ class QwenAttentionRuntime:
     ):
         if query_scope not in QUERY_SCOPES:
             raise ValueError(f"Unknown query scope {query_scope!r}")
-        grouped: dict[int, list[int]] = {}
+        grouped: dict[int, list[Head]] = {}
         for head in heads:
-            grouped.setdefault(int(head.layer), []).append(int(head.head))
+            grouped.setdefault(int(head.layer), []).append(head)
         handles = []
         other, selected_span_labels = resolve_negative_positions(
             spans, selected_positions, negative_scope
@@ -901,13 +932,20 @@ class QwenAttentionRuntime:
             for layer, layer_heads in sorted(grouped.items()):
                 layer_diagnostics: dict[str, Any] = {}
                 hook = make_attention_mask_hook(
-                    layer_heads,
+                    [int(head.head) for head in layer_heads],
                     selected_positions,
                     other,
                     self.num_heads,
                     bias,
                     layer_diagnostics,
                     query_scope=query_scope,
+                    positive_bias_scale=float(
+                        self.config.get("positive_bias_scale", 1.0)
+                    ),
+                    negative_bias_scale=float(
+                        self.config.get("negative_bias_scale", 1.0)
+                    ),
+                    head_bias_weights=[float(head.weight) for head in layer_heads],
                 )
                 handles.append(
                     self.layers[layer].self_attn.register_forward_pre_hook(

@@ -1,0 +1,17 @@
+experiment_id: auto_full_51_roboreward_interleaved_sparse_weighted
+attention_steer:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  eligibility_mode: auto_valid_grounding
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/full_51_roboreward_interleaved_sparse_weighted
+  model_path: /home/dais/workspace/model/RoboReward-8B
+  protocol: roborewardbench_interleaved_image_sequence
+  content_order: interleaved
+  num_images: 8
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/cohorts/auto_grounded_v2/example_ids.json
+  grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2/sam3
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/artifacts/roboreward_interleaved_sparse_weighted_v1.json
+  top_k_values: [8, 32, 64]
+  bias_by_top_k: {8: 6.0, 32: 6.0, 64: 6.0}
+  run_controls: false
+  bootstrap_samples: 10000

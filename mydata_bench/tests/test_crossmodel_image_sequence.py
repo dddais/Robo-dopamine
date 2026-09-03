@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from mydata_bench.config import load_config
+from mydata_bench.qwen_eval.attention import expand_bbox
 from mydata_bench.qwen_eval.protocols import (
     INTERLEAVED_REWARD_PROMPT,
     ROBOREWARDBENCH_IMAGE_SEQUENCE,
@@ -27,6 +28,13 @@ def _write_video(path: Path, frame_count: int = 10) -> None:
     for index in range(frame_count):
         writer.write(np.full((24, 32, 3), index, dtype=np.uint8))
     writer.release()
+
+
+def test_expand_bbox_preserves_default_and_clips_context() -> None:
+    assert expand_bbox([20, 10, 40, 30], (100, 80), 0) == [20, 10, 40, 30]
+    assert expand_bbox([10, 5, 50, 45], (60, 50), 1) == [0, 0, 60, 50]
+    with pytest.raises(ValueError, match="non-negative"):
+        expand_bbox([0, 0, 1, 1], (10, 10), -0.1)
 
 
 def test_uniform_image_sequence_is_fixed_and_terminal_aligned(tmp_path: Path) -> None:
@@ -120,7 +128,11 @@ def test_interleaved_protocol_places_text_around_every_image(
 
 def test_crossmodel_config_matrix_is_complete_and_isolated() -> None:
     root = Path(__file__).resolve().parents[1] / "configs" / "v2_crossmodel"
-    configs = sorted(root.glob("*.yaml"))
+    configs = sorted(
+        path
+        for path in root.glob("*.yaml")
+        if path.name.startswith(("attention_", "baseline_"))
+    )
     assert len(configs) == 16
     for path in configs:
         config = load_config(path)

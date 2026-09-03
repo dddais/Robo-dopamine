@@ -1,0 +1,30 @@
+experiment_id: auto_pilot_28_qwen_images_text_head_pairs
+attention_steer:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  eligibility_mode: auto_valid_grounding
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/pilot_28_qwen_images_text_head_pairs
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+  protocol: roborewardbench_image_sequence
+  content_order: images_then_text
+  num_images: 8
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/artifacts/pilot_60_pairs_example_ids.json
+  grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2/sam3
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/artifacts/qwen_images_goodblock_pairs.json
+  torch_dtype: bfloat16
+  min_pixels: 784
+  max_pixels: 50176
+  device_map: auto
+  temporal_intervention_scope: last_frame
+  max_new_tokens: 128
+  top_k_values: [2]
+  swap_bias: 6.0
+  candidate_rank_slices:
+    - {name: pair1, start: 0, count: 2}
+    - {name: pair2, start: 2, count: 2}
+    - {name: pair3, start: 4, count: 2}
+    - {name: pair4, start: 6, count: 2}
+  skip_early_layers: 8
+  steering_query_scope: all
+  negative_scope: target_span
+  run_controls: false

@@ -1,0 +1,27 @@
+experiment_id: auto_pilot_10_roboreward_interleaved_context_kdose_all
+attention_steer:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  eligibility_mode: auto_valid_grounding
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/pilot_10_roboreward_interleaved_context_kdose_all
+  model_path: /home/dais/workspace/model/RoboReward-8B
+  protocol: roborewardbench_interleaved_image_sequence
+  content_order: interleaved
+  num_images: 8
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/artifacts/pilot_60_pairs_example_ids.json
+  grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2/sam3
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_13_roboreward_interleaved_all_frames/consensus_ranking.json
+  torch_dtype: bfloat16
+  min_pixels: 784
+  max_pixels: 50176
+  device_map: auto
+  temporal_intervention_scope: all_frames
+  bbox_expand_ratio: 1.0
+  max_new_tokens: 128
+  top_k_values: [8, 32, 64]
+  bias_by_top_k: {8: 6.0, 32: 3.0, 64: 1.5}
+  skip_early_layers: 8
+  steering_query_scope: all
+  negative_scope: all_visual
+  run_controls: false
+  bootstrap_samples: 1000

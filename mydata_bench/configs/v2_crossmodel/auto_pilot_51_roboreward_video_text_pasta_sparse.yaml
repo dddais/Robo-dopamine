@@ -1,0 +1,30 @@
+experiment_id: auto_pilot_51_roboreward_video_text_pasta_sparse
+attention_steer:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  eligibility_mode: auto_valid_grounding
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/pilot_51_roboreward_video_text_pasta_sparse
+  model_path: /home/dais/workspace/model/RoboReward-8B
+  protocol: roborewardbench_native
+  content_order: video_then_text
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/artifacts/pilot_60_pairs_example_ids.json
+  grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2/sam3
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/artifacts/roboreward_video_pasta_sparse_weighted_v1.json
+  torch_dtype: bfloat16
+  min_pixels: 784
+  max_pixels: 50176
+  device_map: auto
+  attention_video_max_frames: 8
+  temporal_span_mode: native_pairs
+  temporal_bbox_reduce: last
+  temporal_intervention_scope: all_frames
+  max_new_tokens: 128
+  top_k_values: [8, 32, 64]
+  bias_by_top_k: {8: 6.0, 32: 6.0, 64: 6.0}
+  positive_bias_scale: 0.0
+  negative_bias_scale: 1.0
+  skip_early_layers: 8
+  steering_query_scope: all
+  negative_scope: all_visual
+  run_controls: false
+  bootstrap_samples: 1000

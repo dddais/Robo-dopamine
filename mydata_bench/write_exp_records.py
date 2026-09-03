@@ -496,8 +496,10 @@ def write_native_report(experiment: Path, rows: Sequence[dict], metadata: Mappin
     validate_existing_metrics(experiment, groups, native=True, attention=attention)
     preferred = []
     if attention:
-        manifest = read_json(experiment / "steering_manifest.json")
-        preferred = [str(value) for value in manifest.get("conditions", [])]
+        manifest_path = experiment / "steering_manifest.json"
+        if manifest_path.exists():
+            manifest = read_json(manifest_path)
+            preferred = [str(value) for value in manifest.get("conditions", [])]
     conditions = ordered_conditions(groups, preferred)
     lines = report_header(experiment, source_file, enriched, attention=attention, ranking_metadata=ranking_metadata)
     lines.extend(["", "## 总览：MAE 与准确率", ""])
@@ -663,16 +665,30 @@ def load_metadata(path: Path) -> dict[str, dict]:
     return metadata
 
 
-def generate(experiments_root: Path, metadata_file: Path, ranking_metadata: Path) -> list[Path]:
+def generate(
+    experiments_root: Path,
+    metadata_file: Path,
+    ranking_metadata: Path,
+    experiment_names: set[str] | None = None,
+) -> list[Path]:
     metadata = load_metadata(metadata_file)
     written = []
-    experiment_dirs = sorted(path for path in experiments_root.iterdir() if path.is_dir())
+    experiment_dirs = sorted(
+        path
+        for path in experiments_root.iterdir()
+        if path.is_dir() and (experiment_names is None or path.name in experiment_names)
+    )
     for experiment in experiment_dirs:
         name = experiment.name
         if name.startswith("baseline_"):
             result_files = sorted(experiment.glob("records.shard-*.jsonl"))
             attention = False
         elif name.startswith("attention_"):
+            result_files = [experiment / "steering.jsonl"]
+            attention = True
+        elif (experiment / "steering.jsonl").exists():
+            # Auto-research pilot/holdout directories use descriptive prefixes
+            # while retaining the exact attention-steering result schema.
             result_files = [experiment / "steering.jsonl"]
             attention = True
         else:
@@ -698,12 +714,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiments-root", type=Path, default=repo_root / "results/mydata_bench/experiments")
     parser.add_argument("--metadata", type=Path, default=workspace / "data/ljx_lfz_task/new/metadata.jsonl")
     parser.add_argument("--ranking-metadata", type=Path, default=workspace / "data/ljx_lfz_task/new/ranking_data.jsonl")
+    parser.add_argument(
+        "--experiment-name",
+        action="append",
+        default=None,
+        help="Generate only the named experiment directory; may be repeated.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    written = generate(args.experiments_root, args.metadata, args.ranking_metadata)
+    experiment_names = set(args.experiment_name) if args.experiment_name else None
+    written = generate(
+        args.experiments_root,
+        args.metadata,
+        args.ranking_metadata,
+        experiment_names=experiment_names,
+    )
     if not written:
         raise SystemExit(f"No completed experiments found under {args.experiments_root}")
     for path in written:

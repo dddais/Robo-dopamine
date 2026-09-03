@@ -59,7 +59,15 @@
 
 ## 原因分析
 
-请你进行调研思考理论分析后补充。
+原方法失效的主因不是 hook 未生效，而是 **head 因果方向异质性、累计剂量过强、输入协议依赖和小开发集分布偏差** 的叠加：
+
+- attention-logit 的 `+6/-6` 相对赔率变化为 `exp(12)`；K 从 8 增至 64 时强剂量 head 数又增加 8 倍，容易把模型整体分数推向同一端点，典型表现是 fail 改善但 suc 下降。
+- raw attention mass 只能说明“看了哪里”，不能说明该 head 对最终 reward arbitration 的方向。互斥 block/pair 扫描显示，同一 ranking 中相邻 head block 可分别强化 suc 或 fail，甚至方向相反。
+- head 有明显的 model-specific 和 protocol-specific 性质。跨模型、跨输入顺序迁移多数失败；最终四个有效配置的 top-8 两两仅重合 0–1 个。
+- decode-only 与 last-prompt-only 的 exposure audit 证明 hook 正常，但通常效应太弱；全 query 适合多数最终方案，而视觉时域范围仍需服从输入协议。
+- 最初 120 条开发集只覆盖 12 个早期 task，曾产生 RoboReward text→images 的假阳性，726 条外部验证全部反转。改成按 `source_suc_id` 保持同视频 cluster 不分裂、task 内 deterministic stratification 的 252/474 开发—确认划分后，RoboReward 第二输入才得到可泛化结果。
+
+因此有效改进不是继续增大统一 bias，而是用最终任务四指标学习少量协议专属因果 heads，并对其余 heads 做非零 shrinkage；同时必须以 suc/fail、同视频 pairwise 和独立 cluster confirmation 共同验收。
 
 ## 实验基础设置
 
@@ -87,4 +95,15 @@
 
 ## 最终有效方案
 
-请你进行研究后，在这写明满足主线目标的最终方案
+采用 **protocol-specific causal sparse weighting（协议专属因果稀疏加权）**：在与确认集按 source-video cluster 分离、覆盖各 task 的开发集上，对互斥 head block/小组合做因果扫描；只把同时降低 MAE 且提高总体、suc、fail 准确率的 heads 提升到 ranking 前端并赋权 1.0，其余 heads 保持原顺序、使用固定非零权重 0.02。K8/K32/K64 仍分别挂接 8/32/64 个唯一 heads，但新增低置信 heads 不再以统一强剂量干扰强因果 heads。
+
+推理配置对所有样本固定，不读取 label、split、example ID 或配对元数据，不做端点 hard coding。最终严格通过的四个 full-846 配置为：
+
+| model / input | baseline `(MAE/acc/suc/fail)` | K8 | K32 | K64 |
+|---|---|---|---|---|
+| RoboReward interleaved/all-frame | `1.5674/23.52%/48.88%/11.76%` | `1.4598/26.95%/54.48%/14.19%` | `1.4704/26.60%/55.22%/13.32%` | `1.4704/26.60%/54.85%/13.49%` |
+| RoboReward images→text/last-frame | `0.8203/64.78%/59.33%/67.30%` | `0.6903/72.58%/60.45%/78.20%` | `0.6939/72.58%/60.07%/78.37%` | `0.6903/72.46%/59.70%/78.37%` |
+| Qwen images→text | `1.4326/22.81%/55.97%/7.44%` | `1.4291/26.60%/63.43%/9.52%` | `1.4267/26.71%/63.81%/9.52%` | `1.4173/26.83%/63.43%/9.86%` |
+| Qwen text→images | `1.5934/28.25%/84.33%/2.25%` | `1.5827/34.75%/87.31%/10.38%` | `1.5816/34.75%/86.94%/10.55%` | `1.5804/34.63%/87.31%/10.21%` |
+
+所有 condition 均为 846 条、`formal_scoring_ready=true`、`invalid_count=0`。完整过程和负结果见 [`auto_explore.md`](./auto_explore.md)；各 task、预测分布与 pairwise 表见四个 full 目录的 `exp_record.md`；cluster bootstrap、Holm 校正、11/11 统计谬误扫描、head overlap 与 hook exposure 审计见 `auto_research/final_validation_report.md` 和 `final_hook_audit.json`。

@@ -884,10 +884,18 @@ def _load_ranking(path: Path, top_k: int) -> tuple[list[Head], list[dict[str, An
     rows = data.get("ranking")
     if not isinstance(rows, list):
         raise ValueError(f"No consensus ranking list in {path}")
-    heads = [Head(int(row["layer"]), int(row["head"])) for row in rows[:top_k]]
+    heads = [_head_from_ranking_row(row) for row in rows[:top_k]]
     if len(heads) != top_k:
         raise ValueError("Ranking has fewer heads than top_k")
     return heads, rows, data
+
+
+def _head_from_ranking_row(row: dict[str, Any]) -> Head:
+    """Load an optional causal weight while preserving old ranking behavior."""
+    weight = float(row.get("steering_weight", 1.0))
+    if not np.isfinite(weight) or weight < 0:
+        raise ValueError("ranking steering_weight must be finite and non-negative")
+    return Head(int(row["layer"]), int(row["head"]), weight)
 
 
 def _record(
@@ -906,7 +914,10 @@ def _record(
         "grounding_fingerprint": sample.get("grounding_fingerprint"),
         "subset": sample["subset"],
         "condition": condition,
-        "heads": [{"layer": head.layer, "head": head.head} for head in heads],
+        "heads": [
+            {"layer": head.layer, "head": head.head, "steering_weight": head.weight}
+            for head in heads
+        ],
         "bias": float(bias),
         "ranking_fingerprint": ranking_fingerprint,
         "control_region": control_region,
@@ -941,6 +952,59 @@ def _completed_conditions(
     return done
 
 
+def _condition_kinds(attention: dict[str, Any]) -> tuple[str, ...]:
+    """Return requested steering arms while preserving the historical default."""
+    return (
+        ("candidate_target", "candidate_wrong", "low_rank_target")
+        if bool(attention.get("run_controls", True))
+        else ("candidate_target",)
+    )
+
+
+def _bias_for_top_k(attention: dict[str, Any], top_k: int) -> float:
+    """Resolve an optional K-specific soft dose without changing old configs."""
+    schedule = attention.get("bias_by_top_k")
+    if schedule is None:
+        return float(attention.get("swap_bias", 6))
+    if not isinstance(schedule, dict):
+        raise ValueError("bias_by_top_k must be a mapping from top-k to bias")
+    value = schedule.get(top_k, schedule.get(str(top_k)))
+    if value is None:
+        raise ValueError(f"bias_by_top_k is missing top-k={top_k}")
+    value = float(value)
+    if value < 0:
+        raise ValueError("bias_by_top_k values must be non-negative")
+    return value
+
+
+def _candidate_rank_slices(attention: dict[str, Any]) -> list[dict[str, Any]]:
+    """Parse optional disjoint ranking slices used only for dev-set head discovery."""
+    raw = attention.get("candidate_rank_slices", [])
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("candidate_rank_slices must be a list")
+    parsed = []
+    names = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("Each candidate_rank_slices item must be a mapping")
+        start, count = int(item["start"]), int(item["count"])
+        name = str(item.get("name", f"r{start + 1}_{start + count}"))
+        if start < 0 or count < 1 or name in names:
+            raise ValueError("Rank slices require non-negative start, positive count, unique name")
+        names.add(name)
+        parsed.append(
+            {
+                "name": name,
+                "start": start,
+                "count": count,
+                "bias": float(item.get("bias", attention.get("swap_bias", 6))),
+            }
+        )
+    return parsed
+
+
 def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
     attention = _section(config)
     output = Path(attention["output_dir"]).resolve()
@@ -960,26 +1024,31 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
     )
     if not top_values or top_values[0] < 1:
         raise ValueError("top_k_values must contain positive integers")
-    _largest, ranking_rows, ranking_data = _load_ranking(ranking_path, max(top_values))
+    rank_slices = _candidate_rank_slices(attention)
+    required_head_count = max(
+        [max(top_values), *(item["start"] + item["count"] for item in rank_slices)]
+    )
+    _largest, ranking_rows, ranking_data = _load_ranking(ranking_path, required_head_count)
     ranking_fingerprint = str(ranking_data["fingerprint"])
     head_sets = {}
     for top_k in top_values:
-        candidate = [
-            Head(int(row["layer"]), int(row["head"]))
-            for row in ranking_rows[:top_k]
-        ]
+        candidate = [_head_from_ranking_row(row) for row in ranking_rows[:top_k]]
         head_sets[top_k] = (
             candidate,
             select_low_ranked_heads(ranking_rows, top_k, candidate),
         )
-    bias = float(attention.get("swap_bias", 6))
     scope = str(attention.get("steering_query_scope", "last_prompt"))
     negative_scope = str(attention.get("negative_scope", "other_spans"))
-    condition_names = [
-        f"{kind}_k{top_k}"
-        for top_k in top_values
-        for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
-    ]
+    condition_kinds = _condition_kinds(attention)
+    condition_names = (
+        [f"candidate_target_{item['name']}" for item in rank_slices]
+        if rank_slices
+        else [
+            f"{kind}_k{top_k}"
+            for top_k in top_values
+            for kind in condition_kinds
+        ]
+    )
     records_path = (
         output / "steering.jsonl"
         if num_shards == 1
@@ -1004,15 +1073,35 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
             target = runtime.target_positions(sample, prepared)
             wrong, wrong_mode = runtime.wrong_control_positions(prepared, target)
             specs = [("baseline", (), 0.0, target, "target_reference")]
-            for top_k in top_values:
-                candidate, low = head_sets[top_k]
-                specs.extend(
-                    [
-                        (f"candidate_target_k{top_k}", candidate, bias, target, "target_reference"),
-                        (f"candidate_wrong_k{top_k}", candidate, bias, wrong, wrong_mode),
-                        (f"low_rank_target_k{top_k}", low, bias, target, "target_reference"),
+            if rank_slices:
+                for item in rank_slices:
+                    start = item["start"]
+                    candidate = [
+                        _head_from_ranking_row(row)
+                        for row in ranking_rows[start : start + item["count"]]
                     ]
-                )
+                    specs.append(
+                        (
+                            f"candidate_target_{item['name']}",
+                            candidate,
+                            item["bias"],
+                            target,
+                            "target_reference",
+                        )
+                    )
+            else:
+                for top_k in top_values:
+                    candidate, low = head_sets[top_k]
+                    bias = _bias_for_top_k(attention, top_k)
+                    candidates = {
+                        "candidate_target": (candidate, target, "target_reference"),
+                        "candidate_wrong": (candidate, wrong, wrong_mode),
+                        "low_rank_target": (low, target, "target_reference"),
+                    }
+                    specs.extend(
+                        (f"{kind}_k{top_k}", *candidates[kind][:1], bias, *candidates[kind][1:])
+                        for kind in condition_kinds
+                    )
             for condition, heads, magnitude, positions, control_region in specs:
                 if condition in done[completion_key]:
                     continue
@@ -1073,7 +1162,15 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
             ),
             "steering_query_scope": scope,
             "negative_scope": negative_scope,
+            "positive_bias_scale": float(attention.get("positive_bias_scale", 1.0)),
+            "negative_bias_scale": float(attention.get("negative_bias_scale", 1.0)),
             "top_k_values": top_values,
+            "bias_by_top_k": {
+                str(top_k): _bias_for_top_k(attention, top_k)
+                for top_k in top_values
+            },
+            "run_controls": bool(attention.get("run_controls", True)),
+            "candidate_rank_slices": rank_slices,
             "conditions": ["baseline", *condition_names],
             "labels_model_facing": False,
             "shard_id": shard_id,
@@ -1146,11 +1243,17 @@ def score(config: dict[str, Any]) -> Path:
     top_values = sorted(
         {int(value) for value in attention.get("top_k_values", [8, 32, 64])}
     )
-    top_conditions = [
-        f"{kind}_k{top_k}"
-        for top_k in top_values
-        for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
-    ]
+    condition_kinds = _condition_kinds(attention)
+    rank_slices = _candidate_rank_slices(attention)
+    top_conditions = (
+        [f"candidate_target_{item['name']}" for item in rank_slices]
+        if rank_slices
+        else [
+            f"{kind}_k{top_k}"
+            for top_k in top_values
+            for kind in condition_kinds
+        ]
+    )
     expected_ids = _ids(attention["example_ids_file"])
     expected_id_set = set(expected_ids)
     labels = {
@@ -1276,14 +1379,25 @@ def score(config: dict[str, Any]) -> Path:
             str(top_k): {
                 "by_condition": {
                     kind: summaries.get(f"{kind}_k{top_k}", {})
-                    for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
+                    for kind in condition_kinds
                 },
                 "paired_vs_baseline": {
                     kind: paired.get(f"{kind}_k{top_k}", {})
-                    for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
+                    for kind in condition_kinds
                 },
             }
             for top_k in top_values
+        },
+        "candidate_rank_slices": {
+            item["name"]: {
+                "by_condition": summaries.get(
+                    f"candidate_target_{item['name']}", {}
+                ),
+                "paired_vs_baseline": paired.get(
+                    f"candidate_target_{item['name']}", {}
+                ),
+            }
+            for item in rank_slices
         },
         "discrete_output": protocol in DISCRETE_PROTOCOLS,
         "official_native_discrete_output": protocol == ROBOREWARDBENCH_NATIVE,
