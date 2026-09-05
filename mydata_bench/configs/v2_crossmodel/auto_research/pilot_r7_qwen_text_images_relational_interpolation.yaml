@@ -1,0 +1,29 @@
+experiment_id: auto_research_pilot_r7_qwen_text_images_relational_interpolation
+attention_steer:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  split: all
+  eligibility_mode: auto_valid_grounding
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/pilot_r7_qwen_text_images_relational_interpolation
+  model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+  protocol: roborewardbench_image_sequence
+  content_order: text_then_images
+  num_images: 8
+  example_ids_file: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/cohorts/auto_research_pilot_v1/example_ids.json
+  grounding_run: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/grounding_v2/sam3
+  ranking_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/attention_11_qwen_text_images_all_frames/consensus_ranking.json
+  reference_grounding_path: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/reference_grounding_pilot_v2.jsonl
+  spatial_target_mode: target_reference_union
+  min_pixels: 784
+  max_pixels: 50176
+  torch_dtype: bfloat16
+  device_map: auto
+  temporal_intervention_scope: all_frames
+  max_new_tokens: 128
+  top_k_values: [16, 24, 32]
+  swap_bias: 6.0
+  skip_early_layers: 8
+  steering_query_scope: all
+  negative_scope: all_visual
+  control_conditions: [candidate_target_only]
+  record_discrete_label_logprobs: true
+  bootstrap_samples: 2000

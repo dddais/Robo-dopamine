@@ -6,7 +6,9 @@ from typing import Sequence
 import numpy as np
 
 
-QUERY_SCOPES = frozenset({"all", "prefill", "last_prompt", "decode"})
+QUERY_SCOPES = frozenset(
+    {"all", "prefill", "last_prompt", "decode", "last_query"}
+)
 NEGATIVE_SCOPES = frozenset({"all_visual", "target_span", "other_spans", "none"})
 
 
@@ -187,8 +189,10 @@ def make_attention_mask_hook(
     ``all`` preserves the historical behavior: every prefill query row and
     every cached decode call receive the same key-position bias. ``prefill``
     applies it only during the multi-query prompt forward pass,
-    ``last_prompt`` only to that pass's final query row, and ``decode`` only to
-    subsequent cached calls whose query length is one.
+    ``last_prompt`` only to that pass's final query row, ``decode`` only to
+    subsequent cached calls whose query length is one, and ``last_query`` to
+    the final query row of every call (the PAI-style scope that avoids changing
+    historical prompt-token representations while retaining decode steering).
     """
     import torch
 
@@ -244,7 +248,7 @@ def make_attention_mask_hook(
         else:
             diagnostics["prefill_calls"] += 1
         should_apply = (
-            query_scope == "all"
+            query_scope in {"all", "last_query"}
             or (query_scope in {"prefill", "last_prompt"} and not is_decode)
             or (query_scope == "decode" and is_decode)
         )
@@ -257,7 +261,7 @@ def make_attention_mask_hook(
             bias = torch.nn.functional.pad(bias, (0, key_length - base_length))
         else:
             bias = bias[..., :key_length]
-        if query_scope == "last_prompt":
+        if query_scope in {"last_prompt", "last_query"}:
             scoped = torch.zeros(
                 (1, num_query_heads, query_length, key_length),
                 device=mask.device,

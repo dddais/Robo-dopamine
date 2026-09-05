@@ -14,13 +14,18 @@ from mydata_bench.attention_eval.experiment import (
 )
 from mydata_bench.attention_eval.dataset import _latest_ok_endpoints
 
-from mydata_bench.attention_eval.masking import ImageSpan, resolve_negative_positions
+from mydata_bench.attention_eval.masking import (
+    ImageSpan,
+    make_attention_mask_hook,
+    resolve_negative_positions,
+)
 from mydata_bench.qwen_eval.attention import (
     duplicate_temporal_frames,
     reduce_temporal_bboxes,
 )
 from mydata_bench.data import load_episodes
 from mydata_bench.grounding.base import select_relational_candidate
+from mydata_bench.ground_relational_references import extract_completion_reference
 from mydata_bench.grounding.parser import heuristic_parse
 from mydata_bench.grounding.sam3 import SAM3Grounder
 from mydata_bench.raw_eval.pairs import _pair_rows
@@ -63,6 +68,34 @@ def test_grm_distribution_reports_all_five_labels() -> None:
     assert "label 5 (80–100%)" in table
     assert "uncertain" not in table
     assert "| task:task | 5 | 1 (20.00%) | 1 (20.00%) | 1 (20.00%) | 1 (20.00%) | 1 (20.00%) |" in table
+
+
+def test_last_query_scope_changes_only_final_row() -> None:
+    torch = pytest.importorskip("torch")
+    diagnostics = {}
+    hook = make_attention_mask_hook(
+        [1], [2], [3], 2, 1.5, diagnostics, query_scope="last_query"
+    )
+    mask = torch.zeros((1, 1, 4, 5))
+    _args, kwargs = hook(None, (), {"attention_mask": mask})
+    changed = kwargs["attention_mask"]
+    assert torch.count_nonzero(changed[..., :-1, :]) == 0
+    assert changed[0, 1, -1, 2].item() == pytest.approx(1.5)
+    assert changed[0, 1, -1, 3].item() == pytest.approx(-1.5)
+    assert diagnostics["applied_query_rows"] == 1
+
+
+@pytest.mark.parametrize(
+    ("instruction", "expected"),
+    [
+        ("Pick up the carrot and place it in the plate.", "plate"),
+        ("Put the apple into the tray.", "tray"),
+        ("Insert the peg into a hole.", "hole"),
+        ("Open the drawer.", None),
+    ],
+)
+def test_completion_reference_parser(instruction: str, expected: str | None) -> None:
+    assert extract_completion_reference(instruction) == expected
 
 
 def test_ranking_grounding_uses_latest_endpoint_status() -> None:

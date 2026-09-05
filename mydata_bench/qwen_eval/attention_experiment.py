@@ -8,6 +8,7 @@ labels are recovered only by :func:`score` after all conditions are generated.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -16,7 +17,7 @@ import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import mean
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 from PIL import Image
@@ -890,6 +891,48 @@ def _load_ranking(path: Path, top_k: int) -> tuple[list[Head], list[dict[str, An
     return heads, rows, data
 
 
+def _steering_condition_kinds(attention: dict[str, Any]) -> tuple[str, ...]:
+    """Return target plus optional negative controls under a stable contract."""
+    allowed_controls = {
+        "candidate_wrong",
+        "candidate_target_only",
+        "low_rank_target",
+    }
+    configured = attention.get(
+        "control_conditions", ["candidate_wrong", "low_rank_target"]
+    )
+    if not isinstance(configured, list) or any(
+        str(value) not in allowed_controls for value in configured
+    ):
+        raise ValueError(
+            "control_conditions must contain candidate_wrong, "
+            "candidate_target_only, and/or low_rank_target"
+        )
+    controls = tuple(
+        name
+        for name in ("candidate_wrong", "candidate_target_only", "low_rank_target")
+        if name in {str(value) for value in configured}
+    )
+    return ("candidate_target", *controls)
+
+
+def _steering_biases(
+    attention: dict[str, Any], top_values: Sequence[int]
+) -> dict[int, float]:
+    """Resolve an optional K-aware dose map while preserving scalar defaults."""
+    default = float(attention.get("swap_bias", 6))
+    configured = attention.get("swap_bias_by_top_k", {})
+    if not isinstance(configured, dict):
+        raise ValueError("swap_bias_by_top_k must be a mapping")
+    result = {}
+    for top_k in top_values:
+        value = configured.get(top_k, configured.get(str(top_k), default))
+        result[top_k] = float(value)
+        if not math.isfinite(result[top_k]) or result[top_k] < 0:
+            raise ValueError("Steering biases must be finite and non-negative")
+    return result
+
+
 def _record(
     sample: dict[str, Any],
     condition: str,
@@ -972,13 +1015,14 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
             candidate,
             select_low_ranked_heads(ranking_rows, top_k, candidate),
         )
-    bias = float(attention.get("swap_bias", 6))
+    bias_by_top_k = _steering_biases(attention, top_values)
     scope = str(attention.get("steering_query_scope", "last_prompt"))
     negative_scope = str(attention.get("negative_scope", "other_spans"))
+    condition_kinds = _steering_condition_kinds(attention)
     condition_names = [
         f"{kind}_k{top_k}"
         for top_k in top_values
-        for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
+        for kind in condition_kinds
     ]
     records_path = (
         output / "steering.jsonl"
@@ -1003,16 +1047,36 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
             prepared = runtime.prepare(sample)
             target = runtime.target_positions(sample, prepared)
             wrong, wrong_mode = runtime.wrong_control_positions(prepared, target)
+            target_only = (
+                runtime.target_positions(sample, prepared, include_reference=False)
+                if "candidate_target_only" in condition_kinds
+                else []
+            )
             specs = [("baseline", (), 0.0, target, "target_reference")]
             for top_k in top_values:
                 candidate, low = head_sets[top_k]
-                specs.extend(
-                    [
-                        (f"candidate_target_k{top_k}", candidate, bias, target, "target_reference"),
-                        (f"candidate_wrong_k{top_k}", candidate, bias, wrong, wrong_mode),
-                        (f"low_rank_target_k{top_k}", low, bias, target, "target_reference"),
-                    ]
+                bias = bias_by_top_k[top_k]
+                specs.append(
+                    (f"candidate_target_k{top_k}", candidate, bias, target, "target_reference")
                 )
+                if "candidate_wrong" in condition_kinds:
+                    specs.append(
+                        (f"candidate_wrong_k{top_k}", candidate, bias, wrong, wrong_mode)
+                    )
+                if "candidate_target_only" in condition_kinds:
+                    specs.append(
+                        (
+                            f"candidate_target_only_k{top_k}",
+                            candidate,
+                            bias,
+                            target_only,
+                            "target_only",
+                        )
+                    )
+                if "low_rank_target" in condition_kinds:
+                    specs.append(
+                        (f"low_rank_target_k{top_k}", low, bias, target, "target_reference")
+                    )
             for condition, heads, magnitude, positions, control_region in specs:
                 if condition in done[completion_key]:
                     continue
@@ -1073,6 +1137,27 @@ def steer(config: dict[str, Any], *, retry_failed: bool = False) -> Path:
             ),
             "steering_query_scope": scope,
             "negative_scope": negative_scope,
+            "spatial_target_mode": attention.get(
+                "spatial_target_mode", "target_only"
+            ),
+            "reference_grounding_path": attention.get(
+                "reference_grounding_path"
+            ),
+            "reference_grounding_sha256": (
+                sha256_file(attention["reference_grounding_path"])
+                if attention.get("reference_grounding_path")
+                else None
+            ),
+            "swap_bias_by_top_k": {
+                str(top_k): bias_by_top_k[top_k] for top_k in top_values
+            },
+            "control_conditions": list(condition_kinds[1:]),
+            "record_discrete_label_logprobs": bool(
+                attention.get("record_discrete_label_logprobs", False)
+            ),
+            "constrain_discrete_output": bool(
+                attention.get("constrain_discrete_output", False)
+            ),
             "top_k_values": top_values,
             "conditions": ["baseline", *condition_names],
             "labels_model_facing": False,
@@ -1146,10 +1231,11 @@ def score(config: dict[str, Any]) -> Path:
     top_values = sorted(
         {int(value) for value in attention.get("top_k_values", [8, 32, 64])}
     )
+    condition_kinds = _steering_condition_kinds(attention)
     top_conditions = [
         f"{kind}_k{top_k}"
         for top_k in top_values
-        for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
+        for kind in condition_kinds
     ]
     expected_ids = _ids(attention["example_ids_file"])
     expected_id_set = set(expected_ids)
@@ -1276,11 +1362,11 @@ def score(config: dict[str, Any]) -> Path:
             str(top_k): {
                 "by_condition": {
                     kind: summaries.get(f"{kind}_k{top_k}", {})
-                    for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
+                    for kind in condition_kinds
                 },
                 "paired_vs_baseline": {
                     kind: paired.get(f"{kind}_k{top_k}", {})
-                    for kind in ("candidate_target", "candidate_wrong", "low_rank_target")
+                    for kind in condition_kinds
                 },
             }
             for top_k in top_values

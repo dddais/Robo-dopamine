@@ -51,6 +51,80 @@ from .protocols import (
 
 TEMPORAL_SPAN_MODES = frozenset({"native_pairs", "duplicate_frames"})
 TEMPORAL_BBOX_REDUCERS = frozenset({"last", "union", "intersection"})
+SPATIAL_TARGET_MODES = frozenset({"target_only", "target_reference_union"})
+
+
+def extract_discrete_label_logprobs(
+    tokenizer: Any,
+    sequence: Any,
+    generation_scores: Sequence[Any],
+    prediction: int,
+    torch_module: Any,
+) -> dict[str, Any]:
+    """Recover P(1..5) at the generated score-token step.
+
+    The strict discrete protocol normally generates ``ANSWER: N``.  Depending
+    on tokenizer whitespace merging, the score token can be either ``N`` or
+    `` N``; we select the complete one-token family that contains the actual
+    generated prediction.  This is optional diagnostic evidence for
+    label-free contrastive decoding and does not change ordinary generation.
+    """
+    token_ids = sequence.detach().cpu().tolist()
+    families = []
+    for prefix in ("", " "):
+        encoded = [
+            tokenizer.encode(f"{prefix}{value}", add_special_tokens=False)
+            for value in range(1, 6)
+        ]
+        if all(len(value) == 1 for value in encoded):
+            families.append((prefix, [value[0] for value in encoded]))
+    for step, actual_token_id in enumerate(token_ids):
+        for prefix, candidate_ids in families:
+            if actual_token_id != candidate_ids[prediction - 1]:
+                continue
+            if step >= len(generation_scores):
+                raise ValueError("Missing generation scores at discrete label step")
+            logprobs = torch_module.log_softmax(
+                generation_scores[step][0].float(), dim=-1
+            )
+            return {
+                "values": {
+                    str(value): float(logprobs[token_id].detach().cpu())
+                    for value, token_id in zip(range(1, 6), candidate_ids)
+                },
+                "generated_step": step,
+                "token_prefix": prefix,
+                "prefix_text": tokenizer.decode(
+                    token_ids[:step], skip_special_tokens=True
+                ),
+            }
+    raise ValueError("Could not identify the generated 1--5 score-token step")
+
+
+def build_discrete_prefix_constraint(tokenizer: Any, prompt_length: int) -> Any:
+    """Build a trie constraint for the documented ``ANSWER: 1..5`` contract."""
+    eos_token_id = tokenizer.eos_token_id
+    if eos_token_id is None:
+        raise ValueError("Discrete constrained decoding requires eos_token_id")
+    paths = [
+        tokenizer.encode(f"ANSWER: {value}", add_special_tokens=False)
+        + [int(eos_token_id)]
+        for value in range(1, 6)
+    ]
+    if any(not path for path in paths):
+        raise ValueError("Tokenizer produced an empty discrete answer path")
+
+    def allowed_tokens(_batch_id: int, input_ids: Any) -> list[int]:
+        generated = input_ids[prompt_length:].detach().cpu().tolist()
+        matches = [path for path in paths if path[: len(generated)] == generated]
+        if not matches:
+            raise ValueError("Generation left the discrete answer constraint trie")
+        choices = sorted(
+            {path[len(generated)] for path in matches if len(path) > len(generated)}
+        )
+        return choices or [int(eos_token_id)]
+
+    return allowed_tokens
 
 
 def _native_video_message(
@@ -340,6 +414,29 @@ class QwenAttentionRuntime:
                 f"Unknown temporal_bbox_reduce {self.temporal_bbox_reduce!r}; "
                 f"choose one of {choices}"
             )
+        self.spatial_target_mode = str(
+            config.get("spatial_target_mode", "target_only")
+        )
+        if self.spatial_target_mode not in SPATIAL_TARGET_MODES:
+            choices = ", ".join(sorted(SPATIAL_TARGET_MODES))
+            raise ValueError(
+                f"Unknown spatial_target_mode {self.spatial_target_mode!r}; "
+                f"choose one of {choices}"
+            )
+        self.reference_grounding: dict[str, dict[str, Any]] = {}
+        reference_path = config.get("reference_grounding_path")
+        if self.spatial_target_mode == "target_reference_union":
+            if not reference_path:
+                raise ValueError(
+                    "target_reference_union requires reference_grounding_path"
+                )
+            latest = {}
+            with Path(reference_path).resolve().open(encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        row = json.loads(line)
+                        latest[str(row.get("example_id"))] = row
+            self.reference_grounding = latest
         if (
             self.protocol != ROBOREWARDBENCH_NATIVE
             and self.temporal_span_mode != "native_pairs"
@@ -625,7 +722,13 @@ class QwenAttentionRuntime:
             return self._prepare_image_sequence(sample)
         return self._prepare_native(sample)
 
-    def target_positions(self, sample: dict[str, Any], prepared: PreparedAttentionInput) -> list[int]:
+    def target_positions(
+        self,
+        sample: dict[str, Any],
+        prepared: PreparedAttentionInput,
+        *,
+        include_reference: bool = True,
+    ) -> list[int]:
         with Image.open(prepared.target_image_path) as image:
             size = image.size
         if prepared.protocol == ROBO_DOPAMINE_FORWARD:
@@ -752,12 +855,35 @@ class QwenAttentionRuntime:
             positions.extend(
                 bbox_to_token_positions(span, bbox, size, self.merge_size)
             )
+        reference_record = self.reference_grounding.get(str(sample["example_id"]))
+        if self.spatial_target_mode == "target_reference_union" and include_reference:
+            if reference_record is None:
+                raise ValueError("Missing reference grounding record")
+            reference_bbox = reference_record.get("bbox")
+            if reference_record.get("status") == "ok":
+                if not isinstance(reference_bbox, list) or len(reference_bbox) != 4:
+                    raise ValueError("Invalid reference grounding bbox")
+                positions.extend(
+                    bbox_to_token_positions(
+                        prepared.spans[-1], reference_bbox, size, self.merge_size
+                    )
+                )
+            elif reference_record.get("status") not in {
+                "not_applicable",
+                "no_detection",
+            }:
+                raise ValueError(
+                    "Reference grounding is not usable: "
+                    f"{reference_record.get('status')}"
+                )
         positions = sorted(set(positions))
         if not positions:
             raise ValueError("Target bbox did not map to any visual tokens")
         if prepared.video_metadata is not None:
             prepared.video_metadata["temporal_intervention_scope"] = self.temporal_scope
             prepared.video_metadata["temporal_bbox_reduce"] = self.temporal_bbox_reduce
+            prepared.video_metadata["spatial_target_mode"] = self.spatial_target_mode
+            prepared.video_metadata["reference_grounding"] = reference_record
             prepared.video_metadata["selected_target_span_labels"] = [
                 span.label for span, _bbox, _source_index in selected
             ]
@@ -962,6 +1088,22 @@ class QwenAttentionRuntime:
             if heads and bias != 0
             else _nullcontext()
         )
+        record_label_logprobs = bool(
+            self.config.get("record_discrete_label_logprobs", False)
+        )
+        constrain_discrete = bool(
+            self.config.get("constrain_discrete_output", False)
+        )
+        if constrain_discrete and self.protocol not in DISCRETE_PROTOCOLS:
+            raise ValueError("constrain_discrete_output requires a discrete protocol")
+        prefix_constraint = (
+            build_discrete_prefix_constraint(
+                self.processor.tokenizer,
+                prepared.inputs["input_ids"].shape[1],
+            )
+            if constrain_discrete
+            else None
+        )
         with context:
             with self.torch.inference_mode():
                 generated = self.model.generate(
@@ -975,6 +1117,8 @@ class QwenAttentionRuntime:
                     # generation attention matrix would only inflate memory and
                     # is not required for its diagnostics.
                     output_attentions=False,
+                    output_scores=record_label_logprobs,
+                    prefix_allowed_tokens_fn=prefix_constraint,
                     return_dict_in_generate=True,
                     pad_token_id=self.processor.tokenizer.pad_token_id,
                 )
@@ -992,6 +1136,14 @@ class QwenAttentionRuntime:
             # Keep an explicit parsed field for metric code and make failures
             # impossible to silently coerce into a low score.
             result["native_prediction"] = parse_native_score(raw)
+            if record_label_logprobs:
+                result["discrete_label_logprobs"] = extract_discrete_label_logprobs(
+                    self.processor.tokenizer,
+                    sequence,
+                    generated.scores,
+                    result["native_prediction"],
+                    self.torch,
+                )
         return result
 
 

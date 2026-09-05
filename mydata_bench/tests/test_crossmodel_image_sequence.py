@@ -5,8 +5,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+import torch
 
 from mydata_bench.config import load_config
+from mydata_bench.qwen_eval.attention_experiment import (
+    _steering_biases,
+    _steering_condition_kinds,
+)
+from mydata_bench.qwen_eval.attention import (
+    build_discrete_prefix_constraint,
+    extract_discrete_label_logprobs,
+)
 from mydata_bench.qwen_eval.protocols import (
     INTERLEAVED_REWARD_PROMPT,
     ROBOREWARDBENCH_IMAGE_SEQUENCE,
@@ -160,3 +169,55 @@ def test_crossmodel_config_matrix_is_complete_and_isolated() -> None:
             else:
                 assert section.get("temporal_intervention_scope") == "last_frame"
                 assert section.get("negative_scope") == "target_span"
+
+
+def test_auto_research_k_aware_bias_and_control_contract() -> None:
+    attention = {
+        "swap_bias": 6,
+        "swap_bias_by_top_k": {"8": 2.0, 32: 1.0},
+        "control_conditions": [],
+    }
+    assert _steering_biases(attention, [8, 16, 32]) == {
+        8: 2.0,
+        16: 6.0,
+        32: 1.0,
+    }
+    assert _steering_condition_kinds(attention) == ("candidate_target",)
+    assert _steering_condition_kinds(
+        {"control_conditions": ["candidate_target_only"]}
+    ) == ("candidate_target", "candidate_target_only")
+
+
+def test_extract_discrete_label_logprobs_handles_space_prefixed_tokens() -> None:
+    class Tokenizer:
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            assert add_special_tokens is False
+            return [20 + int(text.strip())] if text.startswith(" ") else [10 + int(text)]
+
+        def decode(self, values: list[int], skip_special_tokens: bool = True) -> str:
+            assert skip_special_tokens is True
+            return "ANSWER: " if values else ""
+
+    scores = [torch.zeros(1, 30), torch.zeros(1, 30), torch.zeros(1, 30)]
+    scores[2][0, 21:26] = torch.tensor([0.0, 1.0, 2.0, 3.0, 4.0])
+    result = extract_discrete_label_logprobs(
+        Tokenizer(), torch.tensor([7, 9, 23]), scores, 3, torch
+    )
+    assert result["generated_step"] == 2
+    assert result["token_prefix"] == " "
+    assert max(result["values"], key=result["values"].get) == "5"
+
+
+def test_discrete_prefix_constraint_only_allows_documented_answers() -> None:
+    class Tokenizer:
+        eos_token_id = 99
+
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            assert add_special_tokens is False
+            return [1, 2, 20 + int(text[-1])]
+
+    allowed = build_discrete_prefix_constraint(Tokenizer(), prompt_length=2)
+    assert allowed(0, torch.tensor([8, 9])) == [1]
+    assert allowed(0, torch.tensor([8, 9, 1])) == [2]
+    assert allowed(0, torch.tensor([8, 9, 1, 2])) == [21, 22, 23, 24, 25]
+    assert allowed(0, torch.tensor([8, 9, 1, 2, 23])) == [99]
