@@ -1,0 +1,28 @@
+model: meter
+protocol: text_video
+num_frames: 8
+min_pixels: 1024
+max_pixels: 50176
+max_new_tokens: 512
+batch_size: 4
+skip_early_layers: 8
+ranking_score: raw_mass
+bias: 6.0
+query_scope: all
+top_k:
+- 8
+- 32
+- 64
+scopes:
+- last_frame
+- all_frames
+controls:
+- wrong_region
+- low_rank
+seed: 20260909
+inputs: /mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_addbase/inputs.json
+output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_addbase/meter_text_video
+model_path: /home/dais/workspace/model/Robometer-4B
+processor_path: /home/dais/workspace/model/Qwen3-VL-4B-Instruct
+decoding: greedy
+negative_scope: selected_temporal_frames

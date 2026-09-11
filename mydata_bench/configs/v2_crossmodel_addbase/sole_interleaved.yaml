@@ -1,0 +1,28 @@
+model: sole
+protocol: interleaved
+num_frames: 8
+min_pixels: 1024
+max_pixels: 50176
+max_new_tokens: 512
+batch_size: 8
+skip_early_layers: 8
+ranking_score: raw_mass
+bias: 6.0
+query_scope: all
+top_k:
+- 8
+- 32
+- 64
+scopes:
+- last_frame
+- all_frames
+controls:
+- wrong_region
+- low_rank
+seed: 20260909
+inputs: /mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_addbase/inputs.json
+output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_addbase/sole_interleaved
+model_path: /home/dais/workspace/model/SOLE-R1-8B
+processor_path: /home/dais/workspace/model/SOLE-R1-8B
+decoding: greedy
+negative_scope: selected_temporal_frames

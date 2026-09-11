@@ -14,13 +14,12 @@
   - 目前已进行的GRM实验结果：/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_GRM_summary.md
   - 目前已进行的跨模型实验：/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_crossmodel.md
   - 跨模型实验结果：/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_crossmodel_summary.md
-
-## 主线目标1
-
-- 遵守/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_addbase.md 完成新增baseline任务
-- 直到新增baseline的所有实验完成，得到完整的实验结果总结mydata_bench/exp_plan_addbase_summary.md
+- 新增的robometer和sole-r1 实验：
+  - 实验结果summary:/home/dais/workspace/Robo-Dopamine/mydata_bench/exp_plan_addbase_summary.md
 
 
+## 主线任务1
+- 我已经完成了/home/dais/workspace/Robo-Dopamine/exp_plan_addbase.md ，请先阅读理解相关代码，检查其代码和实验是否合理，是否存在需要重新跑的；如果有，请修正错误并重跑需要的实验 
 
 ## 主线目标2
 
@@ -33,7 +32,7 @@
 - step1:基于调研的结果和方法，从理论角度思考提出能够改进目前attention steering的方案，如果需要可继续调研相关工作文章
 - step2:实现step1提出的改进方案，进行实验验证，分析实验结果，如果效果不好则重复step1提出改进方案
 - 验收目标：不断重复上述两个step，直到有一种方案改良原 attention steering方法同时满足下面的所有要求:
-  - 四种模型（roboreward-8b 和qwen3-vl-8b ，robometer-4b,SOLE-R1-8B  ）中至少有三种模型满足“稳定有效”。
+  - 四种模型（roboreward-8b 和qwen3-vl-8b ，robometer-4b,SOLE-R1-8B  ）中至少有两种模型满足“稳定有效”。
   - 稳定有效：指在所有输入构造中的至少三种输入下（最好包含官方的输入构造）都能稳定提升在数据集上的表现（MAE下降，suc,fail准确率提高，总准确率提高至少10%）(不要求所有top-k都能满足，至少存在一个top k 的范围满足)。
 - 严禁使用端点hard coding这种类似作弊的方法！！！
 
@@ -96,7 +95,7 @@
 
 **conda环境**：sam3:rewardbench-sam3 ；其它实验：robo-dopamine
 
-**可用GPU**：0，1，2 ,3
+**可用GPU**：0，1，2 
 
 **vpn** : proxy_on
 
