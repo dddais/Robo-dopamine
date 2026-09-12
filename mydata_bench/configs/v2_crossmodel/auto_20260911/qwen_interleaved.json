@@ -1,0 +1,34 @@
+{
+  "batch_size": 8,
+  "bias": 4.0,
+  "controls": [
+    "wrong_region",
+    "low_rank"
+  ],
+  "decoding": "greedy",
+  "inputs": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_addbase/inputs.json",
+  "max_new_tokens": 128,
+  "max_pixels": 50176,
+  "method": "mass_transport",
+  "min_pixels": 1024,
+  "model": "qwen",
+  "model_path": "/home/dais/workspace/model/Qwen3-VL-8B-Instruct",
+  "negative_scope": "selected_temporal_frames",
+  "num_frames": 8,
+  "output_dir": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/experiments/qwen_interleaved",
+  "processor_path": "/home/dais/workspace/model/Qwen3-VL-8B-Instruct",
+  "protocol": "interleaved",
+  "query_scope": "all",
+  "ranking_score": "raw_mass",
+  "scopes": [
+    "last_frame",
+    "all_frames"
+  ],
+  "seed": 20260909,
+  "skip_early_layers": 8,
+  "top_k": [
+    8,
+    32,
+    64
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "adapter_mode": "learned",
+  "adapter_rank": 4,
+  "batch_size": 8,
+  "bias": 6.0,
+  "contrast_negative_mode": "learned_head_gates",
+  "contrast_weight": 0.0,
+  "controls": [
+    "wrong_region",
+    "low_rank"
+  ],
+  "decoding": "greedy",
+  "frozen_ranking_source": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/functional_selections/stage8_roboreward_v1/roboreward_text_video",
+  "inputs": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_addbase/inputs.json",
+  "learned_adapter_file": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/learned_head_delta_reft_v1/training/roboreward/final_adapter.json",
+  "learned_adapter_sha256": "ae7e14fc403ee45b95abe7b0ab43ef5b374aff15c04b93713f23b5097d3fe441",
+  "learned_gate_file": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/learned_head_gates_v1/training/roboreward/final_gates.json",
+  "learned_gate_sha256": "aba7787b4578ddb00e6c0aa7bd9b382efa6e3f2ba2d4f75610a9af4bc0b3bdc0",
+  "max_new_tokens": 128,
+  "max_pixels": 50176,
+  "method": "learned_head_delta_reft",
+  "min_pixels": 1024,
+  "model": "roboreward",
+  "model_path": "/home/dais/workspace/model/RoboReward-8B",
+  "negative_scope": "selected_temporal_frames",
+  "negative_strength": 4.0,
+  "num_frames": 8,
+  "output_dir": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/experiments/roboreward_text_video_learned_head_delta_reft_v1",
+  "processor_path": "/home/dais/workspace/model/RoboReward-8B",
+  "protocol": "text_video",
+  "query_scope": "all",
+  "ranking_prefix": "ANSWER: ",
+  "ranking_score": "raw_mass",
+  "readout": "evidence_contrast",
+  "require_task_positions": true,
+  "scopes": [
+    "last_frame",
+    "all_frames"
+  ],
+  "seed": 20260909,
+  "skip_early_layers": 8,
+  "top_k": [
+    8,
+    32,
+    64
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "batch_size": 8,
+  "bias": 4.0,
+  "contrast_negative_mode": "learned_gates",
+  "contrast_weight": 0.0,
+  "controls": [
+    "wrong_region",
+    "low_rank"
+  ],
+  "decoding": "greedy",
+  "frozen_ranking_source": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/functional_selections/stage8_qwen_v1/qwen_video_text",
+  "inputs": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_addbase/inputs.json",
+  "learned_gate_file": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/learned_attention_gates_v1/training/qwen/final_gates.json",
+  "learned_gate_sha256": "97cddc6b215b827479329f4cfcdc9a22ed23f6bcf6cc0eead1ffb06a553f0a52",
+  "max_new_tokens": 128,
+  "max_pixels": 50176,
+  "method": "learned_gate_bias",
+  "min_pixels": 1024,
+  "model": "qwen",
+  "model_path": "/home/dais/workspace/model/Qwen3-VL-8B-Instruct",
+  "negative_scope": "selected_temporal_frames",
+  "negative_strength": 4,
+  "negative_task_strength": 4,
+  "num_frames": 8,
+  "output_dir": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/experiments/qwen_video_text_learned_attention_gates_v1",
+  "processor_path": "/home/dais/workspace/model/Qwen3-VL-8B-Instruct",
+  "protocol": "video_text",
+  "query_scope": "all",
+  "ranking_prefix": "ANSWER: ",
+  "ranking_score": "raw_mass",
+  "readout": "evidence_contrast",
+  "require_task_positions": true,
+  "scopes": [
+    "last_frame",
+    "all_frames"
+  ],
+  "seed": 20260909,
+  "skip_early_layers": 8,
+  "top_k": [
+    8,
+    32,
+    64
+  ]
+}

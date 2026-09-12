@@ -1,0 +1,42 @@
+{
+  "batch_size": 8,
+  "bias": 4.0,
+  "contrast_negative_mode": "resolution",
+  "contrast_weight": 1.0,
+  "controls": [
+    "wrong_region",
+    "low_rank"
+  ],
+  "decoding": "greedy",
+  "frozen_ranking_source": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/functional_selections/stage8_roboreward_v1/roboreward_interleaved",
+  "inputs": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_addbase/inputs.json",
+  "max_new_tokens": 128,
+  "max_pixels": 50176,
+  "method": "bias",
+  "min_pixels": 1024,
+  "model": "roboreward",
+  "model_path": "/home/dais/workspace/model/RoboReward-8B",
+  "negative_scope": "selected_temporal_frames",
+  "negative_strength": 4,
+  "negative_task_strength": 4,
+  "num_frames": 8,
+  "output_dir": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/experiments/roboreward_interleaved_resolution_evidence_a1",
+  "processor_path": "/home/dais/workspace/model/RoboReward-8B",
+  "protocol": "interleaved",
+  "query_scope": "all",
+  "ranking_prefix": "ANSWER: ",
+  "ranking_score": "raw_mass",
+  "readout": "evidence_contrast",
+  "resolution_high_max_pixels": 200704,
+  "scopes": [
+    "last_frame",
+    "all_frames"
+  ],
+  "seed": 20260909,
+  "skip_early_layers": 8,
+  "top_k": [
+    8,
+    32,
+    64
+  ]
+}
