@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rewardgen"
+version = "0.1.1.6"
+description = "RewardGen package"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+authors = [
+    { name = "Philip Schroeder" }
+]
+
+dependencies = [
+    "torch==2.10.0",
+    # "torchvision==0.24.0",
+    # "torchaudio==2.9.0",
+
+    "lerobot==0.6.1",
+    "transformers==5.5.4",
+    "qwen-vl-utils>=0.0.11,<0.1.0",
+    "vllm==0.19.1",
+
+
+    "pillow",
+    "accelerate>=1.2.1",
+    "qwen_vl_utils",
+    "datasets>=3.2.0",
+    "trl",
+    "imageio",
+    "matplotlib",
+    "av>=15.0.0,<16.0.0",
+
+    # General utilities
+    "openai",
+    "google-genai",
+
+
+]
+
+
+# Optional dependency groups
+# [project.optional-dependencies]
+# video = [
+#    "decord>=0.6.0"
+# ]
+
+
+# -------------------------
+# setuptools config
+# -------------------------
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rewardgen*"]
+
+# -------------------------
+# UV-specific config
+# -------------------------
+[tool.uv]
+
+# This allows PyTorch CUDA wheels
+# extra-index-url = [
+#     "https://download.pytorch.org/whl/cu129"
+# ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+# torchvision = { index = "pytorch-cu128" }
+# torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
