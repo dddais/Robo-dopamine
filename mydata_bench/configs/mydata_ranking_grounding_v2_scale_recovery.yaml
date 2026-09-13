@@ -1,0 +1,54 @@
+grounding:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  metadata_file: /home/dais/workspace/data/mydata_v2/new/ranking_data.jsonl
+  split: suc
+  output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/ranking_grounding_v2_scale_trials
+  parser_model_path: /home/dais/workspace/model/Qwen3-4B-Instruct-2507
+  use_parser_model: true
+  example_ids_file: /mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/ranking_grounding_v2_scale_trials/retry_example_ids.json
+sam3:
+  model_path: /home/dais/workspace/model/sam3
+  checkpoint_path: /home/dais/workspace/model/sam3/sam3.pt
+  device: cuda
+  threshold: 0.3
+  mask_threshold: 0.5
+  top_n: 40
+  detection_tile_grid: 2
+  detection_tile_overlap: 0.25
+  candidate_cache_size: 16
+  ambiguity_score_margin: 0.05
+  geometry_margin: 0.01
+  query_aliases:
+    shrimp sushi:
+    - shrimp
+    - prawn
+    salmon sushi:
+    - salmon nigiri
+    cup:
+    - small bowl
+  tracking: true
+  tracking_prompt: mask_refine
+  tracking_anchor_min_iou: 0.3
+  tracking_preview: false
+  tracking_preview_max_width: 960
+  reference_consensus: true
+  allow_box_center_seed: true
+  visual_resolver:
+    enabled: true
+    model_path: /home/dais/workspace/model/Qwen3-VL-8B-Instruct
+    device: cuda
+    sam3_match_iou: 0.5
+    max_new_tokens: 384
+    verify_on_tracking_failure: true
+    empty_retry_long_side: 1280
+    empty_retry_requires_sam_support: true
+    always_verify_queries:
+    - surf clam sushi
+    category_descriptions:
+      surf clam sushi: 'hokkigai nigiri: a clam topping with a red or pink tip fading
+        into a creamy white base; exclude orange salmon with diagonal pale stripes
+        and shrimp with a segmented body and tail; include toy replicas'
+  terminal_recovery:
+    enabled: true
+    max_candidates: 6
+    anchor_iou: 0.5

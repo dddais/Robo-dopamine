@@ -183,10 +183,13 @@ def incremental_steps(
     if len(indices) < 2:
         raise ValueError("official incremental attention requires at least two frames")
     by_index = {int(row["frame_index"]): row for row in track_rows}
+    exact_frames = track.get("bbox_frame_policy") == "exact"
 
     def tracked_bbox(index: int) -> tuple[int, list[float]]:
         row = by_index.get(index)
         if row is None:
+            if exact_frames:
+                raise ValueError(f"Missing tracking bbox at source frame {index}; exact-frame grounding forbids borrowing another frame")
             row = min(track_rows, key=lambda item: abs(int(item["frame_index"]) - index))
         return int(row["frame_index"]), [float(value) for value in row["bbox"]]
 
@@ -200,6 +203,8 @@ def incremental_steps(
         _actual, path = extract_frame_at(
             view_paths[view], cache / view / f"frame_{index:06d}.png", index
         )
+        if exact_frames and _actual != index:
+            raise ValueError(f"Decoded frame {_actual} differs from bbox frame {index} for {view}")
         return path
 
     steps = []

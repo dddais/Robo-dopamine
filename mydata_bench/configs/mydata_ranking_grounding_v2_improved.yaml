@@ -1,0 +1,32 @@
+grounding:
+  dataset_root: /home/dais/workspace/data/mydata_v2/new
+  metadata_file: /home/dais/workspace/data/mydata_v2/new/ranking_data.jsonl
+  split: suc
+  output_dir: /home/dais/workspace/Robo-Dopamine/results/mydata_bench/ranking_grounding_v2_improved
+  parser_model_path: /home/dais/workspace/model/Qwen3-4B-Instruct-2507
+  use_parser_model: true
+
+sam3:
+  model_path: /home/dais/workspace/model/sam3
+  checkpoint_path: /home/dais/workspace/model/sam3/sam3.pt
+  device: cuda
+  threshold: 0.30
+  mask_threshold: 0.50
+  top_n: 40
+  # Full image plus overlapping crops; retain full-image coordinates/masks.
+  detection_tile_grid: 2
+  detection_tile_overlap: 0.25
+  candidate_cache_size: 16
+  ambiguity_score_margin: 0.05
+  geometry_margin: 0.01
+  # Dataset vocabulary, not universal class equivalences. Preserve modifiers.
+  query_aliases:
+    shrimp sushi: [shrimp, prawn]
+    salmon sushi: [salmon nigiri]
+    cup: [small bowl]
+  tracking: true
+  # After normal propagation, refine the same instance with a foreground mask point.
+  tracking_prompt: mask_refine
+  tracking_anchor_min_iou: 0.3
+  tracking_preview: false
+  tracking_preview_max_width: 960

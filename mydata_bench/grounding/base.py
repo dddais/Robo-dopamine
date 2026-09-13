@@ -6,7 +6,7 @@ from typing import Any
 
 from PIL import Image
 
-from ..io import artifact_fingerprint, object_fingerprint
+from ..io import artifact_fingerprint, object_fingerprint, sha256_file
 from ..schemas import validate_bbox
 
 
@@ -22,10 +22,17 @@ class Grounder(ABC):
         return object_fingerprint(
             {
                 "backend": self.backend,
+                "implementation": "semantic_instance_grounding_v2",
+                "source_sha256": {
+                    name: sha256_file(Path(__file__).parent / name)
+                    for name in ("base.py", "parser.py", "pipeline.py", "sam3.py", "dino.py", "visual.py", "recovery.py")
+                },
                 "config": self.config,
                 "model_artifact": artifact_fingerprint(model_path)
                 if model_path
                 else "unspecified",
+                "visual_model_artifact": artifact_fingerprint(self.config["visual_resolver"]["model_path"])
+                if self.config.get("visual_resolver", {}).get("enabled") else None,
             }
         )
 
@@ -56,8 +63,8 @@ class Grounder(ABC):
         return max(
             legal,
             key=lambda row: (
-                float(row["score"]),
                 -int(row.get("query_priority", query_count)),
+                float(row["score"]),
             ),
         )
 
@@ -95,11 +102,37 @@ def _box_iou(left: list[float], right: list[float]) -> float:
 
 def _deduplicate_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse the same instance returned by multiple open-vocabulary queries."""
+    def duplicate(row, other):
+        group = row.get("visual_instance_group")
+        if group and group == other.get("visual_instance_group") and (
+            row.get("visual_instance_index") != other.get("visual_instance_index")
+        ):
+            # Overlapping boxes can still represent explicitly distinct instances.
+            return False
+        return _box_iou(row["bbox"], other["bbox"]) >= 0.8
+
     kept: list[dict[str, Any]] = []
-    for row in sorted(rows, key=lambda value: float(value.get("score", 0)), reverse=True):
-        if all(_box_iou(row["bbox"], other["bbox"]) < 0.8 for other in kept):
+    for row in sorted(rows, key=lambda value: (
+        int(value.get("query_priority", 0)), -float(value.get("score", 0))
+    )):
+        if not any(duplicate(row, other) for other in kept):
             kept.append(row)
     return kept
+
+
+def select_unambiguous_candidate(
+    candidates: list[dict[str, Any]], *, score_margin: float = 0.05
+) -> tuple[dict[str, Any] | None, str]:
+    rows = _deduplicate_candidates(candidates)
+    if not rows:
+        return None, "target_not_detected"
+    # Semantic specificity takes precedence over scores from different prompts.
+    priority = min(int(row.get("query_priority", 0)) for row in rows)
+    rows = sorted((r for r in rows if int(r.get("query_priority", 0)) == priority),
+                  key=lambda r: float(r["score"]), reverse=True)
+    if len(rows) > 1 and float(rows[0]["score"]) - float(rows[1]["score"]) <= score_margin:
+        return None, "ambiguous_target_candidates"
+    return rows[0], "first_frame_semantic_detection"
 
 
 def select_relational_candidate(
@@ -107,6 +140,11 @@ def select_relational_candidate(
     target_candidates: list[dict[str, Any]],
     reference_candidates: list[dict[str, Any]],
     relation: str,
+    *,
+    ordinal_index: int | None = None,
+    ambiguity_margin: float = 0.05,
+    geometry_margin: float = 0.01,
+    reference_consensus: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
     """Resolve a relational noun phrase using first-frame box geometry.
 
@@ -131,9 +169,54 @@ def select_relational_candidate(
 
     targets = legal(target_candidates)
     references = legal(reference_candidates)
+
+    def center(row: dict[str, Any]) -> tuple[float, float]:
+        box = row["bbox"]
+        return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+
+    if relation.startswith("nth_from_"):
+        direction = relation.removeprefix("nth_from_")
+        if direction not in {"left", "right", "top", "bottom"}:
+            raise ValueError(f"Unsupported spatial relation: {relation}")
+        if type(ordinal_index) is not int or ordinal_index < 1:
+            raise ValueError("ordinal_index must be a positive one-based integer")
+        if len(targets) < ordinal_index:
+            return None, None, "insufficient_instances_for_ordinal"
+        axis = 0 if direction in {"left", "right"} else 1
+        ordered = sorted(targets, key=lambda row: center(row)[axis],
+                         reverse=direction in {"right", "bottom"})
+        selected = ordered[ordinal_index - 1]
+        tolerance = geometry_margin * (width if axis == 0 else height)
+        if any(abs(center(selected)[axis] - center(other)[axis]) <= tolerance
+               for other in ordered if other is not selected):
+            return None, None, "ambiguous_ordinal_geometry"
+        selected = {**selected, "relation": relation, "ordinal_index": ordinal_index,
+                    "instance_count": len(ordered)}
+        return selected, None, f"first_frame_geometry_{relation}"
     if not targets or not references:
         return None, None, "relational_target_or_reference_not_detected"
-    reference = max(references, key=lambda row: float(row.get("score", 0)))
+    reference, _ = select_unambiguous_candidate(references, score_margin=ambiguity_margin)
+    if reference is None:
+        if reference_consensus:
+            # An ambiguous reference need not make the target ambiguous. Require
+            # every plausible reference to independently select the same target.
+            priority = min(int(row.get("query_priority", 0)) for row in references)
+            plausible = [row for row in references if int(row.get("query_priority", 0)) == priority]
+            best_score = max(float(row["score"]) for row in plausible)
+            plausible = [row for row in plausible if best_score - float(row["score"]) <= ambiguity_margin]
+            choices = [select_relational_candidate(
+                image_path, targets, [row], relation,
+                ambiguity_margin=ambiguity_margin, geometry_margin=geometry_margin,
+            )[0] for row in plausible]
+            if choices and all(row is not None for row in choices) and all(
+                _box_iou(choices[0]["bbox"], row["bbox"]) >= 0.8 for row in choices[1:]
+            ):
+                selected = dict(choices[0])
+                for key in ("reference_bbox", "reference_query", "reference_center_distance"):
+                    selected.pop(key, None)
+                selected["reference_consensus_boxes"] = [list(row["bbox"]) for row in plausible]
+                return selected, None, f"first_frame_geometry_{relation}_reference_consensus"
+        return None, None, "ambiguous_reference_candidates"
     rx = (reference["bbox"][0] + reference["bbox"][2]) / 2
     ry = (reference["bbox"][1] + reference["bbox"][3]) / 2
     # A reference such as "purple cup" can also appear in the generic "cup"
@@ -142,16 +225,14 @@ def select_relational_candidate(
     if not targets:
         return None, reference, "only_reference_instance_detected"
 
-    def center(row: dict[str, Any]) -> tuple[float, float]:
-        box = row["bbox"]
-        return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-
     if relation in {"left_of", "right_of"}:
         sign = -1 if relation == "left_of" else 1
-        valid = [row for row in targets if sign * (center(row)[0] - rx) > 0]
+        valid = [row for row in targets if sign * (center(row)[0] - rx) > geometry_margin * width]
         if not valid:
             return None, reference, f"no_candidate_satisfies_{relation}"
-        selected = max(valid, key=lambda row: float(row.get("score", 0)))
+        selected, reason = select_unambiguous_candidate(valid, score_margin=ambiguity_margin)
+        if selected is None:
+            return None, reference, "ambiguous_relational_candidates"
     elif relation in {"closest_to", "farthest_from"}:
         def distance(row: dict[str, Any]) -> float:
             x, y = center(row)
@@ -163,6 +244,9 @@ def select_relational_candidate(
             else max(targets, key=lambda row: (distance(row), float(row.get("score", 0))))
         )
         selected["reference_center_distance"] = distance(selected)
+        if any(abs(distance(selected) - distance(other)) <= geometry_margin * max(width, height)
+               for other in targets if other is not selected):
+            return None, reference, "ambiguous_relational_geometry"
     else:
         raise ValueError(f"Unsupported spatial relation: {relation}")
     selected["relation"] = relation

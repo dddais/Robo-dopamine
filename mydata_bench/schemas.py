@@ -92,6 +92,8 @@ class TargetSpec(Record):
     parser: str = "heuristic"
     parser_fingerprint: str = ""
     raw_output: str | None = None
+    subject_phrase: str | None = None
+    ordinal_index: int | None = None
 
     @property
     def formal_scope(self) -> bool:

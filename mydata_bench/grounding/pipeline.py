@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import traceback
 import json
+from dataclasses import replace
+from uuid import uuid4
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +28,25 @@ from ..io import (
 from ..schemas import SCHEMA_VERSION, GroundingRecord, TargetSpec
 from ..video import extract_endpoints
 from .dino import GroundingDINOGrounder
-from .base import select_relational_candidate, select_temporal_pair
+from .base import select_relational_candidate, select_temporal_pair, select_unambiguous_candidate
 from .audit import wilson_interval
-from .parser import SPATIAL_RELATIONS, InstructionParser, build_queries, reference_queries
+from .parser import SPATIAL_RELATIONS, InstructionParser, build_queries, reference_queries, spatial_description
 from .sam3 import SAM3Grounder
+
+
+def _select_initial_candidates(image_path, target, candidates, references, config):
+    if target.relation:
+        return select_relational_candidate(
+            image_path, candidates, references, target.relation,
+            ordinal_index=target.ordinal_index,
+            ambiguity_margin=float(config.get("ambiguity_score_margin", 0.05)),
+            geometry_margin=float(config.get("geometry_margin", 0.01)),
+            reference_consensus=bool(config.get("reference_consensus", False)),
+        )
+    selected, reason = select_unambiguous_candidate(
+        candidates, score_margin=float(config.get("ambiguity_score_margin", 0.05)),
+    )
+    return selected, None, reason
 
 
 def _requested_example_ids(grounding: dict[str, Any]) -> set[str]:
@@ -59,6 +76,11 @@ def _requested_example_ids(grounding: dict[str, Any]) -> set[str]:
 def _target_from_row(row: dict) -> TargetSpec:
     value = dict(row)
     value.pop("schema_version", None)
+    # Also support old parse files: explicit spatial syntax must not silently
+    # revert to maximum confidence after upgrading the grounder.
+    description = spatial_description(str(value.get("target_phrase", "")))
+    if description:
+        value.update(description)
     relation = value.get("relation")
     if relation not in SPATIAL_RELATIONS:
         value["relation"] = None
@@ -97,13 +119,19 @@ def run_parser(config: dict[str, Any], *, dry_run: bool = False) -> Path:
         provenance(sys.argv, config, Path(__file__).resolve().parents[2]),
     )
     limit = int(grounding.get("limit", 0))
+    task_cache: dict[str, TargetSpec] = {}
     for index, episode in enumerate(episodes):
         if limit and index >= limit:
             break
-        if episode.example_id in previous:
+        target_fingerprint = object_fingerprint({"parser": parser.fingerprint, "task": episode.task})
+        if previous.get(episode.example_id, {}).get("parser_fingerprint") == target_fingerprint:
+            task_cache[episode.task] = _target_from_row(previous[episode.example_id])
             continue
         # Deliberately pass only task and id: reward/check cannot leak.
-        target = parser.parse(episode.task, episode.example_id)
+        if episode.task not in task_cache:
+            task_cache[episode.task] = parser.parse(episode.task, episode.example_id)
+        target = replace(task_cache[episode.task], example_id=episode.example_id,
+                         parser_fingerprint=target_fingerprint)
         append_jsonl(path, target.to_dict())
     return path
 
@@ -216,6 +244,7 @@ def run_grounding(
         if backend == "grounding_dino"
         else SAM3Grounder(backend_config)
     )
+    backend_fingerprint = grounder.fingerprint
     run_dir = output_root / backend
     run_dir.mkdir(parents=True, exist_ok=True)
     shard_id = int(grounding.get("shard_id", 0))
@@ -244,7 +273,7 @@ def run_grounding(
         {
             **provenance(sys.argv, config, Path(__file__).resolve().parents[2]),
             "backend": backend,
-            "backend_fingerprint": grounder.fingerprint,
+            "backend_fingerprint": backend_fingerprint,
             "shard_id": shard_id,
             "num_shards": num_shards,
         },
@@ -264,6 +293,14 @@ def run_grounding(
         tracking_contact_sheet_path = None
         tracking_preview_error = None
         reference_selected = None
+        tracking_diagnostics = None
+        tracking_error = None
+        visual_grounding = None
+        reference_candidates = []
+        input_fingerprint = object_fingerprint({
+            "backend": backend_fingerprint, "target": target.to_dict(),
+            "video_sha256": episode.video_sha256, "task": episode.task, "dry_run": dry_run,
+        })
         try:
             frames = extract_endpoints(
                 episode.example_id,
@@ -317,8 +354,12 @@ def run_grounding(
             frame_name: previous.get(f"{episode.example_id}::{frame_name}")
             for frame_name, _, _ in endpoint_specs
         }
+        def current(old):
+            return old and old.get("provenance", {}).get("input_fingerprint") == input_fingerprint
+
         if all(
             old
+            and current(old)
             and (old.get("status") == "ok" or not retry_failed)
             for old in old_by_frame.values()
         ):
@@ -334,30 +375,85 @@ def run_grounding(
                     reference_candidates = grounder.candidates(
                         frames.first_path, ref_queries
                     )
-                    first_selected, reference_selected, relation_reason = (
-                        select_relational_candidate(
-                            frames.first_path,
-                            first_candidates,
-                            reference_candidates,
-                            target.relation,
-                        )
-                    )
                 else:
                     reference_candidates = []
-                    first_selected = grounder.select(
-                        frames.first_path, first_candidates, len(queries)
-                    )
-                    relation_reason = "first_frame_open_vocabulary_detection"
-                tracks = (
-                    grounder.track(
-                        episode.video_path,
-                        first_selected["bbox"],
-                        frames.first_index,
-                    )
-                    if first_selected is not None
-                    else []
+                first_selected, reference_selected, relation_reason = _select_initial_candidates(
+                    frames.first_path, target, first_candidates, reference_candidates, backend_config,
                 )
+                visual_config = backend_config.get("visual_resolver", {})
+                force_visual = any(query in visual_config.get("always_verify_queries", []) for query in queries)
+                if visual_config.get("enabled") and (first_selected is None or force_visual):
+                    original_reason = relation_reason
+                    first_candidates, target_visual = grounder.visual_candidates(
+                        frames.first_path, queries, first_candidates,
+                    )
+                    reference_visual = None
+                    if ref_queries and (not reference_candidates or "reference" in original_reason):
+                        reference_candidates, reference_visual = grounder.visual_candidates(
+                            frames.first_path, ref_queries, reference_candidates,
+                        )
+                    visual_grounding = {"original_reason": original_reason, "target": target_visual,
+                                        "reference": reference_visual}
+                    if force_visual:
+                        visual_grounding["trigger"] = "configured_category_semantic_verification"
+                    first_selected, reference_selected, relation_reason = _select_initial_candidates(
+                        frames.first_path, target, first_candidates, reference_candidates, backend_config,
+                    )
+                    relation_reason += "_with_visual_proposals"
+                tracks = []
+                if first_selected is not None:
+                    try:
+                        tracks = grounder.track(
+                            episode.video_path,
+                            first_selected["bbox"],
+                            frames.first_index,
+                            anchor_mask=first_selected.get("_mask"),
+                            terminal_index=frames.last_index,
+                        )
+                        visual_config = backend_config.get("visual_resolver", {})
+                        if visual_config.get("enabled") and visual_config.get("verify_on_tracking_failure") and (
+                            visual_grounding is None and not any(row["frame_index"] == frames.last_index for row in tracks)
+                        ):
+                            original_selection = first_selected
+                            first_candidates, target_visual = grounder.visual_candidates(
+                                frames.first_path, queries, first_candidates,
+                            )
+                            visual_grounding = {
+                                "original_reason": relation_reason, "target": target_visual,
+                                "trigger": "forward_tracking_missing_terminal", "reference": None,
+                            }
+                            first_selected, reference_selected, relation_reason = _select_initial_candidates(
+                                frames.first_path, target, first_candidates, reference_candidates, backend_config,
+                            )
+                            relation_reason += "_with_visual_verification"
+                            if first_selected is None:
+                                tracks = []
+                            elif first_selected["bbox"] != original_selection["bbox"] or (
+                                first_selected.get("_mask") is not original_selection.get("_mask")
+                            ):
+                                # A subtype correction can change the intended instance.
+                                # Rebuild a full track for that anchor before recovery.
+                                tracks = grounder.track(
+                                    episode.video_path, first_selected["bbox"], frames.first_index,
+                                    anchor_mask=first_selected.get("_mask"), terminal_index=frames.last_index,
+                                )
+                        if first_selected is not None and backend_config.get("terminal_recovery", {}).get("enabled") and not any(
+                            row["frame_index"] == frames.last_index for row in tracks
+                        ):
+                            from .recovery import recover_terminal_track
+                            tracks = recover_terminal_track(
+                                grounder, episode.video_path, first_selected, frames.last_path, queries,
+                                frames.first_index, frames.last_index, tracks,
+                            )
+                    except Exception as tracking_exc:
+                        # Detection and video propagation are separate failure
+                        # stages; retain the valid first-frame observation.
+                        tracking_error = {
+                            "error_type": type(tracking_exc).__name__,
+                            "error": str(tracking_exc), "traceback": traceback.format_exc(),
+                        }
                 track_by_frame = {int(row["frame_index"]): row for row in tracks}
+                tracking_diagnostics = dict(grounder.last_tracking_diagnostics) if first_selected else None
                 last_selected = track_by_frame.get(frames.last_index)
                 candidates_by_frame = {
                     "first": first_candidates,
@@ -368,7 +464,10 @@ def run_grounding(
                     "last": last_selected,
                 }
                 selection_reason = f"{relation_reason}_then_sam3_box_tracking"
-                track_dir = run_dir / "tracks" / episode.video_sha256 / artifact_key
+                # Every attempt gets its own immutable media paths. A retry
+                # must not mutate artifacts referenced by older JSONL rows.
+                attempt_key = f"{input_fingerprint[:12]}-{uuid4().hex[:12]}"
+                track_dir = run_dir / "tracks" / episode.video_sha256 / artifact_key / attempt_key
                 serializable_tracks = [
                     {key: value for key, value in row.items() if key != "_mask"}
                     for row in tracks
@@ -384,6 +483,10 @@ def run_grounding(
                         "terminal_frame_index": frames.last_index,
                         "relation": target.relation,
                         "reference_queries": ref_queries,
+                        "input_fingerprint": input_fingerprint,
+                        "bbox_frame_policy": "exact",
+                        "tracking_diagnostics": tracking_diagnostics,
+                        "tracking_error": tracking_error,
                         "reference_candidate": {
                             key: value
                             for key, value in (reference_selected or {}).items()
@@ -444,16 +547,16 @@ def run_grounding(
                         "frame": frame_name,
                         "status": "invalid",
                         "error_type": type(exc).__name__,
+                        "provenance": {"input_fingerprint": input_fingerprint},
                         "error": str(exc),
                         "traceback": traceback.format_exc(),
                     },
                 )
             continue
         for frame_name, frame_index, image_path in endpoint_specs:
-            composite_id = f"{episode.example_id}::{frame_name}"
-            old = previous.get(composite_id)
-            if old and (old.get("status") == "ok" or not retry_failed):
-                continue
+            # Rerunning one video replaces both endpoint records coherently;
+            # keeping an old successful first endpoint could bind a new last
+            # endpoint to a different anchor/track.
             try:
                 candidates = candidates_by_frame[frame_name]
                 selected = selected_by_frame[frame_name]
@@ -465,6 +568,7 @@ def run_grounding(
                         / "masks"
                         / episode.video_sha256
                         / artifact_key
+                        / (attempt_key if track_path else input_fingerprint[:12])
                         / f"{frame_name}.png",
                     )
                 record_payload = {
@@ -484,7 +588,8 @@ def run_grounding(
                     "selection_reason": selection_reason,
                     "audit_status": "pending",
                     "provenance": {
-                        "backend_fingerprint": grounder.fingerprint,
+                        "backend_fingerprint": backend_fingerprint,
+                        "input_fingerprint": input_fingerprint,
                         "target_fingerprint": target.parser_fingerprint,
                         "frame_sha256": sha256_file(image_path),
                         "query": queries,
@@ -497,6 +602,14 @@ def run_grounding(
                         "relation": target.relation,
                         "reference_object": target.reference_object,
                         "reference_queries": ref_queries,
+                        "reference_candidates": [
+                            {key: value for key, value in row.items() if key != "_mask"}
+                            for row in reference_candidates
+                        ],
+                        "ordinal_index": target.ordinal_index,
+                        "subject_phrase": target.subject_phrase,
+                        "tracking_diagnostics": tracking_diagnostics,
+                        "tracking_error": tracking_error,
                         "reference_candidate": {
                             key: value
                             for key, value in (reference_selected or {}).items()
@@ -504,11 +617,15 @@ def run_grounding(
                         }
                         or None,
                         "tracking_path": track_path,
+                        "visual_grounding": visual_grounding,
                         "tracking_preview_path": tracking_preview_path,
                         "tracking_contact_sheet_path": tracking_contact_sheet_path,
                         "tracking_preview_error": tracking_preview_error,
                     },
-                    "status": "dry_run" if dry_run else ("ok" if selected else "no_detection"),
+                    "status": (
+                        "dry_run" if dry_run else "invalid" if frame_name == "last" and tracking_error
+                        else "ok" if selected else "no_detection"
+                    ),
                 }
                 record_payload["grounding_fingerprint"] = object_fingerprint(record_payload)
                 record = GroundingRecord(**record_payload)
@@ -534,6 +651,7 @@ def run_grounding(
                         "frame": frame_name,
                         "status": "invalid",
                         "error_type": type(exc).__name__,
+                        "provenance": {"input_fingerprint": input_fingerprint},
                         "error": str(exc),
                         "traceback": traceback.format_exc(),
                     },
@@ -565,7 +683,7 @@ def run_grounding(
                 status: sum(row.get("status") == status for row in latest.values())
                 for status in sorted({str(row.get("status")) for row in latest.values()})
             },
-            "backend_fingerprint": grounder.fingerprint,
+            "backend_fingerprint": backend_fingerprint,
         },
     )
     if num_shards > 1:
@@ -598,7 +716,7 @@ def run_grounding(
                     "dual_endpoint_wilson_ci95": wilson_interval(
                         len(successful), all_episode_count
                     ),
-                    "backend_fingerprint": grounder.fingerprint,
+                    "backend_fingerprint": backend_fingerprint,
                     "num_shards": num_shards,
                 },
             )

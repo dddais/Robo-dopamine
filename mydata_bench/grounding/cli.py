@@ -84,6 +84,9 @@ def parser() -> argparse.ArgumentParser:
     compare = commands.add_parser("compare")
     compare.add_argument("--dino-run", required=True)
     compare.add_argument("--sam3-run", required=True)
+    diagnose = commands.add_parser("diagnose", help="Summarize latest endpoint failures and full-video coverage")
+    diagnose.add_argument("--run-dir", required=True)
+    diagnose.add_argument("--baseline-run")
     return root
 
 
@@ -123,6 +126,10 @@ def main(argv: list[str] | None = None) -> None:
                 tuple(args.reviewers),
             )
         )
+    elif args.command == "diagnose":
+        from .diagnostics import diagnose
+        diagnose(Path(args.run_dir), Path(args.baseline_run) if args.baseline_run else None)
+        print(Path(args.run_dir).resolve() / "grounding_diagnostics.json")
     else:
         print(_compare(Path(args.dino_run).resolve(), Path(args.sam3_run).resolve()))
 

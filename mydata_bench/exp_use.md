@@ -379,3 +379,52 @@ tracking bbox 重新映射 token，并让每个 condition 独立累计最终 pro
 累计值；标准 `progress` 是最终官方累计值裁剪到 `[0,1]` 后的统计字段。attention 结果
 还会记录每 hop bbox 对应的 tracking frame index、token 数量，以及 `all_hops` steering
 协议。全量完成后，再对 `experiments_v2` 运行第 11 节的 `write_exp_records.py` 命令。
+
+## 13. 2026-09-12：grounding 改进版
+
+新增 `mydata_bench/configs/mydata_grounding_v2_improved.yaml` 和
+`mydata_bench/configs/mydata_ranking_grounding_v2_improved.yaml`，分别输出到
+`grounding_v2_improved/` 和 `ranking_grounding_v2_improved/`，保留历史实验结果。
+
+改动包括复合物体名称保留、序数/最左最右几何选择、显式同义查询、重叠裁剪检测、
+严格跟踪 ID、mask 内部补点、轨迹完整性诊断和按实现指纹恢复。
+新轨迹的官方 incremental 评测要求 bbox 与图像同帧；缺帧会明确失败。
+完整分析、真实权重检查和运行命令见
+[grounding_improvements_20260912.md](../docs/grounding_improvements_20260912.md)。
+
+4 条定向视频检查的双端点可用数由旧结果 1 条变为 4 条，但只有 1 条全程有框。
+全量重跑现已完成：评测集 1213 条中 991 条双端点可用（81.70%），335 条全帧有框；
+独立 ranking 集 36 条中分别为 28 条和 23 条。两批均无运行异常或产物一致性错误。
+详见 [grounding_full_run_20260912.md](../docs/grounding_full_run_20260912.md)。
+这些是自动可用性统计；已有 attention/reward 实验尚未重算。
+冻结全帧 cohort 可用 `--min-tracking-coverage 1.0`；诊断用
+`python3 mydata_bench/run_grounding.py diagnose --run-dir <新 sam3 目录> --baseline-run <旧 sam3 目录>`。
+
+## 14. 2026-09-13：全量 grounding 最终结果
+
+全部 1213 条评测样本与独立 ranking 清单的 36 条已完成处理。首轮全量之后，
+重试全部不可用样本，并完成类别复核、多点 mask 提示和形态描述修复。
+最终合并时剔除了 2 条已发现的端点误定位；历史输出保留。
+
+| 数据集 | 总数 | 双端点可用 | 可用比例 | 全帧有框 | 仍不可用 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 评测 | 1213 | 1116 | 92.00% | 357 | 97 |
+| 独立 ranking | 36 | 33 | 91.67% | 25 | 3 |
+
+当前使用以下最终产物：
+
+- 评测：`results/mydata_bench/grounding_v2_release/sam3/grounding.jsonl`。
+- ranking：`results/mydata_bench/ranking_grounding_v2_release/sam3/grounding.jsonl`。
+- 双端点 cohort：`results/mydata_bench/cohorts/auto_grounded_v2_release/`。
+- 全帧 cohort：`results/mydata_bench/cohorts/auto_grounded_v2_release_full_frames/`。
+
+每个结果根目录的 `processing_audit.json` 保存完整性核验；
+`still_unavailable_examples.json` 保存逐样本失败原因，`quality_exclusions.json`
+保存本次质量拒绝依据。合并结果引用各阶段原始 track、mask 和预览，需保留这些来源目录。
+126 项相关测试通过，全集、配对、同帧框、轨迹身份与 cohort 清单核验错误均为 0。
+
+上述比例是自动双端点结果经定向误定位剔除后的可用率，不是人工准确率。
+双端点可用允许中间缺帧；全帧有框也不保证全程正确实例。已发现的中间帧 mask 扩张
+记录在 `tracking_geometry_warnings.json` 及复核说明中，不能将有框直接当作定位正确。
+本轮未重跑 attention head ranking 或 reward/attention 评分，前文实验指标仍属于旧 cohort。
+阶段对照、修复细节和限制见 [最终报告](../docs/grounding_release_20260913.md)。

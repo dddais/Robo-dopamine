@@ -93,7 +93,11 @@ def _clean_phrase(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-SPATIAL_RELATIONS = {"left_of", "right_of", "closest_to", "farthest_from"}
+SPATIAL_RELATIONS = {
+    "left_of", "right_of", "closest_to", "farthest_from",
+    "nth_from_left", "nth_from_right", "nth_from_top", "nth_from_bottom",
+}
+PARSER_VERSION = "semantic_spatial_v2"
 
 def normalize_target(
     example_id: str,
@@ -112,10 +116,21 @@ def normalize_target(
     entity = str(value.get("entity_type") or value.get("target_type") or "object")
     if entity not in {"object", "object_part", "robot_part", "spatial_region", "unknown"}:
         entity = "unknown"
+    description = spatial_description(phrase)
+    if description:
+        value = {**value, **description}
     relation = value.get("relation")
     relation = str(relation).strip().lower() if relation is not None else None
     if relation not in SPATIAL_RELATIONS:
         relation = None
+    ordinal_index = value.get("ordinal_index")
+    if relation and relation.startswith("nth_from_"):
+        if isinstance(ordinal_index, str) and ordinal_index.isdigit():
+            ordinal_index = int(ordinal_index)
+        if type(ordinal_index) is not int or ordinal_index < 1:
+            raise ValueError("Spatial ordinals require a positive ordinal_index")
+    else:
+        ordinal_index = None
     return TargetSpec(
         example_id=example_id,
         target_phrase=phrase,
@@ -131,15 +146,13 @@ def normalize_target(
         parser=parser,
         parser_fingerprint=parser_fingerprint,
         raw_output=raw_output,
+        subject_phrase=value.get("subject_phrase"),
+        ordinal_index=ordinal_index,
     )
 
 
 RELATIONAL_TARGET = re.compile(
-    r"^(?P<subject>.+?)\s+(?P<relation>to the left of|to the right of|closest to|farthest from)\s+(?P<reference>.+)$",
-    re.IGNORECASE,
-)
-PICK_TARGET = re.compile(
-    r"\bpick(?:\s+up)?\s+(?P<target>.+?)\s+and\s+place\b",
+    r"^(?P<subject>.+?)\s+(?P<relation>to the left of|to the right of|left of|right of|closest to|nearest to|farthest from|furthest from)\s+(?P<reference>.+)$",
     re.IGNORECASE,
 )
 RELATION_NAMES = {
@@ -147,31 +160,79 @@ RELATION_NAMES = {
     "to the right of": "right_of",
     "closest to": "closest_to",
     "farthest from": "farthest_from",
+    "left of": "left_of",
+    "right of": "right_of",
+    "nearest to": "closest_to",
+    "furthest from": "farthest_from",
 }
+ORDINALS = {word: index for index, word in enumerate(
+    ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"), 1
+)}
+ORDINAL_TARGET = re.compile(
+    r"^(?P<rank>" + "|".join(ORDINALS) + r"|\d+(?:st|nd|rd|th))\s+"
+    r"(?P<subject>.+?)\s+from\s+(?:the\s+)?(?P<direction>left|right|top|bottom)$", re.I
+)
+
+
+def spatial_description(phrase: str) -> dict[str, Any] | None:
+    """Parse object identity separately from a camera-space selection operator."""
+    phrase = _clean_phrase(phrase)
+    match = RELATIONAL_TARGET.fullmatch(phrase)
+    if match:
+        return {
+            "subject_phrase": _clean_phrase(match.group("subject")),
+            "reference_object": _clean_phrase(match.group("reference")),
+            "relation": RELATION_NAMES[match.group("relation").lower()],
+        }
+    match = ORDINAL_TARGET.fullmatch(phrase)
+    if match:
+        rank = match.group("rank").lower()
+        index = ORDINALS[rank] if rank in ORDINALS else int(re.match(r"\d+", rank).group())
+        return {
+            "subject_phrase": _clean_phrase(match.group("subject")),
+            "relation": f"nth_from_{match.group('direction').lower()}",
+            "ordinal_index": index,
+        }
+    match = re.fullmatch(r"(leftmost|rightmost|topmost|bottommost|left|right)\s+(.+)", phrase, re.I)
+    if match:
+        return {"subject_phrase": _clean_phrase(match[2]),
+                "relation": f"nth_from_{match[1].lower().removesuffix('most')}", "ordinal_index": 1}
+    match = re.fullmatch(r"(.+?)\s+on\s+the\s+(left|right)", phrase, re.I)
+    if match:
+        return {"subject_phrase": _clean_phrase(match[1]),
+                "relation": f"nth_from_{match[2].lower()}", "ordinal_index": 1}
+    return None
 
 
 def _relational_parse(task: str, example_id: str) -> TargetSpec | None:
-    action = PICK_TARGET.search(re.sub(r"\s+", " ", task.strip()))
-    if action is None:
+    normalized = re.sub(r"\s+", " ", task.strip())
+    action = re.search(rf"\b{VERBS}\b\s+(.*)", normalized, re.I)
+    if action is None or SEQUENCE.search(action[1]):
         return None
-    phrase = _clean_phrase(action.group("target"))
-    match = RELATIONAL_TARGET.fullmatch(phrase)
-    if match is None:
+    phrase = re.split(rf"\s+and\s+(?:{VERBS})\b", action[1], maxsplit=1, flags=re.I)[0]
+    phrase = _clean_phrase(phrase)
+    description = spatial_description(phrase)
+    if description is None:
         return None
-    subject = _clean_phrase(match.group("subject"))
-    reference = _clean_phrase(match.group("reference"))
+    # A relation consumes its reference before a later destination clause.
+    if description.get("reference_object"):
+        description["reference_object"] = _clean_phrase(re.split(
+            r"\s+(?:into|onto|in|inside|with)\s+", description["reference_object"], maxsplit=1, flags=re.I
+        )[0])
+    subject = description["subject_phrase"]
     words = [word.lower() for word in re.findall(r"[A-Za-z0-9_-]+", subject)]
     meaningful = [word for word in words if word not in STOPWORDS]
     if not meaningful:
         return None
-    head = meaningful[-1]
+    head = " ".join(word for word in meaningful if word not in ATTRIBUTES) or meaningful[-1]
+    subject_type = heuristic_parse(f"Touch {subject}.")
     payload = {
         "target_phrase": phrase,
         "head_noun": head,
         "attributes": tuple(word for word in words if word in ATTRIBUTES),
-        "entity_type": "object",
-        "reference_object": reference,
-        "relation": RELATION_NAMES[match.group("relation").lower()],
+        "entity_type": subject_type.entity_type,
+        "parent_object": subject_type.parent_object,
+        **description,
         "targets": [phrase],
         "multi_target": False,
         "ambiguous": False,
@@ -179,9 +240,9 @@ def _relational_parse(task: str, example_id: str) -> TargetSpec | None:
     return normalize_target(
         example_id,
         payload,
-        parser="heuristic_relational_v1",
+        parser=PARSER_VERSION,
         parser_fingerprint=object_fingerprint(
-            {"parser": "heuristic_relational_v1", "relations": RELATION_NAMES}
+            {"parser": PARSER_VERSION, "relations": RELATION_NAMES}
         ),
     )
 
@@ -196,6 +257,7 @@ def heuristic_parse(task: str, example_id: str = "") -> TargetSpec:
     clauses = SEQUENCE.split(tail)
     multi = len(clauses) > 1
     first = clauses[0]
+    first = re.split(rf"\s+and\s+(?:{VERBS})\b", first, maxsplit=1, flags=re.I)[0]
     destination = DESTINATION.split(first, maxsplit=1)
     phrase = _clean_phrase(destination[0])
     phrase = re.split(
@@ -288,9 +350,15 @@ PARSER_PROMPT = """Extract the entity directly manipulated by the robot instruct
 Return exactly one JSON object with keys:
 target_phrase, head_noun, attributes (array), entity_type
 (object|object_part|robot_part|spatial_region|unknown), parent_object,
-reference_object, relation, targets (ordered array), multi_target, ambiguous.
+reference_object, relation, subject_phrase, ordinal_index,
+targets (ordered array), multi_target, ambiguous.
 Do not treat a destination/reference as the manipulated target. Preserve
 possessive object parts. Mark sequential multiple targets as multi_target.
+Preserve compound object names such as "salmon sushi". For spatial instructions,
+subject_phrase contains the complete object description without the relation.
+relation is left_of|right_of|closest_to|farthest_from|nth_from_left|nth_from_right|
+nth_from_top|nth_from_bottom or null. Ordinals are one-based; leftmost means
+nth_from_left with ordinal_index=1. Do not put a destination in reference_object.
 Instruction: {task}
 """
 
@@ -306,8 +374,9 @@ class InstructionParser:
     def fingerprint(self) -> str:
         return object_fingerprint(
             {
-                "implementation": "qwen_json_parser_v1",
+                "implementation": PARSER_VERSION,
                 "model_path": self.model_path,
+                "use_model": self.use_model,
                 "prompt": PARSER_PROMPT,
                 "temperature": 0,
             }
@@ -331,7 +400,7 @@ class InstructionParser:
 
     def parse(self, task: str, example_id: str = "") -> TargetSpec:
         if not self.use_model:
-            return heuristic_parse(task, example_id)
+            return replace(heuristic_parse(task, example_id), parser_fingerprint=self.fingerprint)
         self._load()
         assert self._tokenizer is not None and self._model is not None
         messages = [{"role": "user", "content": PARSER_PROMPT.format(task=task)}]
@@ -373,6 +442,8 @@ class InstructionParser:
                     targets=heuristic.targets,
                     multi_target=False,
                     ambiguous=False,
+                    subject_phrase=heuristic.subject_phrase,
+                    ordinal_index=heuristic.ordinal_index,
                 )
             # Structural syntax is more reliable than free-form model JSON for
             # safety-critical exclusions. A missed sequential marker would
@@ -401,18 +472,17 @@ class InstructionParser:
 
 
 def build_queries(target: TargetSpec) -> list[str]:
-    if target.relation:
-        # SAM3 is asked for all instances of the manipulated object class; the
-        # relational choice is made geometrically on the first frame.
-        subject = " ".join((*target.attributes, target.head_noun)).strip()
-        queries = [subject, target.head_noun]
-    else:
-        queries = [target.target_phrase]
+    description = spatial_description(target.target_phrase) or {}
+    subject = (
+        target.subject_phrase or description.get("subject_phrase") or target.target_phrase
+        if target.relation or description else target.target_phrase
+    )
+    subject = _clean_phrase(subject)
+    queries = [subject]
     if target.entity_type == "object_part" and target.parent_object:
         queries.append(f"{target.head_noun} of {target.parent_object}")
-        queries.append(target.parent_object)
-    if target.head_noun and target.head_noun != target.target_phrase:
-        queries.append(target.head_noun)
+    # A bare class/parent query silently discards color, subtype, or part
+    # identity. Synonyms belong in an explicit dataset-specific alias map.
     return list(dict.fromkeys(query.strip().lower() for query in queries if query.strip()))
 
 

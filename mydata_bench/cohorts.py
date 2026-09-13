@@ -136,6 +136,7 @@ def freeze_auto_grounded_cohort(
     output_dir: str | Path,
     *,
     split: str = "all",
+    min_tracking_coverage: float | None = None,
 ) -> dict[str, Any]:
     """Freeze examples whose automatic SAM3 tracking has both endpoints."""
     root = Path(dataset_root).resolve()
@@ -156,6 +157,25 @@ def freeze_auto_grounded_cohort(
         for example_id, frames in endpoint_ok.items()
         if frames == {"first", "last"}
     }
+    # A crash between append-only endpoint writes must not combine two attempts.
+    def same_attempt(example_id: str) -> bool:
+        first = latest[(example_id, "first")].get("provenance", {})
+        last = latest[(example_id, "last")].get("provenance", {})
+        if first.get("input_fingerprint") or last.get("input_fingerprint"):
+            return (first.get("input_fingerprint") == last.get("input_fingerprint")
+                    and first.get("tracking_path") == last.get("tracking_path"))
+        return True
+
+    eligible = {example_id for example_id in eligible if same_attempt(example_id)}
+    if min_tracking_coverage is not None:
+        if not 0 <= min_tracking_coverage <= 1:
+            raise ValueError("min_tracking_coverage must be in [0, 1]")
+        eligible = {
+            example_id for example_id in eligible
+            if isinstance(coverage := (latest[(example_id, "last")].get("provenance", {}).get(
+                "tracking_diagnostics") or {}).get("frame_coverage"), (int, float))
+            and coverage >= min_tracking_coverage
+        }
     episodes = {
         episode.example_id: episode for episode in load_episodes(root, split)
     }
@@ -172,6 +192,7 @@ def freeze_auto_grounded_cohort(
     summary = {
         "cohort": "automatic_sam3_tracking_dual_endpoint",
         "selection_rule": "latest automatic grounding status is ok at first and last endpoints",
+        "min_tracking_coverage": min_tracking_coverage,
         "dataset_root": str(root),
         "split": split,
         "selected_count": len(rows),
@@ -202,6 +223,8 @@ def main(argv: list[str] | None = None) -> None:
     selector.add_argument("--grounding-run")
     parser.add_argument("--split", default="test")
     parser.add_argument("--expected-count", type=int)
+    parser.add_argument("--min-tracking-coverage", type=float,
+                        help="For automatic cohorts, also require recorded full-video frame coverage (1.0 for every frame)")
     args = parser.parse_args(argv)
     if args.grounding_run:
         result = freeze_auto_grounded_cohort(
@@ -209,6 +232,7 @@ def main(argv: list[str] | None = None) -> None:
             args.grounding_run,
             args.output_dir,
             split=args.split,
+            min_tracking_coverage=args.min_tracking_coverage,
         )
     elif args.audit_final:
         result = freeze_audited_cohort(
