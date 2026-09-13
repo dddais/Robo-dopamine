@@ -40,7 +40,10 @@ Rubric for end-of-episode progress (judge only the final state without time limi
 
 Task: {task}"""
 
-ANSWER_RE = re.compile(r"\bANSWER\s*:\s*([1-5])\b", flags=re.IGNORECASE)
+ANSWER_RE = re.compile(
+    r"\bANSWER\s*:\s*([1-5])(?=$|[\s.,;!?*)])(?![.,]\d)", flags=re.IGNORECASE
+)
+ANSWER_MARKER_RE = re.compile(r"\bANSWER\s*:", flags=re.IGNORECASE)
 
 
 def _validate_paper_protocol_configuration(evaluation: dict[str, Any]) -> None:
@@ -113,6 +116,8 @@ def parse_native_score(text: str) -> int:
     unparseable response into reward 1.  That fallback would artificially
     improve the reward=1 counterfactual baseline.
     """
+    if len(ANSWER_MARKER_RE.findall(text)) != 1:
+        raise ValueError('Expected exactly one unambiguous ANSWER field')
     match = ANSWER_RE.search(text.strip())
     if not match:
         raise ValueError(f"No documented 'ANSWER: <1-5>' score in {text!r}")

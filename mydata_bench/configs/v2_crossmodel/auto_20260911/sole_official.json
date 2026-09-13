@@ -18,6 +18,7 @@
   "output_dir": "/mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_corssmodel/auto_research/session_20260911/experiments/sole_official",
   "processor_path": "/home/dais/workspace/model/SOLE-R1-8B",
   "protocol": "official",
+  "sole_protocol_version": "sole_official_v2",
   "query_scope": "all",
   "ranking_score": "raw_mass",
   "scopes": [

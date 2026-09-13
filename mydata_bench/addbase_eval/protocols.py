@@ -10,7 +10,8 @@ from qwen_vl_utils import smart_resize
 
 from mydata_bench.attention_eval.masking import ImageSpan, bbox_to_token_positions
 from mydata_bench.attention_eval.runtime import find_contiguous_spans
-from mydata_bench.top_eval.protocol import SYSTEM_PROMPT, OFFICIAL_QUESTION, create_composite_frame
+from mydata_bench.top_eval.protocol import SYSTEM_PROMPT, OFFICIAL_QUESTION, create_composite_frame, format_percentage
+from mydata_bench.top_eval.versioning import is_official_sole, validate_protocol_config
 
 METER_PROMPT = "The task for the robot is '{task}'. Given the trajectory video, predict the task progress at each frame, how far along the robot is towards completing the task, a float between 0 and 1, where 0 is the starting state and 1 is when the task is completed. If the robot is not performing the same task, predict 0 progress."
 PROG = '<|prog_token|>'
@@ -40,15 +41,19 @@ def prompt_payload(sample, cfg, step=None, previous=0):
     model, protocol = cfg['model'], cfg['protocol']
     images, videos, video_metadata, span_specs = [], [], [], []
     content = []
-    if model == 'sole' and protocol == 'official':
+    if is_official_sole(cfg):
+        validate_protocol_config(cfg)
         assert step is not None and 1 <= step < len(frames)
+        previous = format_percentage(previous)
         selected = [0, step-1, step]
         composite = create_composite_frame(None, frames[0], None, frames[step-1], None, frames[step], view_type='external')
         # Official RewardGen applies factor-28 resizing before Qwen3 processing.
         ch, cw = composite.shape[:2]
         rh, rw = smart_resize(ch, cw, factor=28, min_pixels=3136, max_pixels=12845056)
         intermediate = Image.fromarray(composite).resize((rw, rh))
-        images = [resize_image(np.asarray(intermediate), cfg)]
+        # The second resize belongs to the checkpoint processor. A PIL resize
+        # to factor 32 followed by do_resize=False is not pixel-equivalent.
+        images = [intermediate]
         span_specs = [{'sources': [source_indices[i] for i in selected], 'size': [cw, ch],
                        'source_size': [frames[0].shape[1], frames[0].shape[0]], 'mosaic': True}]
         content = [{'type': 'image'}, {'type': 'text', 'text': OFFICIAL_QUESTION.format(task_description=sample['task'], prev_progress=previous)}]
@@ -80,7 +85,8 @@ def prompt_payload(sample, cfg, step=None, previous=0):
     messages = [{'role': 'user', 'content': content}]
     if model == 'sole': messages.insert(0, {'role': 'system', 'content': SYSTEM_PROMPT})
     return {'messages': messages, 'images': images, 'videos': videos, 'video_metadata': video_metadata,
-            'span_specs': span_specs, 'step': step, 'previous': previous}
+            'span_specs': span_specs, 'step': step, 'previous': previous,
+            'processor_kwargs': {'do_resize': True, 'add_special_tokens': False} if is_official_sole(cfg) else {}}
 
 
 def align_input(ids, grids, payload, sample, cfg):
@@ -115,7 +121,8 @@ def align_input(ids, grids, payload, sample, cfg):
                 index = min(track, key=lambda n: (abs(n-source), n))
                 source_boxes.append(track[index]); used.append(index)
             if record['mosaic']:
-                # Only source image pixels, not black padding or other timesteps, receive negative bias.
+                # Select cells intersecting the requested source-image content.
+                # Boundary cells may also contain padding or an adjacent tile.
                 sw, sh = record['source_size']
                 scale = 384/max(sw, sh)
                 rw, rh = int(sw*scale), int(sh*scale)

@@ -1,6 +1,7 @@
 """Standalone descriptive plot of the official-input endpoint tradeoffs."""
 import argparse
 import json
+from mydata_bench.top_eval.versioning import load_analysis
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -18,7 +19,7 @@ def main():
     rows = []
     fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
     for i, name in enumerate(names):
-        data = json.loads((folder / (name + '.json')).read_text())['conditions']
+        data = load_analysis(folder / (name + '.json'))['conditions']
         base = data['baseline']['cohort']
         for j, threshold in enumerate(thresholds):
             ax = axes[i, j]

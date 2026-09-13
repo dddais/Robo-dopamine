@@ -7,13 +7,17 @@ import torch
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
 from mydata_bench.meter_eval.model import RobometerModel
-from mydata_bench.top_eval.protocol import parse_progress
+from mydata_bench.top_eval.protocol import parse_progress, format_percentage
+from mydata_bench.top_eval.versioning import (
+    is_official_sole, validate_protocol_config, protocol_metadata, validate_records,
+)
 from .attention import AttentionController
 from .protocols import PROG, SPECIAL_TOKENS, prompt_payload, align_input
 
 
 class Runtime:
     def __init__(self, cfg):
+        validate_protocol_config(cfg)
         if cfg['model'] not in {'meter','sole'} or cfg['protocol'] not in {
                 'video_text','text_video','image_text','text_image','interleaved','official'}:
             raise ValueError('Unknown model or input protocol')
@@ -47,12 +51,21 @@ class Runtime:
         self.controller = AttentionController(self.layers)
 
     def prepare(self, samples, step=None, previous=None):
-        previous = previous or [0]*len(samples)
+        if not samples:
+            raise ValueError('Cannot prepare an empty sample batch')
+        if previous is None:
+            previous = [0]*len(samples)
+        if len(previous) != len(samples):
+            raise ValueError('Previous predictions must match the sample batch length')
+        for sample in samples:
+            if len(sample['image_paths']) != 8 or len(sample['sampling']['selected_source_indices']) != 8:
+                raise ValueError('Frozen evaluation requires exactly eight sampled frames per example')
         payloads = [prompt_payload(s,self.cfg,step,p) for s,p in zip(samples,previous)]
         texts = [self.processor.apply_chat_template(p['messages'],tokenize=False,
                  add_generation_prompt=self.cfg['model']=='sole', add_vision_id=self.cfg['model']=='meter',
                  enable_thinking=False) for p in payloads]
         args = {'text': texts,'padding':True,'return_tensors':'pt','do_resize':False}
+        args.update(payloads[0]['processor_kwargs'])
         images = [im for p in payloads for im in p['images']]
         videos = [v for p in payloads for v in p['videos']]
         if images: args['images'] = images
@@ -87,7 +100,7 @@ class Runtime:
                 rows.append({'example_id':s['example_id'],'status':'ok','raw_mass':{k:v[i].tolist() for k,v in state['raw'].items()},
                              'visual_mass':state['visual'][i].tolist(),'query':queries[i],
                              'query_kind':'final_prog_token' if self.cfg['model']=='meter' else 'last_prompt',
-                             'token_audit':self.audit(maps[i]), 'prompt':texts[i]})
+                             'token_audit':self.audit(maps[i]), 'prompt':texts[i], **protocol_metadata(self.cfg)})
             return rows
         finally:
             self.controller.clear()
@@ -101,6 +114,7 @@ class Runtime:
         state = None
         if condition != 'baseline':
             scope,kind,k = condition.split(':');k=int(k)
+            validate_records(self.cfg, [rankings[scope]], f'{scope} ranking')
             if kind=='wrong_region' and any(not m['wrong'][scope] for m in maps):
                 raise ValueError('Wrong-region control unavailable: insufficient disjoint cells; baseline and target remain valid')
             ranked = rankings[scope]['ranking']
@@ -116,6 +130,7 @@ class Runtime:
                              'per_frame_success':s,'progress_token_positions':pos} for p,s,pos in zip(values,success,positions)]
                 else:
                     output = self.model.generate(**inputs,do_sample=False,max_new_tokens=self.cfg['max_new_tokens'],
+                                  temperature=None,top_p=None,top_k=None,
                                   use_cache=True,logits_to_keep=1,pad_token_id=self.processor.tokenizer.pad_token_id)
                     generated = output[:,inputs['input_ids'].shape[1]:]
                     raw = self.processor.batch_decode(generated,skip_special_tokens=True)
@@ -123,10 +138,13 @@ class Runtime:
                              **parse_progress(r)} for r,tok in zip(raw,generated)]
             for i,row in enumerate(rows):
                 row.update(example_id=samples[i]['example_id'],condition=condition,step=step,
-                           previous_percentage=(previous[i] if previous else None),
+                           previous_percentage=(float(previous[i]) if previous else None),
                            duration_seconds_per_batch=time.monotonic()-started,
                            token_audit=self.audit(maps[i]),prompt=texts[i],
                            attention_diagnostics=(state['diagnostics'] if state else {}))
+                row.update(protocol_metadata(self.cfg))
+                if is_official_sole(self.cfg):
+                    row['previous_percentage_text'] = format_percentage(previous[i] if previous else 0)
             return rows
         finally:
             self.controller.clear()

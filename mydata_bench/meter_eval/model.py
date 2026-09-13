@@ -64,8 +64,11 @@ class RobometerModel(nn.Module):
             if not len(p): raise ValueError('Missing trained progress readout token')
             h = hidden[i, p]
             logits = self.progress_head(h).float()
+            success_logits = self.success_head(h).float()
+            if not torch.isfinite(logits).all() or not torch.isfinite(success_logits).all():
+                raise ValueError('Non-finite Robometer head logits')
             values = (logits.softmax(-1)*torch.linspace(0, 1, 10, device=logits.device)).sum(-1)
             progress.append(values.detach().cpu().tolist())
-            success.append(self.success_head(h).float().sigmoid().squeeze(-1).detach().cpu().tolist())
+            success.append(success_logits.sigmoid().squeeze(-1).detach().cpu().tolist())
             positions.append(p.detach().cpu().tolist())
         return progress, success, positions

@@ -1,5 +1,7 @@
 # 跨模型 image-sequence 与 attention steering 实验总结
 
+> 2026-09-13 实现复核见 [五模型审计](REVIEW_FIVE_MODELS_20260913.md)。RoboReward/Qwen 主路径已补充真实权重检查；共享解析器与 mask 边界检查已修正，历史成功主实验记录未触发这些漏洞，以下指标未改写。不完整条件仍遵守文中原有比较限制。
+
 ## 1. 实验范围与口径
 
 本轮实验对应 [`exp_plan_crossmodel.md`](./exp_plan_crossmodel.md)，考察 RoboReward-8B 与

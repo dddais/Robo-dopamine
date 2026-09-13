@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+from mydata_bench.top_eval.versioning import load_analysis
 from pathlib import Path
 
 from .prepare import OUT, ROOT
@@ -44,7 +45,7 @@ def main():
     assert audit['evidence_checks']['predictions_observed'] == 197292
     assert len(index['experiments']) == 12 and index['rows'] == 468
     names = [f'{model}_{p}' for model in ['meter', 'sole'] for p in PROTOCOLS]
-    data = {n: json.loads((OUT / 'analysis_v1' / f'{n}.json').read_text()) for n in names}
+    data = {n: load_analysis(OUT / 'analysis_v1' / f'{n}.json') for n in names}
     holm = json.loads((OUT / 'analysis_v1/holm.json').read_text())
     rankings = json.loads((OUT / 'head_overlap_v1/rankings.json').read_text())
     assert all(holm[p]['family_size'] == 72 for p in ['cohort', 'holdout'])

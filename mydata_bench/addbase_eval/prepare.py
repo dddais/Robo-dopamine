@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import yaml
+from mydata_bench.top_eval.versioning import SOLE_PROTOCOL_VERSION
 
 from mydata_bench.data import load_episodes
 from mydata_bench.io import read_jsonl
@@ -84,10 +85,12 @@ def main():
             if protocol == 'official':
                 cfg['max_pixels'] = 16777216 if model == 'meter' else 12845056
                 cfg['batch_size'] = 1 if model == 'meter' else 8
+                if model == 'sole':
+                    cfg['sole_protocol_version'] = SOLE_PROTOCOL_VERSION
             path = CONFIGS / f'{model}_{protocol}.yaml'
             serial = yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
             if path.exists():
-                if path.read_text() != serial:
+                if yaml.safe_load(path.read_text()) != cfg:
                     raise FileExistsError(path)
             else:
                 with path.open('x') as f: f.write(serial)

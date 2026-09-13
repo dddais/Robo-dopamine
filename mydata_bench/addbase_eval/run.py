@@ -13,6 +13,9 @@ import yaml
 
 from .prepare import create_json
 from .runtime import Runtime
+from mydata_bench.top_eval.versioning import (
+    protocol_metadata, validate_records, validate_output_directory,
+)
 
 
 def append(path, rows):
@@ -54,16 +57,19 @@ def predict_condition(runtime, samples, condition, rankings, output):
 
 def _predict_condition(runtime, samples, condition, rankings, output):
     cfg=runtime.cfg
+    if condition != 'baseline' and cfg['model']=='sole' and cfg['protocol']=='official':
+        validate_records(cfg, rankings.values(), 'steering rankings')
     name=condition.replace(':','_')
     path=output/'predictions'/f'{name}.jsonl'
     done=latest(path)
+    validate_records(cfg, done.values(), path)
     remaining=[s for s in samples if s['example_id'] not in done or
                (cfg.get('retry_runtime_errors',False) and done[s['example_id']]['status']=='runtime_error'
                 and not str(done[s['example_id']].get('error','')).startswith('Wrong-region control unavailable'))]
     official=cfg['model']=='sole' and cfg['protocol']=='official'
     for batch in batches(remaining,cfg['batch_size']):
         active=batch[:]
-        previous={s['example_id']:0 for s in batch}
+        previous={s['example_id']:'0' for s in batch}
         traces={s['example_id']:[] for s in batch}
         final={}
         for step in range(1,8) if official else [None]:
@@ -84,6 +90,7 @@ def _predict_condition(runtime, samples, condition, rankings, output):
             next_active=[]
             byid={s['example_id']:s for s in active}
             for row in rows:
+                row.update(protocol_metadata(cfg))
                 eid=row['example_id']
                 if official:
                     traces[eid].append(row)
@@ -91,7 +98,7 @@ def _predict_condition(runtime, samples, condition, rankings, output):
                 if row['status']=='ok':
                     if official:
                         # SOLE predicts ABSOLUTE progress. Never add it as a GRM delta.
-                        previous[eid]=row['progress']*100
+                        previous[eid]=row['percentage_text']
                     next_active.append(byid[eid])
                 final[eid]=row
             active=next_active
@@ -117,6 +124,7 @@ def rank(runtime, samples, baseline, output):
     official=cfg['model']=='sole' and cfg['protocol']=='official'
     requested=samples
     if official:
+        validate_records(cfg, baseline.values(), 'baseline used for ranking')
         samples=[s for s in requested if baseline.get(s['example_id'],{}).get('status')=='ok'
                  and baseline[s['example_id']].get('step_count')==7]
         create_json(output/'ranking_eligibility.json',{'requested':len(requested),'eligible':len(samples),
@@ -125,9 +133,13 @@ def rank(runtime, samples, baseline, output):
                     'reason':'Official terminal ranking requires a valid model-predicted predecessor at step 6'})
         if len(samples)<2:raise RuntimeError('Insufficient valid official ranking rollouts')
     done=latest(path)
+    validate_records(cfg, done.values(), path)
+    unexpected = set(done)-{s['example_id'] for s in samples}
+    if unexpected:
+        raise ValueError(f'Ranking cache contains examples outside the requested ranking set: {sorted(unexpected)}')
     remaining=[s for s in samples if s['example_id'] not in done]
     for batch in batches(remaining,cfg['batch_size']):
-        prior=[baseline[s['example_id']]['previous_percentage'] for s in batch] if official else None
+        prior=[baseline[s['example_id']]['previous_percentage_text'] for s in batch] if official else None
         rows=runtime.collect(batch,7 if official else None,prior)
         append(path,rows);done.update({r['example_id']:r for r in rows})
         print(f"RANK {cfg['model']}/{cfg['protocol']} {len(done)}/{len(samples)}",flush=True)
@@ -140,7 +152,7 @@ def rank(runtime, samples, baseline, output):
         ordered.sort(key=lambda r:(-r['score'],r['layer'],r['head']))
         artifact={'scope':scope,'num_layers':36,'num_heads':32,'skip_early_layers':cfg['skip_early_layers'],
                   'ranking_score':'mean_raw_mass','n':len(valid),'example_ids':[r['example_id'] for r in valid],
-                  'query_kind':valid[0]['query_kind'],'ranking':ordered}
+                  'query_kind':valid[0]['query_kind'],'ranking':ordered, **protocol_metadata(cfg)}
         create_json(output/f'ranking_{scope}.json',artifact)
         rankings[scope]=artifact
     return rankings
@@ -159,6 +171,7 @@ def main():
     if args.batch_size: cfg['batch_size']=args.batch_size
     output=Path(cfg['output_dir']+(args.output_suffix or ''))
     if args.limit and not args.output_suffix: raise ValueError('Pilot runs require a separate output suffix')
+    validate_output_directory(cfg, output)
     samples=json.loads(Path(cfg['inputs']).read_text())
     if args.limit: samples=sorted(samples,key=lambda s:(not s['ranking'],s['example_id']))[:args.limit]
     output.mkdir(parents=True,exist_ok=True)

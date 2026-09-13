@@ -8,6 +8,7 @@ from collections import Counter
 import csv
 import hashlib
 import json
+from mydata_bench.top_eval.versioning import load_analysis
 import math
 from pathlib import Path
 import re
@@ -33,7 +34,7 @@ def main():
     metrics = {}
     populations = {}
     for name in index['experiments']:
-        data = json.loads((folder / (name + '.json')).read_text())
+        data = load_analysis(folder / (name + '.json'))
         assert len(data['conditions']) == 19
         assert (OUT / name / 'exp_record.md').stat().st_size > 0
         for condition, records in data['conditions'].items():

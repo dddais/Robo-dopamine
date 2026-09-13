@@ -10,6 +10,7 @@ import sys
 import time
 
 import yaml
+from mydata_bench.top_eval.versioning import validate_output_directory
 from .prepare import OUT, ROOT, create_json
 
 
@@ -30,7 +31,9 @@ def main():
     args=parser.parse_args()
     queue=[]
     for p in json.loads((OUT/'matrix.json').read_text()):
-        cfg=yaml.safe_load(Path(p).read_text());queue.append((Path(p).stem,p,cfg))
+        cfg=yaml.safe_load(Path(p).read_text())
+        validate_output_directory(cfg, Path(cfg['output_dir']))
+        queue.append((Path(p).stem,p,cfg))
     # Native official baselines get an early slot; no choosing jobs by their observed scores.
     queue.sort(key=lambda x:(x[0]!='sole_official',x[2]['model']!='meter',x[0]!='meter_official',x[0]))
     slots={};launched=set();finished={}

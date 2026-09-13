@@ -1,5 +1,7 @@
 # v2 原生视频、GRM 与 attention steering 实验总结
 
+> 2026-09-13 实现复核见 [五模型审计](REVIEW_FIVE_MODELS_20260913.md)。本轮修复共享解析器与 mask 校验，历史成功主实验记录未触发这些漏洞，以下指标未改写。GRM 全量 vLLM baseline 与 HF attention baseline 的解码和图像预处理均有差异，steering 只与各自配套 baseline 比较。
+
 ## 1. 实验范围与统计口径
 
 本总结对应 [exp_plan.md](./exp_plan.md)，覆盖 `results/mydata_bench/experiments_v2/` 中的全部 **7 个 baseline 目录和 12 个 attention 目录**，包括后续新增的官方 GRM incremental 结果。结构参照 [跨模型总结](./exp_plan_crossmodel_summary.md)。统计于 2026-09-05 从原始 JSON/JSONL 重新核对；本次只新增总结，不重跑模型，也不改写已有实验记录。

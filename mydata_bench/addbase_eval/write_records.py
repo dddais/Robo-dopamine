@@ -4,6 +4,7 @@ from collections import Counter
 import csv
 import io
 import json
+from mydata_bench.top_eval.versioning import load_analysis
 from pathlib import Path
 import numpy as np
 from .prepare import OUT
@@ -78,7 +79,7 @@ def main():
     folder=OUT/args.analysis_name
     index=json.loads((folder/'index.json').read_text())
     holm=json.loads((folder/'holm.json').read_text())
-    experiments={name:json.loads((folder/(name+'.json')).read_text()) for name in index['experiments']}
+    experiments={name:load_analysis(folder/(name+'.json')) for name in index['experiments']}
     baseline_rows=[];candidate_rows=[];holdout_rows=[];control_rows=[];task_rows=[];distribution_rows=[];pair_rows=[]
     for name,result in experiments.items():
         conditions=result['conditions']

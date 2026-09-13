@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from mydata_bench.top_eval.versioning import load_analysis
 from collections import Counter
 
 import numpy as np
@@ -122,7 +123,7 @@ def main():
     report = {'purpose': 'Post-run descriptive digest; all conditions retained; no extra inferential tests.',
               'analysis_name': args.analysis_name, 'experiments': {}}
     for name in index['experiments']:
-        result = json.loads((folder / (name + '.json')).read_text())
+        result = load_analysis(folder / (name + '.json'))
         report['experiments'][name] = digest_experiment(result, holm, name)
     aggregate = {}
     for population in ['cohort', 'holdout']:

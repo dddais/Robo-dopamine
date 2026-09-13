@@ -3,6 +3,11 @@
 仅新增实现，供仓库根目录 `exp_plan_addbase.md` 使用。Robometer 入口是
 `mydata_bench.meter_eval`；SOLE-R1 入口依计划命名为 `mydata_bench.top_eval`，并非 TOPReward。
 
+2026-09-13 完整复核见 [REVIEW_20260913.md](REVIEW_20260913.md)：35 项 CPU 检查、
+官方源码与实际 processor 对照、两个模型的真实权重小样本核验、历史 197,292 条输出审计。
+修正版 SOLE 尚未重跑全量实验。Robometer 历史 official 实际 batch size 为 4（YAML 默认 1）；
+逐位复现应以保存的 `run_config.json`、批次分组和环境为准。
+
 ## 运行
 
 在 Robo-Dopamine 根目录、robo-dopamine conda 环境中执行：
@@ -12,11 +17,58 @@ python -m mydata_bench.addbase_eval.prepare
 CUDA_VISIBLE_DEVICES=0 python -m mydata_bench.meter_eval \
   --config mydata_bench/configs/v2_crossmodel_addbase/meter_interleaved.yaml --batch-size 16
 CUDA_VISIBLE_DEVICES=1 python -m mydata_bench.top_eval \
-  --config mydata_bench/configs/v2_crossmodel_addbase/sole_official.yaml --batch-size 32
+  --config mydata_bench/configs/v2_crossmodel_addbase/sole_official.yaml
 python -m unittest mydata_bench.addbase_eval.test_contracts
 CUDA_VISIBLE_DEVICES=0 python -m mydata_bench.addbase_eval.verify_reference
 python -m mydata_bench.addbase_eval.score --output-name analysis_v1
 ```
+
+## SOLE 官方输入修正（2026-09-13）
+
+SOLE 只保留一个配置 `sole_official.yaml`，其内容已替换为修正后的实现，输出目录为
+`sole_official/`。原独立的 `sole_official_v2.yaml` 已移除；默认矩阵和配置生成器均使用
+这个唯一入口。内部 `sole_protocol_version: sole_official_v2` 仅用于识别正确缓存，
+不代表保留另一套模型或旧推理代码。旧配置和无版本标记的预测不再允许推理或评分。
+旧 official / pilot 原始结果已从运行目录移至
+`results/mydata_bench/experiments_v2_addbase/retired/sole_official_20260913/`，不参与当前运行。
+本次未重跑全量模型，历史 SOLE 指标不是修正版指标。Robometer 的输入和评分口径不变。
+
+修正内容：
+
+- 递推直接使用解析后的百分比字符串，例如 `57`；不再经 `0.57 * 100` 产生
+  `56.99999999999999`。保留有效小数原文，越界值先裁剪至 [-100,100] 再反馈，
+  首步仍为 `0`，各条件使用自身上一绝对进度，不累加。
+- 官方拼图先按 RewardGen 的 factor-28/PIL 路径处理，再交给 checkpoint processor
+  执行原生 resize；移除手工第二次 PIL resize 和对此输入的 `do_resize=False`。
+- 预测、步骤、ranking 观察和 head 排名均带 `sole_protocol_version`，拒绝复用
+  未标记或不兼容的旧缓存。清理旧结果后，baseline、ranking、steering 必须完整生成。
+- 保持 greedy/512-token 的实验解码设置，显式关闭 sampling 参数。这仍不是官方
+  随机解码结果的复现；普通五种输入仍是八帧单次预测，只有 official 做七步递推。
+- 保持原干预定义：`last_frame` 为每一步的当前帧区域，`all_frames` 为每一步三个
+  时刻的内容区域，两者都干预七步。矩形相交的网格边界可能含黑边或邻帧像素。
+
+CPU 回归检查（仅读取本地 processor 文件，不加载模型权重）：
+
+```bash
+python -m unittest mydata_bench.top_eval.test_protocol mydata_bench.addbase_eval.test_contracts mydata_bench.addbase_eval.test_execution_contracts
+```
+
+检查覆盖官方文本/token/pixel tensor 的直接一致性、左侧 padding、精确百分比反馈、
+各条件独立递推、格式失败隔离、选头前驱及历史缓存拒绝。未安装本地 SOLE processor
+时对应两项检查会跳过，可用 `SOLE_PROCESSOR_PATH` 指定文件目录。
+
+修正版实验完成后单独统计：
+
+```bash
+python -m mydata_bench.addbase_eval.score \
+  --configs mydata_bench/configs/v2_crossmodel_addbase/sole_official.yaml \
+  --output-name analysis_sole_official
+```
+
+`--configs` 定义本次完整比较矩阵，因此上述分析每个 population 的 Holm family 为
+6 个 target 条件；不能与历史 72 条件校正混称。未提供该参数时仍读取历史冻结矩阵。
+
+## 续跑与历史统计
 
 `--phase baseline/rank/steer/all` 控制执行阶段。`--limit N --output-suffix _pilot`
 只用于独立 pilot 目录。正式实验不设 limit。`--retry-runtime-errors` 仅对已记录的运行错误

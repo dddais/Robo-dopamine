@@ -9,6 +9,7 @@ from mydata_bench.addbase_eval.protocols import prompt_payload, align_input
 from mydata_bench.roboreward_eval.runner import ROBOREWARD_PROMPT, parse_native_score
 from mydata_bench.qwen_eval.protocols import INTERLEAVED_REWARD_PROMPT
 from mydata_bench.top_eval.protocol import parse_progress
+from mydata_bench.top_eval.versioning import protocol_metadata, validate_protocol_config
 from .attention import ResearchController
 
 
@@ -41,13 +42,25 @@ class ResearchRuntime(Runtime):
         return p
 
     def prepare(self,samples,step=None,previous=None):
-        payloads=[self.payload(s,step,p) for s,p in zip(samples,previous or [0]*len(samples))]
+        # Workers may reuse this runtime while switching protocols.
+        validate_protocol_config(self.cfg)
+        if not samples:
+            raise ValueError('Cannot prepare an empty sample batch')
+        if previous is None:
+            previous = [0]*len(samples)
+        if len(previous) != len(samples):
+            raise ValueError('Previous predictions must match the sample batch length')
+        for sample in samples:
+            if len(sample['image_paths']) != 8 or len(sample['sampling']['selected_source_indices']) != 8:
+                raise ValueError('Frozen evaluation requires exactly eight sampled frames per example')
+        payloads=[self.payload(s,step,p) for s,p in zip(samples,previous)]
         texts=[self.processor.apply_chat_template(p['messages'],tokenize=False,
                add_generation_prompt=self.cfg['model']!='meter',add_vision_id=self.cfg['model']=='meter',
                enable_thinking=False) for p in payloads]
         if getattr(self,'active_ranking_prefix',''):
             texts=[text+self.active_ranking_prefix for text in texts]
         args={'text':texts,'padding':True,'return_tensors':'pt','do_resize':False}
+        args.update(payloads[0].get('processor_kwargs', {}))
         images=[im for p in payloads for im in p['images']]
         videos=[v for p in payloads for v in p['videos']]
         if images:args['images']=images
@@ -80,8 +93,10 @@ class ResearchRuntime(Runtime):
             with torch.inference_mode():
                 extra={} if self.cfg['model']=='meter' else {'logits_to_keep':1}
                 self.model(**inputs,use_cache=False,**extra)
-            assert len(state['seen'])==36
+            if len(state['seen']) != 36:
+                raise RuntimeError('Incomplete head observations')
             return [{'example_id':s['example_id'],'status':'ok',
+                     **protocol_metadata(self.cfg),
                      **({'task_mass':state['task_mass'][i].tolist()} if 'task_mass' in state else {}),
                      'raw_mass':{k:v[i].tolist() for k,v in state['raw'].items()},
                      'visual_mass':state['visual'][i].tolist(),'query':queries[i],

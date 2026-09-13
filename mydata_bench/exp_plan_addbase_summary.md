@@ -1,5 +1,10 @@
 # Robometer-4B 与 SOLE-R1-8B 实验总结
 
+> 2026-09-13 实现修正说明：本文 SOLE 官方输入结果来自旧版提示词反馈与图像预处理，
+> 修正版现统一使用 `sole_official.yaml`（内部协议标记 `sole_official_v2`），
+> 尚未全量重跑，不能沿用本文旧官方输入数值；
+> 具体变更与运行方法见 [修正说明](addbase_eval/README.md)。Robometer 结果不受本次修正影响。
+
 ## 1. 实验范围与口径
 
 本轮对应 [exp_plan_addbase.md](../exp_plan_addbase.md)，新增 Robometer-4B 与 SOLE-R1-8B，

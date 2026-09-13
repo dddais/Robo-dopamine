@@ -1,5 +1,6 @@
 model: sole
 protocol: official
+sole_protocol_version: sole_official_v2
 num_frames: 8
 min_pixels: 1024
 max_pixels: 12845056

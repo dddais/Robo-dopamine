@@ -1,5 +1,7 @@
 """Load only the official pure prompt/composite definitions (no vLLM imports)."""
 import ast
+from decimal import Decimal
+import math
 from pathlib import Path
 import cv2
 import numpy as np
@@ -17,11 +19,32 @@ OFFICIAL_QUESTION = namespace['user_question_template_external_view']
 create_composite_frame = namespace['create_composite_frame']
 
 
+def format_percentage(value):
+    """Preserve parsed answer text; never reconstruct feedback from p*100."""
+    number = Decimal(str(value))
+    if not number.is_finite():
+        raise ValueError('Previous SOLE percentage must be finite')
+    if isinstance(value, str):
+        return value.strip()
+    if number == 0:
+        return '0'
+    text = format(number, 'f')
+    return text.rstrip('0').rstrip('.') if '.' in text else text
+
+
 def parse_progress(raw):
     import re
-    matches = re.findall(r'<answer>\s*([+-]?\d+(?:\.\d+)?)\s*%?\s*</answer>', raw)
-    if len(matches) != 1:
+    tags = re.findall(r'<answer>(.*?)</answer>', raw, flags=re.DOTALL)
+    match = re.fullmatch(r'\s*([+-]?\d+(?:\.\d+)?)\s*%?\s*', tags[0]) if len(tags) == 1 else None
+    if raw.count('<answer>') != 1 or raw.count('</answer>') != 1 or match is None:
         return {'status': 'parse_error', 'progress': None, 'parse_error': 'Expected exactly one complete numeric answer tag'}
-    value = float(matches[0])
-    return {'status': 'ok', 'raw_percentage': value, 'progress': max(-1.0, min(1.0, value/100)),
-            'percentage_clipped': not -100 <= value <= 100}
+    percentage_text = match.group(1)
+    percentage = Decimal(percentage_text)
+    value = float(percentage)
+    if not math.isfinite(value):
+        return {'status': 'parse_error', 'progress': None, 'parse_error': 'Non-finite numeric answer'}
+    clipped = max(Decimal('-100'), min(Decimal('100'), percentage))
+    return {'status': 'ok', 'raw_percentage': value,
+            'raw_percentage_text': percentage_text,
+            'percentage_text': percentage_text if clipped == percentage else format_percentage(clipped),
+            'progress': float(clipped / 100), 'percentage_clipped': clipped != percentage}

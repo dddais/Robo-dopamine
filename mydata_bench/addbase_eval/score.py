@@ -4,11 +4,14 @@ import argparse
 from collections import Counter,defaultdict
 import csv
 import json
+import math
+from numbers import Real
 from pathlib import Path
 import numpy as np
 
 from .prepare import OUT, create_json
 from .run import latest
+from mydata_bench.top_eval.versioning import validate_records, validate_protocol_config
 
 ORDINAL=(.125,.375,.625,.875)
 EQUAL=(.2,.4,.6,.8)
@@ -19,9 +22,15 @@ def distribution(p): return 1+sum(p>=t for t in EQUAL)
 def endpoint(p,low,high): return 1 if p<=low else 5 if p>=high else 0
 
 
+def valid_prediction(row):
+    value = row.get('progress')
+    return (row.get('status') == 'ok' and isinstance(value, Real)
+            and not isinstance(value, bool) and math.isfinite(value))
+
+
 def summary(rows, labels, expected):
     ids=set(expected)
-    good={k:r for k,r in rows.items() if k in ids and r['status']=='ok' and r.get('progress') is not None}
+    good={k:r for k,r in rows.items() if k in ids and valid_prediction(r)}
     n=len(good)
     out={'expected':len(ids),'n':n,'invalid':len(ids)-n,'coverage':n/len(ids) if ids else None}
     out['missing_ids']=sorted(ids-set(rows))
@@ -100,7 +109,7 @@ def pairwise(rows,labels):
 
 
 def paired_change(base,rows,labels,expected,seed=20260909):
-    valid=[k for k in expected if k in base and k in rows and base[k]['status']=='ok' and rows[k]['status']=='ok']
+    valid=[k for k in expected if valid_prediction(base.get(k,{})) and valid_prediction(rows.get(k,{}))]
     if not valid:return {'n':0}
     groups=defaultdict(list)
     for k in valid:groups[labels[k]['video_sha256']].append(k)
@@ -126,6 +135,9 @@ def paired_change(base,rows,labels,expected,seed=20260909):
 def score_experiment(folder, inputs, labels, output):
     baseline=latest(folder/'predictions/baseline.jsonl')
     cfg=json.loads((folder/'run_config.json').read_text())
+    validate_protocol_config(cfg)
+    if cfg.get('inputs') and json.loads(Path(cfg['inputs']).read_text()) != inputs:
+        raise ValueError('Scoring inputs differ from the run manifest; do not score a custom run against the frozen population')
     all_ids=[s['example_id'] for s in inputs]
     cohort=[s['example_id'] for s in inputs if s['cohort']]
     holdout=[s['example_id'] for s in inputs if s['cohort'] and s['holdout']]
@@ -133,7 +145,13 @@ def score_experiment(folder, inputs, labels, output):
     loaded={}
     for path in sorted((folder/'predictions').glob('*.jsonl')):
         rows=latest(path)
+        validate_records(cfg, rows.values(), path)
         condition=next(iter(rows.values()))['condition'] if rows else path.stem
+        if any(r.get('condition') != condition for r in rows.values()):
+            raise ValueError(f'Mixed prediction conditions in {path}')
+        expected_ids = set(all_ids if condition=='baseline' else cohort)
+        if set(rows)-expected_ids:
+            raise ValueError(f'Predictions outside the expected population in {path}')
         loaded[condition]=rows
         groups={'cohort':cohort,'holdout':holdout}
         if condition=='baseline':groups['full']=all_ids
@@ -151,7 +169,7 @@ def score_experiment(folder, inputs, labels, output):
             if not all(name in loaded for name in names):continue
             record={}
             for population,requested in [('cohort',cohort),('holdout',holdout)]:
-                common=[eid for eid in requested if all(loaded[name].get(eid,{}).get('status')=='ok' for name in names)]
+                common=[eid for eid in requested if all(valid_prediction(loaded[name].get(eid,{})) for name in names)]
                 record[population]={'expected_population':len(requested),'common_n':len(common),
                                     'excluded_ids':sorted(set(requested)-set(common)),
                                     'conditions':{name:summary(loaded[name],labels,common) for name in names}}
@@ -171,9 +189,10 @@ def score_experiment(folder, inputs, labels, output):
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--output-name',default='analysis_v1')
+    p.add_argument('--configs',nargs='+',help='Explicit config matrix defining the Holm family; defaults to the historical frozen matrix')
     p.add_argument('--experiments',nargs='+',help='Optional explicit checkpoint subset; Holm family still includes the full frozen matrix')
     args=p.parse_args()
-    matrix=json.loads((OUT/'matrix.json').read_text())
+    matrix=args.configs or json.loads((OUT/'matrix.json').read_text())
     requested=set(args.experiments) if args.experiments else None
     if requested is not None and not requested<={Path(path).stem for path in matrix}:
         p.error('Unknown experiment name in --experiments')
@@ -236,7 +255,7 @@ def main():
     if flat:
         with (destination/'metrics.csv').open('x',newline='') as f:
             writer=csv.DictWriter(f,fieldnames=list(flat[0]));writer.writeheader();writer.writerows(flat)
-    create_json(destination/'index.json',{'experiments':list(results),'rows':len(flat),
+    create_json(destination/'index.json',{'experiments':list(results),'rows':len(flat), 'config_matrix':matrix,
                 'accuracy_columns':{'acc_*':'legacy valid-output denominator',
                                     'acc_valid_*':'valid-output denominator',
                                     'acc_fixed_*':'fixed expected denominator; invalid outputs not correct',

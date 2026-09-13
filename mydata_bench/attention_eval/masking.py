@@ -201,6 +201,10 @@ def make_attention_mask_hook(
     other = sorted({int(value) for value in other_visual_positions})
     if any(value < 0 or value >= num_query_heads for value in heads):
         raise ValueError("Selected head index is outside query-head range")
+    if any(value < 0 for value in selected + other):
+        raise ValueError("Visual key positions must be nonnegative")
+    if set(selected) & set(other):
+        raise ValueError("Selected and other visual positions must be disjoint")
     base_length = max(selected + other, default=-1) + 1
     base = torch.zeros((1, num_query_heads, 1, base_length), dtype=torch.float32)
     for head in heads:
@@ -235,7 +239,9 @@ def make_attention_mask_hook(
     def hook(_module, args, kwargs):
         mask = kwargs.get("attention_mask")
         if mask is None:
-            return None
+            raise RuntimeError("Steering requires an explicit additive eager attention mask")
+        if not torch.is_floating_point(mask) or mask.ndim != 4:
+            raise RuntimeError("Steering requires a floating-point 4D additive attention mask")
         diagnostics["calls"] += 1
         query_length = int(mask.shape[-2])
         is_decode = query_length == 1
