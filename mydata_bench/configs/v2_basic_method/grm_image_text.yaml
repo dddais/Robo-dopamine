@@ -1,0 +1,36 @@
+basic_method_version: basic_method_exact_v1
+model: grm
+protocol: image_text
+num_frames: 8
+min_pixels: 12544
+max_pixels: 76800
+max_new_tokens: 32
+skip_early_layers: 8
+bias: 6.0
+query_scope: all
+scopes:
+- last_frame
+- all_frames
+top_k:
+- 8
+- 32
+- 64
+controls:
+- wrong_region
+- low_rank
+seed: 20260913
+decoding: greedy
+model_path: /mnt/public1/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+processor_path: /mnt/public1/dais/workspace/Robo-Dopamine/pretrained_models/Robo-Dopamine-GRM-2.0-8B-Preview
+output_dir: /mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_basic_method/grm_image_text
+eval_mode: forward
+grm_all_frame_slots:
+- reference_start
+- before_cam_high
+- after_cam_high
+inputs: /mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_basic_method/inputs.json
+inputs_sha256: 90ff3d39fff0427d019d41df3a4c43a8716f695458c93d7cb719498c322d98b8
+ranking_inputs: /mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_basic_method/ranking_inputs.json
+ranking_inputs_sha256: 691c9f32b3cfbdb61d1d7cab8e56e1deb54f75d7a67a5d09f6fbad657c85dee8
+labels: /mnt/public1/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_basic_method/labels_for_scoring_only.json
+labels_sha256: 27e988a39cc5f62ab4b14b17b1c23156bb7ec1eb52881860c41994e435636352

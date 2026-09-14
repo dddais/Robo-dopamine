@@ -35,10 +35,10 @@
     - 先image再text
     - 类似GRM的交错输入构造
   - 施加bias：
-    - -bias只加在最后一帧（对GRM是after high）的非target区域，+bias只加在最后一帧的target区域
-    - -bias加在所有帧的非target区域，+bias加在所有帧的target区域
+    - -bias只加在最后一帧（对GRM是after high）的非target区域，+bias只加在最后一帧的target区域（对GRM是after high）
+    - -bias加在所有帧的非target区域（对GRM仅包括正面图像），+bias加在所有帧的target区域（对GRM仅包括正面图像）
   - 对照：
-    - wrong target
+    - wrong region
     - low rank
   - top k :
     - 8
@@ -47,6 +47,7 @@
   - 总计：
     - baseline: 5个模型*3种输入（大约）=15组实验
     - SAS:5个模型**1个方法**2种bias**2种对照*3种topk**3种输入（大约）=180组实验
+  - 注意robometer 的success head 的结果也要纳入统计
 
 
 
@@ -58,7 +59,6 @@
     - SAS 方法 在整个数据集上的MAE，准确率（总，成功，失败）
     - SAS 方法的对照组 在整个数据集上的MAE，准确率（总，成功，失败）
     - 效果最好的top k，bias，输入构造及其效果（MAE，准确率，pairwise区分度）
-    - 
   - 所有模型的结果汇总成一个总文档，包括：
     - 各个模型baseline的效果
     - 各个模型效果最好的SAS配置及其效果
@@ -71,9 +71,29 @@
 
 **数据集** ：/home/dais/workspace/data/mydata_v2/new 
 
-grounding结果：/home/dais/workspace/Robo-Dopamine/results/mydata_bench/cohorts/auto_grounded_v2_release (认为这就是正确的，不需要人工审核) 数据集中没有grounding结果的部分就用baseline替代
+grounding结果：
+
+/home/dais/workspace/Robo-Dopamine/results/mydata_bench/cohorts/auto_grounded_v2_release 
+
+```
+样本清单：
+results/mydata_bench/cohorts/auto_grounded_v2_release/example_ids.json
+
+实际 grounding：
+results/mydata_bench/grounding_v2_release/sam3/grounding.jsonl
+
+指令解析：
+results/mydata_bench/grounding_v2_release/targets.jsonl
+
+独立 ranking grounding：
+results/mydata_bench/ranking_grounding_v2_release/sam3/grounding.jsonl
+```
+
+(认为这就是正确的，不需要人工审核) 数据集中没有grounding结果的部分就用baseline替代
 
 **config** 放在：/home/dais/workspace/Robo-Dopamine/mydata_bench/configs/v2_basic_method
+
+- 注意：对每个模型、输入构造和干预范围，预先检查所有需要干预的源帧。所需框全部存在才执行 SAS；任一所需框缺失，该样本在该条件下整体沿用对应 baseline。禁止借用邻帧框。
 
 **输入**：image->text ; text->image ;interleaved；官方 ;以上四种都需要尝试，得到结果 **输出** 在：/home/dais/workspace/Robo-Dopamine/results/mydata_bench/experiments_v2_basic_method/
 

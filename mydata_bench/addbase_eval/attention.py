@@ -21,9 +21,9 @@ class AttentionController:
     def clear(self):
         self.state = None
 
-    def rank(self, maps, queries, num_layers=36, num_heads=32):
+    def rank(self, maps, queries, num_layers=36, num_heads=32, scopes=('last_frame','all_frames')):
         self.state = {'kind': 'rank', 'maps': maps, 'queries': queries,
-                      'raw': {s: np.zeros((len(maps),num_layers,num_heads)) for s in ['last_frame','all_frames']},
+                      'raw': {s: np.zeros((len(maps),num_layers,num_heads)) for s in scopes},
                       'visual': np.zeros((len(maps),num_layers,num_heads)), 'seen': set()}
         return self.state
 
