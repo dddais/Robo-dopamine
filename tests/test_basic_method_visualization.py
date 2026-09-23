@@ -121,6 +121,36 @@ class VisualizationTests(unittest.TestCase):
             prediction_match({**row, 'token_audit': {**row['token_audit'], 'input_ids_sha256': 'changed'}},
                              saved, sample, 'r', 'baseline')
 
+    def test_directory_range_is_inclusive_numeric_and_not_limited_to_four(self):
+        directory = 'fail/ljx_lfz_task_1_3'
+        ids = [f'{directory}/{i}' for i in (11, 1, 10, 2, 9, 8, 7, 6, 5, 4, 3)] + [
+            'fail/ljx_lfz_task_1_30/5', 'suc/ljx_lfz_task_1_3/5',
+            f'{directory}/5/nested', f'{directory}/notes']
+        samples = [{'example_id': eid, 'subset': 't', 'holdout': True} for eid in ids]
+        args = parser().parse_args(['--sample-dir', directory + '/', '--start-id', '2', '--end-id', '10'])
+        expected = [f'{directory}/{i}' for i in range(2, 11)]
+        self.assertEqual([s['example_id'] for s in select_samples(samples, args)], expected)
+        args.limit = 3
+        self.assertEqual([s['example_id'] for s in select_samples(samples, args)], expected[:3])
+        args.limit = 0
+        args.start_id = None
+        args.end_id = None
+        self.assertEqual(len(select_samples(samples, args)), 11)
+        args.start_id = args.end_id = 7
+        self.assertEqual(select_samples(samples, args)[0]['example_id'], directory + '/7')
+
+    def test_directory_range_rejects_invalid_bounds_and_empty_selection(self):
+        samples = [{'example_id': 'fail/task/2', 'subset': 't', 'holdout': True}]
+        invalid = [(['--start-id', '2'], 'require --sample-dir'),
+                   (['--sample-dir', 'fail/task', '--start-id', '5', '--end-id', '2'], 'must be <='),
+                   (['--sample-dir', 'fail/task', '--end-id', '-1'], 'nonnegative'),
+                   (['--sample-dir', '/fail/task'], 'dataset-relative'),
+                   (['--sample-dir', '../fail/task'], 'dataset-relative'),
+                   (['--sample-dir', 'fail/task', '--start-id', '3'], 'No samples match')]
+        for argv, message in invalid:
+            with self.subTest(argv=argv), self.assertRaisesRegex(ValueError, message):
+                select_samples(samples, parser().parse_args(argv))
+
     def test_missing_grounding_reuses_baseline_and_writes_real_figure_and_arrays(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -64,9 +64,9 @@ def save_comparison(path, image_path, baseline, sas, box, target_mask, title, su
         ax.set_yticks([])
     for ax, grid in zip(axes[1:3], (a, b)):
         heat = ax.imshow(grid, extent=extent, cmap='jet', norm=normalizer,
-                         interpolation='nearest', alpha=alpha)
+                         interpolation='bicubic', alpha=alpha)
     diff = axes[3].imshow(delta, extent=extent, cmap='RdBu_r', norm=delta_normalizer,
-                         interpolation='nearest', alpha=alpha)
+                         interpolation='bicubic', alpha=alpha)
     # Opaque colorbars label the heatmap values, independently of the overlay alpha.
     unit = 'attention probability / token' if normalization == 'raw' else 'probability / token, conditioned on this image'
     fig.colorbar(plt.cm.ScalarMappable(norm=normalizer, cmap=heat.cmap), ax=axes[1:3],

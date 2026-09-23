@@ -27,6 +27,30 @@ FRONT_SLOTS = {'reference_start': 0, 'before_cam_high': 2, 'after_cam_high': 5}
 
 
 def select_samples(samples, args):
+    directory = args.sample_dir
+    if args.start_id is not None or args.end_id is not None:
+        if directory is None:
+            raise ValueError('--start-id/--end-id require --sample-dir')
+        if any(v is not None and v < 0 for v in (args.start_id, args.end_id)):
+            raise ValueError('Sample IDs must be nonnegative integers')
+        if args.start_id is not None and args.end_id is not None and args.start_id > args.end_id:
+            raise ValueError('--start-id must be <= --end-id')
+    if directory is not None:
+        if args.example_id:
+            raise ValueError('--sample-dir cannot be combined with --example-id')
+        directory = directory.strip().removeprefix('./').rstrip('/')
+        if not directory or directory.startswith('/') or any(p in ('', '.', '..') for p in directory.split('/')):
+            raise ValueError('--sample-dir must be a dataset-relative directory, e.g. fail/ljx_lfz_task_1_3/')
+        numbered = []
+        for sample in samples:
+            parent, _, number = sample['example_id'].rpartition('/')
+            # Exact directory boundary and direct numeric children only.
+            if parent != directory or re.fullmatch(r'[0-9]+', number) is None:
+                continue
+            value = int(number)
+            if (args.start_id is None or value >= args.start_id) and (args.end_id is None or value <= args.end_id):
+                numbered.append((value, sample['example_id'], sample))
+        samples = [s for _, _, s in sorted(numbered, key=lambda row: (row[0], row[1]))]
     by_id = {s['example_id']: s for s in samples}
     if args.example_id:
         unknown = set(args.example_id) - set(by_id)
@@ -36,7 +60,7 @@ def select_samples(samples, args):
     selected = [s for s in samples if (args.subset is None or s['subset'] == args.subset)
                 and (args.split is None or s['example_id'].startswith(args.split + '/'))
                 and (not args.holdout_only or s['holdout'])]
-    limit = args.limit if args.limit is not None else (0 if args.example_id else 4)
+    limit = args.limit if args.limit is not None else (0 if args.example_id or directory is not None else 4)
     if limit:
         selected = selected[:limit]
     if not selected:
@@ -130,10 +154,9 @@ def prediction_match(row, saved, sample, run_id, condition):
             'saved': {k: saved.get(k) for k in fields}, 'saved_row_sha256': fingerprint(saved)}
 
 
-def visualize_sample(runtime, sample, args, ranking, observed, cached, run_id, output):
-    from mydata_bench.attention_eval.masking import ImageSpan, bbox_to_token_positions
+def capture_pair(runtime, sample, args, ranking, observed):
+    """Run one forward-protocol input pair without rendering or touching caches."""
     from .capture import LastPromptCapture
-    from .render import grid_metrics, save_comparison, vector_to_grid
 
     check, mapping, slots = context(runtime, sample, args.scope, args.focus_images)
     condition = f'{args.scope}:target:{args.top_k}'
@@ -150,6 +173,15 @@ def visualize_sample(runtime, sample, args, ranking, observed, cached, run_id, o
         for field in ('prompt_sha256', 'input_ids_sha256'):
             if rows[label]['token_audit'][field] != mapping[field]:
                 raise ValueError(f'Captured input drifted: {field}')
+    return check, mapping, slots, rows, weights
+
+
+def visualize_sample(runtime, sample, args, ranking, observed, cached, run_id, output):
+    from mydata_bench.attention_eval.masking import ImageSpan, bbox_to_token_positions
+    from .render import grid_metrics, save_comparison, vector_to_grid
+
+    check, mapping, slots, rows, weights = capture_pair(runtime, sample, args, ranking, observed)
+    condition = f'{args.scope}:target:{args.top_k}'
     comparisons = {name: prediction_match(rows[name], cached[name].get(sample['example_id']), sample,
                                          run_id, 'baseline' if name == 'baseline' else condition)
                    for name in rows}
@@ -216,24 +248,57 @@ def parser():
     ap.add_argument('--heads', help='Optional observed heads, e.g. L19H23,L20H4; does not change SAS heads')
     ap.add_argument('--focus-images', nargs='+', choices=list(FRONT_SLOTS), default=['after_cam_high'])
     ap.add_argument('--per-head', type=int, default=2, help='Also render this many individual observed heads; 0 = mean only')
-    ap.add_argument('--example-id', action='append', help='Exact example ID; repeat to select several')
+    selection = ap.add_mutually_exclusive_group()
+    selection.add_argument('--example-id', action='append', help='Exact example ID; repeat to select several')
+    selection.add_argument('--sample-dir', help='Dataset-relative directory, e.g. fail/ljx_lfz_task_1_3/; select all matching numeric IDs')
+    ap.add_argument('--start-id', type=int, help='Inclusive starting sample number within --sample-dir')
+    ap.add_argument('--end-id', type=int, help='Inclusive ending sample number within --sample-dir')
     ap.add_argument('--subset', help='Task subset, e.g. task1_1')
     ap.add_argument('--split', choices=['suc', 'fail'])
     ap.add_argument('--holdout-only', action='store_true')
-    ap.add_argument('--limit', type=int, help='Default: first 4, or all explicitly requested IDs; 0 = all matches')
+    ap.add_argument('--limit', type=int, help='Default: all matches with sample-dir/explicit IDs, otherwise first 4; 0 = all matches')
     ap.add_argument('--normalization', choices=['raw', 'image_fraction'], default='raw')
     ap.add_argument('--alpha', type=float, default=.5)
     ap.add_argument('--output-dir', type=Path, help='Must be a new directory')
     ap.add_argument('--list-samples', action='store_true', help='Print matching IDs and exact-frame eligibility without loading the processor/model')
     ap.add_argument('--preflight', action='store_true', help='Validate inputs and token geometry with the processor only; no GPU')
+    ap.add_argument('--video', action='store_true', help='Sample each entire three-camera video and export smooth attention MP4s')
+    ap.add_argument('--progress-only', action='store_true',
+                    help='Output original front video and GRM/SAS progress curves; skip attention capture/videos (implies --video)')
+    sampling = ap.add_mutually_exclusive_group()
+    sampling.add_argument('--num-samples', '--video-num-samples', type=int,
+                          help='Uniformly sample this many video frames including both endpoints; default 30')
+    sampling.add_argument('--frame-interval', type=int, help='Sample every N source frames, also include the last frame')
+    ap.add_argument('--fps', type=float, default=5., help='Output playback FPS; 0 preserves approximate source duration')
+    ap.add_argument('--video-head-index', type=int, default=0,
+                    help='Index in observed heads to render in videos; -1 = mean; default 0, like the reference script')
+    ap.add_argument('--video-scale', choices=['reference', 'shared'], default='reference',
+                    help='reference: independently min/max each map for spatial detail; shared: one scale for both conditions over the clip')
+    ap.add_argument('--blur-sigma', type=float, default=3., help='Spatial Gaussian blur in source-image pixels after bicubic resizing; 0 disables')
+    ap.add_argument('--render-only', type=Path, metavar='VIDEO_OUTPUT',
+                    help='Re-render saved video predictions/attention; no model/GPU, requires a new --output-dir')
     return ap
 
 
 def main(argv=None):
     ap = parser()
     args = ap.parse_args(argv)
+    if args.progress_only:
+        args.video = True
     if args.per_head < 0 or args.limit is not None and args.limit < 0 or not 0 <= args.alpha <= 1:
         ap.error('per-head/limit must be nonnegative and alpha must be in [0, 1]')
+    if (not np.isfinite(args.fps) or args.fps < 0 or not np.isfinite(args.blur_sigma) or args.blur_sigma < 0
+            or args.num_samples is not None and args.num_samples < 2
+            or args.frame_interval is not None and args.frame_interval < 1):
+        ap.error('fps/blur-sigma must be finite and nonnegative; num-samples >= 2; frame-interval >= 1')
+    if args.render_only is not None:
+        if args.output_dir is None or args.preflight or args.list_samples:
+            ap.error('--render-only requires --output-dir and cannot be combined with preflight/list-samples')
+        if args.sample_dir is not None or args.start_id is not None or args.end_id is not None:
+            ap.error('--sample-dir/--start-id/--end-id select inference inputs and cannot be used with --render-only')
+        from .video import rerender
+        rerender(args)
+        return
     cfg, identity, run_id, ranking_path, ranking, samples, steered, observed = load_experiment(args)
     if args.list_samples:
         for sample in samples:
@@ -253,6 +318,10 @@ def main(argv=None):
     versions = {p: importlib.metadata.version(p) for p in identity['versions']}
     if versions != identity['versions']:
         raise ValueError(f'Use the original experiment environment: {identity["versions"]}; found {versions}')
+    if args.video:
+        from .video import run_videos
+        run_videos(args, cfg, identity, run_id, ranking_path, ranking, samples, steered, observed)
+        return
     from .render import write_gallery
     from mydata_bench.basic_method.runtime import Runtime
 

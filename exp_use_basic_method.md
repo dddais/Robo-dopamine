@@ -136,6 +136,96 @@ python -m mydata_bench.basic_method.reporting.endpoint_view \
 
 新增入口 `python -m mydata_bench.basic_method.visualization`，使用对应 GRM 配置的冻结输入、精确帧 grounding、独立 ranking 和原有 SAS controller。支持 `grm_official`、`grm_text_image`、`grm_image_text`、`grm_interleaved` 四份配置；默认 `grm_official`、`last_frame`、top-8、`after_cam_high`。需要该配置已经生成 `run_identity.json` 和对应范围的 ranking。
 
+### 整段视频：采样、推理和 MP4 对照
+
+添加 `--video`，可视化整条轨迹。参考 `run_targetbbox_success_experiments.py` 的 video 阶段所调用的 `visualize_stage3_head_attention.py`，默认均匀采样 **30 帧，包含第 0 帧和最后一帧**，观察 ranking 中的第一个 head：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m mydata_bench.basic_method.visualization \
+  --video --num-samples 30 --fps 5 \
+  --config mydata_bench/configs/v2_basic_method/grm_official.yaml \
+  --scope last_frame --top-k 8 \
+  --example-id suc/ljx_lfz_task_1_1/1 \
+  --example-id fail/ljx_lfz_task_1_1/1 \
+  --alpha 0.65 \
+  --output-dir results/mydata_bench/experiments_v2_basic_method/visualizations/grm_video_demo
+```
+
+也可以按目录和编号范围批量处理。例如处理 `fail/ljx_lfz_task_1_3/` 中编号 **5 到 20（包含两端）** 的所有样本：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m mydata_bench.basic_method.visualization \
+  --video --num-samples 30 --fps 5 --alpha 0.65 \
+  --sample-dir fail/ljx_lfz_task_1_3/ --start-id 5 --end-id 20 \
+  --scope last_frame --top-k 8 \
+  --output-dir results/mydata_bench/experiments_v2_basic_method/visualizations/fail_task1_3_id5_20
+```
+
+`--sample-dir` 是相对于数据集的样本目录，与 `example_id` 的父目录对应，末尾 `/` 可省略。编号按整数比较和排序，5–20 会按 5、6、…、20 依次处理；**目录模式默认处理全部匹配样本，不受默认前 4 条限制**。省略两端编号时处理该目录的全部已收录样本；只传一端表示不限另一端。不存在于冻结 `inputs.json` 中的编号不会新增或借用其他目录的样本。若显式传 `--limit`，则在目录与范围筛选后再限制条数。每条视频有自己的输出子目录，全部汇总到同一个 `index.html`，整个批次只加载一次模型。
+
+先检查批次清单，不启动推理：
+
+```bash
+python -m mydata_bench.basic_method.visualization \
+  --sample-dir fail/ljx_lfz_task_1_3/ --start-id 5 --end-id 20 --list-samples
+```
+
+目录与编号筛选同样支持静态图和 `--preflight`。它与 `--example-id` 互斥，不用于 `--render-only`。
+
+**只输出原视频和进度曲线：** 在现有命令上加 `--progress-only`，会自动启用视频模式，保留 GRM baseline 和 SAS 两种评分，跳过 attention 提取、数组保存和热图视频。目录及编号范围筛选照常使用：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m mydata_bench.basic_method.visualization \
+  --progress-only --num-samples 30 --fps 5 \
+  --sample-dir fail/ljx_lfz_task_1_3/ --start-id 5 --end-id 20 \
+  --scope last_frame --top-k 8 \
+  --output-dir results/mydata_bench/experiments_v2_basic_method/visualizations/fail_task1_3_progress_5_20
+```
+
+该模式每条样本输出 `original.mp4`（完整主视角原视频，保留原始 FPS 和时长）、`video_progress.mp4`（原画面与动态 GRM/SAS 曲线同步显示）、`progress_curve.png` 和 `progress_curve.csv`，另存逐采样时刻的预测 JSON、`progress_video_manifest.json` 和浏览页。`--fps` 只控制采样对照视频的播放速度，曲线横轴始终为源视频秒数。曲线直接使用各采样时刻的 forward progress，不做累积、平滑或单调化；无效输出显示为断点，CSV 中数值留空并保留状态，SAS 缺框回退用空心点标明。
+
+已有视频推理结果可以直接转换，无需重新推理，也不需要原 attention NPZ 文件：
+
+```bash
+python -m mydata_bench.basic_method.visualization \
+  --progress-only \
+  --render-only results/mydata_bench/experiments_v2_basic_method/visualizations/grm_sas_full_video_v1 \
+  --output-dir results/mydata_bench/experiments_v2_basic_method/visualizations/grm_progress_export
+```
+
+已生成 [原视频与进度曲线示例](results/mydata_bench/experiments_v2_basic_method/visualizations/grm_progress_only_demo_20260921/index.html)。`--render-only` 也能读取新模式的 `progress_video_manifest.json`，此时需保留 `--progress-only`。该模式下透明度、head 观察序号和热图色标参数不影响曲线；SAS 的 `--scope` 和 `--top-k` 仍决定实际评分条件。
+
+默认 attention 模式每条视频的输出目录包含：
+
+- `comparison.mp4`：原视频主视角 / GRM / GRM + SAS 三列同步播放，显示源帧、时间、progress 和原始 attention mass。
+- `baseline.mp4`、`sas.mp4`：两种条件的独立 attention 视频，编码为可在浏览器播放的 H.264。
+- `preview.png`、`contact_sheet.jpg`：中间帧预览和覆盖全程的四帧缩略图。
+- `attention/frame_*.npz`：所有观察 head 的原始 token 网格及完整 prompt-key 行；对应 JSON 保存每帧输入、精确框、预测、干预和回退记录。
+- `trajectory_inputs.json`、`attention_video_manifest.json`、`render.json`：三路源视频哈希、采样索引、实际输入、head、末帧与原实验输出的核对及渲染参数。
+
+根目录的 `index.html` 可以直接播放对照视频。`--num-samples` 指每条视频的采样帧数，`--limit` 指选择几条视频。也可用 `--frame-interval 20` 替代 `--num-samples`，每隔 20 个源帧采样，并额外保留最后一帧。默认 5 FPS 时，30 个采样帧播放 6 秒；`--fps 0` 使采样视频的播放时长约等于源视频时长。
+
+已生成 [整段视频示例浏览页](results/mydata_bench/experiments_v2_basic_method/visualizations/grm_sas_full_video_v1/index.html)：suc / fail 各一条，均覆盖源视频第 0–423 帧的 30 个采样时刻，观察 L19H23，SAS 干预 top-8。两条视频的末帧 baseline/SAS 输出均与原实验一致；六个 MP4 均已检查为 H.264、30 帧、5 FPS。
+
+**输入与 grounding：** 每个采样时刻重新构造一次 GRM forward 输入，reference / BEFORE 固定在起点，AFTER 的正面、左腕、右腕同时更新到当前源帧。`last_frame` 在视频模式下指当前 AFTER 正面帧；`all_frames` 指起点 reference、BEFORE 正面和当前 AFTER 正面。三路视频需按源帧号同步，程序校验视频身份及首尾缓存像素。继续使用已有的精确帧轨迹框；某个时刻缺少所需框时，在视频中保留该时刻并明确显示 baseline fallback。中间时刻是新增推理，末帧会与原实验的对应预测核对。
+
+**新版热图：** 使用双三次插值和平滑叠加，低 attention 区域提高透明度，保留原视频细节。默认 `--video-scale reference` 沿用参考脚本的逐图 min-max，色彩表示各图内部的相对空间强度；原始 image mass 和 target/image 比例单独显示。若要比较两种条件及整个时间轴上的绝对强度，使用 `--video-scale shared`，整段 baseline/SAS 共用一个色标。`--normalization image_fraction` 可用于先按各图总 mass 归一化；默认仍为 `raw`。平滑只影响显示，不修改原始数组和数值指标。
+
+`--video-head-index 0` 观察所选 head 列表的第一个，`1` 是第二个，`-1` 使用所有观察 head 的平均图；也可先通过 `--heads L19H23,L20H4` 指定观察列表。SAS 实际干预的 head 始终由该配置的 top-k ranking 决定。`--blur-sigma 3` 控制双三次放大后的空间平滑，单位为源图像像素，`0` 关闭附加 Gaussian 平滑。视频模式仅展示 `after_cam_high`；`--per-head` 只控制静态图。
+
+已经保存原始 attention 后，调整外观无需重新推理，也不需要 GPU：
+
+```bash
+python -m mydata_bench.basic_method.visualization \
+  --render-only results/mydata_bench/experiments_v2_basic_method/visualizations/grm_sas_full_video_v1 \
+  --video-head-index -1 --video-scale reference --alpha 0.65 --blur-sigma 5 --fps 5 \
+  --output-dir results/mydata_bench/experiments_v2_basic_method/visualizations/grm_video_mean_render
+```
+
+`--render-only` 接受原始视频结果根目录或某条视频目录，输出必须是新目录。只检查保存的 attention 和源图，不加载模型。需要先检查整段视频的三路同步、框和 token 几何，可在正常 `--video` 命令中添加 `--preflight`，使用另一新目录。
+
+### 静态端点图
+
 先查看样本 ID，不加载模型或处理器：
 
 ```bash
@@ -165,7 +255,8 @@ CUDA_VISIBLE_DEVICES=0 python -m mydata_bench.basic_method.visualization \
 | `--heads L19H23,L20H4` | 指定要观察的 head，层号和 head 号均从 0 开始；SAS 仍干预 ranking 的 top-k |
 | `--per-head 8` | 除平均图外，画前 8 个观察 head；`0` 只画平均图 |
 | `--subset task1_1 --split fail --holdout-only` | 按任务、成功／失败、holdout 筛选 |
-| `--limit 8` | 筛选后取前 8 条；默认前 4 条，显式提供 ID 时默认保留全部指定 ID；`0` 为全部匹配样本 |
+| `--sample-dir fail/ljx_lfz_task_1_3/ --start-id 5 --end-id 20` | 处理指定目录内编号 5–20 的全部已收录样本，包含两端，按编号升序 |
+| `--limit 8` | 筛选后取前 8 条；目录模式或显式提供 ID 时默认处理全部匹配样本，其他情况默认前 4 条；`0` 为全部匹配样本 |
 | `--normalization image_fraction` | 每幅图内 attention 归一化为总和 1，便于比较空间分布；默认 `raw` 保留原始概率 |
 | `--preflight` | 只加载处理器、检查框和 token 几何，不使用 GPU；也需要新的输出目录 |
 
@@ -186,7 +277,7 @@ Baseline/SAS 每对图使用**相同 head、相同色标**，不分别做 min-ma
 已生成 [两条样本的可视化示例](results/mydata_bench/experiments_v2_basic_method/visualizations/grm_sas_last_frame_top8_demo_20260914/index.html)（一条 suc、一条 fail；official / last_frame / top-8）。这两条样本重新生成的 baseline/SAS 输出均与已有实验记录一致。针对捕获概率、推理透传、因果 mask、统一色标和回退的测试可运行：
 
 ```bash
-python -m unittest discover -s tests -p test_basic_method_visualization.py -v
+python -m unittest discover -s tests -p 'test_basic_method_vi*.py' -v
 ```
 
 ## 文件与续跑
